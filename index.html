@@ -399,9 +399,20 @@ async function loadAllPlayers(){
   try{
     await callClaude({system:"Reply with the single word: ok", userMsg:"ok", maxTokens:10});
   }catch(e){
-    document.getElementById("load-title").textContent = "API Error";
-    document.getElementById("load-subtitle").textContent = e.message;
-    document.getElementById("load-errors").innerHTML = `<div class="error-msg">❌ API key error: ${e.message}<br><br>Please go back and check your API key.</div><button class="btn btn-gray" style="margin-top:10px;" onclick="showScreen('setup')">← Go Back</button>`;
+    const errMsg = e.message;
+    document.getElementById("load-title").textContent = "❌ API Error";
+    document.getElementById("load-subtitle").textContent = "Could not connect to Claude API";
+    document.getElementById("load-errors").innerHTML = 
+      `<div class="error-msg" style="font-size:14px;padding:14px;">
+        <strong>Error details:</strong><br><br>${errMsg}<br><br>
+        <strong>Common causes:</strong><br>
+        • API key entered incorrectly<br>
+        • No billing credit on your Anthropic account<br>
+        • Network connection issue<br><br>
+        This message will stay here until you go back.
+      </div>
+      <button class="btn btn-gray" style="margin-top:10px;" onclick="showScreen('setup')">← Go Back & Fix API Key</button>`;
+    // Do NOT return early with animation — stay on loading screen permanently
     return [];
   }
 
