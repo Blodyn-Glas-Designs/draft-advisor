@@ -8,7 +8,20 @@
 <meta name="apple-mobile-web-app-title" content="Draft Advisor">
 <meta name="theme-color" content="#0d1117">
 <meta name="mobile-web-app-capable" content="yes">
-<link rel="manifest" href="/draft-advisor/manifest.json">
+<link rel="manifest" href="data:application/json;charset=utf-8,{
+  &quot;name&quot;: &quot;Draft Advisor&quot;,
+  &quot;short_name&quot;: &quot;Draft&quot;,
+  &quot;start_url&quot;: &quot;.&quot;,
+  &quot;display&quot;: &quot;standalone&quot;,
+  &quot;background_color&quot;: &quot;#0d1117&quot;,
+  &quot;theme_color&quot;: &quot;#0d1117&quot;,
+  &quot;orientation&quot;: &quot;portrait&quot;,
+  &quot;icons&quot;: [{
+    &quot;src&quot;: &quot;data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>⚽</text></svg>&quot;,
+    &quot;sizes&quot;: &quot;any&quot;,
+    &quot;type&quot;: &quot;image/svg+xml&quot;
+  }]
+}">
 <title>Draft Advisor</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
@@ -193,33 +206,31 @@
       <span style="color:#f59e0b;font-weight:700;font-size:13px;" id="captain-banner-text"></span>
     </div>
 
-    <div id="main-layout" style="display:flex;flex:1;overflow:hidden;flex-direction:column;">
-      <!-- bottom nav (or side nav on wide) -->
-      <div id="bottomnav">
-        <button class="nav-btn" data-tab="draft" onclick="showTab('draft')">
-          <span class="icon">🏟️</span><span>Draft</span>
-        </button>
-        <button class="nav-btn active" data-tab="myteam" onclick="showTab('myteam')">
-          <span class="icon">👤</span><span>My Team</span>
-        </button>
-        <button class="nav-btn" data-tab="friends" onclick="showTab('friends')">
-          <span class="icon">👥</span><span>Friends</span>
-        </button>
-        <button class="nav-btn" data-tab="league" onclick="showTab('league')">
-          <span class="icon">📊</span><span>League</span>
-        </button>
-        <button class="nav-btn" data-tab="settings" onclick="showTab('settings')">
-          <span class="icon">⚙️</span><span>Settings</span>
-        </button>
-      </div>
+    <!-- TAB CONTENTS — fills space between banners and nav -->
+    <div id="tab-draft" class="scroll" style="display:none;flex:1;"></div>
+    <div id="tab-myteam" class="scroll" style="display:none;flex:1;"></div>
+    <div id="tab-friends" class="scroll" style="display:none;flex:1;"></div>
+    <div id="tab-league" class="scroll" style="display:none;flex:1;padding:14px;"></div>
+    <div id="tab-settings" class="scroll" style="display:none;flex:1;padding:14px;"></div>
+    <div id="tab-advice" class="scroll" style="display:none;flex:1;padding:14px;"></div>
 
-      <!-- TAB CONTENTS -->
-      <div id="tab-draft" class="scroll" style="display:none;"></div>
-      <div id="tab-myteam" class="scroll" style="display:flex;flex-direction:column;"></div>
-      <div id="tab-friends" class="scroll" style="display:none;"></div>
-      <div id="tab-league" class="scroll" style="display:none;padding:14px;"></div>
-      <div id="tab-settings" class="scroll" style="display:none;padding:14px;"></div>
-      <div id="tab-advice" class="scroll" style="display:none;padding:14px;"></div>
+    <!-- bottom nav always at bottom -->
+    <div id="bottomnav">
+      <button class="nav-btn" data-tab="draft" onclick="showTab('draft')">
+        <span class="icon">🏟️</span><span>Draft</span>
+      </button>
+      <button class="nav-btn" data-tab="myteam" onclick="showTab('myteam')">
+        <span class="icon">👤</span><span>My Team</span>
+      </button>
+      <button class="nav-btn" data-tab="friends" onclick="showTab('friends')">
+        <span class="icon">👥</span><span>Friends</span>
+      </button>
+      <button class="nav-btn" data-tab="league" onclick="showTab('league')">
+        <span class="icon">📊</span><span>League</span>
+      </button>
+      <button class="nav-btn" data-tab="settings" onclick="showTab('settings')">
+        <span class="icon">⚙️</span><span>Settings</span>
+      </button>
     </div>
   </div>
 
@@ -321,14 +332,22 @@ function initTeams(){
 
 // ── API CALL ───────────────────────────────────────────────────────────────────
 async function callClaude({system, userMsg, maxTokens=1500}){
-  const r = await fetch("https://api.anthropic.com/v1/messages",{
-    method:"POST",
-    headers:{"Content-Type":"application/json","x-api-key":S.apiKey,"anthropic-version":"2023-06-01"},
-    body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:maxTokens,system,messages:[{role:"user",content:userMsg}]})
-  });
-  const d = await r.json();
-  if(d.error) throw new Error(d.error.message);
-  return (d.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("\n");
+  if(!S.apiKey) throw new Error("No API key set — please add it in Settings");
+  let d;
+  try{
+    const r = await fetch("https://api.anthropic.com/v1/messages",{
+      method:"POST",
+      headers:{"Content-Type":"application/json","x-api-key":S.apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+      body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:maxTokens,system,messages:[{role:"user",content:userMsg}]})
+    });
+    d = await r.json();
+  }catch(e){
+    throw new Error("Network error: "+e.message);
+  }
+  if(d.error) throw new Error(d.error.type+": "+d.error.message);
+  const text=(d.content||[]).filter(b=>b.type==="text").map(b=>b.text).join("\n");
+  if(!text) throw new Error("Empty response from API (stop_reason="+d.stop_reason+")");
+  return text;
 }
 
 // ── JSON EXTRACT ───────────────────────────────────────────────────────────────
@@ -375,6 +394,16 @@ async function loadAllPlayers(){
   const clubCounts = {};
   const errors = [];
   let pool = [];
+
+  // Test API key first with a minimal call
+  try{
+    await callClaude({system:"Reply with the single word: ok", userMsg:"ok", maxTokens:10});
+  }catch(e){
+    document.getElementById("load-title").textContent = "API Error";
+    document.getElementById("load-subtitle").textContent = e.message;
+    document.getElementById("load-errors").innerHTML = `<div class="error-msg">❌ API key error: ${e.message}<br><br>Please go back and check your API key.</div><button class="btn btn-gray" style="margin-top:10px;" onclick="showScreen('setup')">← Go Back</button>`;
+    return [];
+  }
 
   for(let i=0;i<PL_CLUBS.length;i++){
     const club = PL_CLUBS[i];
@@ -1444,10 +1473,10 @@ function doReset(){
 
 // ── TAB NAVIGATION ─────────────────────────────────────────────────────────────
 function showTab(tabId){
-  document.querySelectorAll("[id^='tab-']").forEach(el=>el.style.display="none");
+  document.querySelectorAll("[id^='tab-']").forEach(el=>{ el.style.display="none"; el.style.flex=""; });
   document.querySelectorAll(".nav-btn").forEach(b=>b.classList.remove("active"));
   const tabEl=document.getElementById("tab-"+tabId);
-  if(tabEl) tabEl.style.display="flex";
+  if(tabEl){ tabEl.style.display="flex"; tabEl.style.flex="1"; tabEl.style.flexDirection="column"; }
   document.querySelectorAll(`.nav-btn[data-tab='${tabId}']`).forEach(b=>b.classList.add("active"));
 
   // Render content
