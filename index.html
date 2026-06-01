@@ -1542,7 +1542,15 @@ document.getElementById("setup-btn").addEventListener("click", async()=>{
   initTeams();
   saveAll();
 
-  await loadAllPlayers();
+  const pool = await loadAllPlayers();
+
+  // Only proceed to main screen if we got players back
+  // If there was an API error, loadAllPlayers shows the error and returns []
+  // and we stay on the loading screen so the user can read the message
+  if(pool.length === 0 && document.getElementById("load-errors").innerHTML !== ""){
+    // Error already shown on loading screen — don't navigate away
+    return;
+  }
 
   showScreen("main");
   renderTopBar();
