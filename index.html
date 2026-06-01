@@ -27,9 +27,11 @@
 <style>
   *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
   html,body{height:100%;background:#0d1117;color:#f0f6fc;font-family:system-ui,-apple-system,sans-serif;overflow:hidden;}
-  #app{height:100vh;height:100dvh;display:flex;flex-direction:column;}
-  .screen{display:none;flex:1;overflow:hidden;flex-direction:column;}
+  #app{height:100vh;height:100dvh;display:flex;flex-direction:column;overflow:hidden;}
+  .screen{display:none;flex:1;overflow:hidden;flex-direction:column;min-height:0;}
   .screen.active{display:flex;}
+  #main-screen{display:none;flex-direction:column;height:100%;overflow:hidden;}
+  #main-screen.active{display:flex;}
   /* top bar */
   #topbar{background:#161b22;border-bottom:1px solid #30363d;padding:10px 14px;display:flex;align-items:center;gap:10px;flex-shrink:0;padding-top:max(10px,env(safe-area-inset-top));}
   #topbar h1{font-size:15px;font-weight:700;color:#f0f6fc;flex:1;}
@@ -40,7 +42,7 @@
   .nav-btn.my-turn{border-top-color:#10b981;color:#10b981;}
   .nav-btn span.icon{font-size:20px;}
   /* scrollable content */
-  .scroll{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;}
+  .scroll{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;min-height:0;}
   /* cards */
   .card{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:14px;margin-bottom:10px;}
   /* buttons */
@@ -242,8 +244,52 @@
 
 <script>
 // ── CONSTANTS ──────────────────────────────────────────────────────────────────
-const PL_CLUBS = ["Arsenal","Aston Villa","Bournemouth","Brentford","Brighton","Chelsea","Crystal Palace","Everton","Fulham","Ipswich Town","Leicester City","Liverpool","Manchester City","Manchester United","Newcastle United","Nottingham Forest","Southampton","Tottenham Hotspur","West Ham United","Wolverhampton Wanderers"];
-const CLUB_COLORS = {"Arsenal":"#EF0107","Aston Villa":"#670E36","Bournemouth":"#B50E12","Brentford":"#FF2014","Brighton":"#0057B8","Chelsea":"#034694","Crystal Palace":"#C4122E","Everton":"#274488","Fulham":"#aaaaaa","Ipswich Town":"#3A64A3","Leicester City":"#003090","Liverpool":"#C8102E","Manchester City":"#6CABDD","Manchester United":"#DA291C","Newcastle United":"#41B4D2","Nottingham Forest":"#DD0000","Southampton":"#D71920","Tottenham Hotspur":"#FFFFFF","West Ham United":"#7A263A","Wolverhampton Wanderers":"#FDB913"};
+// PL_CLUBS is populated dynamically at load time — see fetchPLClubs()
+let PL_CLUBS = [];
+const CLUB_COLORS = {
+  "Arsenal":"#EF0107","Aston Villa":"#670E36","Bournemouth":"#B50E12",
+  "Brentford":"#FF2014","Brighton":"#0057B8","Burnley":"#6C1D45",
+  "Chelsea":"#034694","Crystal Palace":"#C4122E","Everton":"#274488",
+  "Fulham":"#aaaaaa","Ipswich Town":"#3A64A3","Leeds United":"#FFCD00",
+  "Leicester City":"#003090","Liverpool":"#C8102E","Manchester City":"#6CABDD",
+  "Manchester United":"#DA291C","Newcastle United":"#41B4D2",
+  "Nottingham Forest":"#DD0000","Southampton":"#D71920","Sunderland":"#EB172B",
+  "Tottenham Hotspur":"#132257","West Ham United":"#7A263A",
+  "Wolverhampton Wanderers":"#FDB913","Luton Town":"#F78F1E",
+  "Sheffield United":"#EE2737","Middlesbrough":"#E31B23",
+  "Coventry City":"#84B0D8","Norwich City":"#00A650",
+  "Blackburn Rovers":"#009EE0","Hull City":"#F5A12D",
+  "Derby County":"#1D2C5E","Preston North End":"#FFFFFF",
+  "Swansea City":"#FFFFFF","Cardiff City":"#003399",
+  "Millwall":"#001D5E","QPR":"#1D5BA4","Stoke City":"#E03A3E",
+};
+function getClubColor(club){ return CLUB_COLORS[club] || "#6b7280"; }
+
+async function fetchPLClubs(){
+  const today = new Date().toDateString();
+  try{
+    document.getElementById("load-subtitle").textContent = "Finding Premier League clubs for upcoming season...";
+    const raw = await callClaude({
+      maxTokens: 300,
+      system: `You are a football expert. Today is ${today}. Return ONLY a JSON array of exactly 20 strings — the official names of all 20 Premier League clubs for the NEXT upcoming season (the season that hasn't started yet or is about to start). Account for any promotions and relegations. No markdown, no explanation. Start with [.`,
+      userMsg: "Which 20 clubs are in the Premier League for the next upcoming season? Return as JSON array of club names only."
+    });
+    const parsed = JSON.parse(raw.slice(raw.indexOf("["), raw.lastIndexOf("]")+1));
+    if(Array.isArray(parsed) && parsed.length === 20){
+      console.log("Dynamic PL clubs loaded:", parsed);
+      return parsed;
+    }
+    throw new Error("Did not get 20 clubs");
+  }catch(e){
+    console.warn("Dynamic club fetch failed, using fallback:", e.message);
+    // Fallback to a reasonable default list
+    return ["Arsenal","Aston Villa","Bournemouth","Brentford","Brighton","Chelsea",
+            "Crystal Palace","Everton","Fulham","Leeds United","Liverpool",
+            "Manchester City","Manchester United","Newcastle United",
+            "Nottingham Forest","Sunderland","Tottenham Hotspur",
+            "West Ham United","Wolverhampton Wanderers","Burnley"];
+  }
+}
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 const TOTAL_PICKS = 17;
 const CHART_COLORS = ["#10b981","#3b82f6","#f59e0b","#ef4444","#8b5cf6","#ec4899","#06b6d4","#84cc16","#f97316","#a855f7","#14b8a6","#eab308"];
@@ -412,9 +458,12 @@ async function loadAllPlayers(){
         This message will stay here until you go back.
       </div>
       <button class="btn btn-gray" style="margin-top:10px;" onclick="showScreen('setup')">← Go Back & Fix API Key</button>`;
-    // Do NOT return early with animation — stay on loading screen permanently
     return [];
   }
+
+  // Dynamically fetch the correct 20 PL clubs for the upcoming season
+  PL_CLUBS = await fetchPLClubs();
+  document.getElementById("load-subtitle").textContent = `Found ${PL_CLUBS.length} clubs. Loading squads...`;
 
   for(let i=0;i<PL_CLUBS.length;i++){
     const club = PL_CLUBS[i];
@@ -781,7 +830,7 @@ function renderClubGrid(el){
     const total = S.playerPool.filter(p=>p.club===club).length;
     const picked = total - clubAvail.length;
     const blocked = isClubBlocked(picker, club);
-    const col = CLUB_COLORS[club]||"#30363d";
+    const col = getClubColor(club);
     const gray = clubAvail.length===0||blocked ? " grayed" : "";
     const blockLabel = blocked ? `<div style="color:#ef4444;font-size:10px;">Limit reached</div>` : "";
     html += `<button class="club-btn${gray}" onclick="selectClub('${club}')" style="border-color:${col};">
@@ -816,7 +865,7 @@ function selectClub(club){
 function renderClubPlayers(el){
   const picker = currentPicker();
   const avail = available().filter(p=>p.club===selectedClub && (posFilter==="ALL"||p.position===posFilter));
-  const col = CLUB_COLORS[selectedClub]||"#fff";
+  const col = getClubColor(selectedClub);
 
   let html = `<div style="padding:12px 14px;">
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;">
