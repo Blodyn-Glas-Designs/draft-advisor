@@ -154,12 +154,14 @@ label.lbl{display:block;color:#8b949e;font-size:11px;text-transform:uppercase;le
     <div id="tab-league" class="tab-content"></div>
     <div id="tab-advice" class="tab-content"></div>
     <div id="tab-settings" class="tab-content"></div>
+    <div id="tab-pool" class="tab-content"></div>
     <div id="bottomnav">
       <button class="nav-btn" data-tab="draft" onclick="showTab('draft')"><span class="icon">&#x1F3DF;</span><span>Draft</span></button>
       <button class="nav-btn" data-tab="myteam" onclick="showTab('myteam')"><span class="icon">&#x1F464;</span><span>My Team</span></button>
       <button class="nav-btn" data-tab="friends" onclick="showTab('friends')"><span class="icon">&#x1F465;</span><span>Friends</span></button>
       <button class="nav-btn" data-tab="league" onclick="showTab('league')"><span class="icon">&#x1F4CA;</span><span>League</span></button>
       <button class="nav-btn" data-tab="advice" onclick="showTab('advice')"><span class="icon">&#x1F916;</span><span>Advice</span></button>
+      <button class="nav-btn" data-tab="pool" onclick="showTab('pool')" style="display:none;"><span class="icon">&#x1F30D;</span><span>Pool</span></button>
       <button class="nav-btn" data-tab="settings" onclick="showTab('settings')"><span class="icon">&#x2699;</span><span>Settings</span></button>
     </div>
   </div>
@@ -450,8 +452,9 @@ function proceedToApp(){
   renderTopBar();
   checkAdviceBanner();
   checkCaptainBanner();
-  showTab(S.draftDone?S.defaultTab:"draft");
+  showTab(S.draftDone?(S.defaultTab||"myteam"):"draft");
   if(isMyTurn()&&!S.draftDone) generateAdvice();
+  document.querySelectorAll(".nav-btn[data-tab='pool']").forEach(function(b){b.style.display=S.draftDone?"":"none";});
 }
 
 // ── FPL SCORE REFRESH ──────────────────────────────────────────────────────────
@@ -764,6 +767,7 @@ function confirmEndDraft(){
 function endDraft(){
   S.draftDone=true; S.hideDraft=true;
   saveAll(); closeModal(); renderTopBar();
+  document.querySelectorAll(".nav-btn[data-tab='pool']").forEach(function(b){b.style.display="";});
   showTab(S.defaultTab||"myteam");
 }
 
@@ -1122,8 +1126,10 @@ function autoFillDraft(){
     S.scores[gw]=gwScores;
   }
   S.currentGW=5;
+  S.draftDone=true; S.hideDraft=true;
   saveAll();
   renderTopBar(); checkCaptainBanner();
+  document.querySelectorAll(".nav-btn[data-tab='pool']").forEach(function(b){b.style.display="";});
   showToast("Test data filled — 5 GWs of fake scores generated!");
   closeModal();
   showTab("myteam");
@@ -1139,9 +1145,10 @@ function showTab(tabId){
   if(tabId==="draft") renderDraftTab();
   else if(tabId==="myteam") renderMyTeamTab();
   else if(tabId==="friends") renderFriendsTab();
-  else if(tabId==="league") renderLeagueTab();
+  else if(tabId==="league") renderLeagueTab().then(function(){setTimeout(drawExtraCharts,150);});
   else if(tabId==="advice") renderAdviceTab();
   else if(tabId==="settings") renderSettingsTab();
+  else if(tabId==="pool") renderPoolTab();
 }
 function showScreen(id){
   document.querySelectorAll(".screen").forEach(function(s){s.classList.remove("active");});
@@ -1211,10 +1218,255 @@ document.addEventListener("DOMContentLoaded",function(){
     showScreen("main");
     renderTopBar(); checkAdviceBanner(); checkCaptainBanner();
     showTab(S.draftDone?(S.defaultTab||"myteam"):"draft");
+  // Show/hide pool tab based on draft completion
+  document.querySelectorAll(".nav-btn[data-tab='pool']").forEach(function(b){b.style.display=S.draftDone?"":"none";});
   } else {
     showScreen("setup");
   }
 });
+
+// ── POOL TAB ───────────────────────────────────────────────────────────────────
+var poolClubFilter="ALL",poolPosFilter="ALL",poolSort="pts_desc",poolShow="all";
+
+function renderPoolTab(){
+  var el=document.getElementById("tab-pool");
+  if(!el) return;
+  var allPlayers=S.playerPool.slice();
+  // Attach draft info and current season points to each player
+  allPlayers=allPlayers.map(function(p){
+    var key=p.name+"|"+p.club;
+    var picker=S.pickedMap[key]||null;
+    var pts=0;
+    for(var g=1;g<=S.currentGW;g++) pts+=(S.scores[g]||{})[key]||0;
+    return Object.assign({},p,{picker:picker,seasonPts:pts});
+  });
+
+  // Top undrafted scorers
+  var undrafted=allPlayers.filter(function(p){return !p.picker;}).sort(function(a,b){return b.seasonPts-a.seasonPts;});
+  var topMiss=undrafted[0]||null;
+
+  // Filters
+  var filtered=allPlayers.slice();
+  if(poolClubFilter!=="ALL") filtered=filtered.filter(function(p){return p.club===poolClubFilter;});
+  if(poolPosFilter!=="ALL") filtered=filtered.filter(function(p){return p.position===poolPosFilter;});
+  if(poolShow==="undrafted") filtered=filtered.filter(function(p){return !p.picker;});
+  if(poolShow==="drafted") filtered=filtered.filter(function(p){return !!p.picker;});
+
+  // Sort
+  filtered.sort(function(a,b){
+    if(poolSort==="pts_desc") return b.seasonPts-a.seasonPts;
+    if(poolSort==="pts_asc") return a.seasonPts-b.seasonPts;
+    if(poolSort==="rating") return b.rating-a.rating;
+    if(poolSort==="name") return a.name.localeCompare(b.name);
+    return 0;
+  });
+
+  var posColors={GK:"#f59e0b",DEF:"#3b82f6",MID:"#10b981",ATT:"#ef4444"};
+  var html='<div style="padding:14px;overflow-y:auto;flex:1;">';
+
+  // Summary strip
+  html+='<div class="stat-grid" style="margin-bottom:12px;">'
+    +'<div class="stat-card"><div class="sv">'+undrafted.length+'</div><div class="sl">Undrafted Players</div></div>'
+    +'<div class="stat-card"><div class="sv">'+(topMiss?topMiss.seasonPts:0)+'</div><div class="sl">'+(topMiss?"Best Undrafted ("+topMiss.name+")":"Best Undrafted")+'</div></div>'
+    +'</div>';
+
+  // Filter bar
+  html+='<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;">';
+
+  // Club dropdown
+  html+='<select onchange="poolClubFilter=this.value;renderPoolTab();" style="flex:1;min-width:120px;padding:8px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#f0f6fc;font-size:13px;font-family:inherit;">';
+  html+='<option value="ALL"'+(poolClubFilter==="ALL"?" selected":"")+'>All Clubs</option>';
+  PL_CLUBS.forEach(function(c){html+='<option value="'+c+'"'+(poolClubFilter===c?" selected":"")+'>'+c+'</option>';});
+  html+='</select>';
+
+  // Position filter
+  html+='<select onchange="poolPosFilter=this.value;renderPoolTab();" style="padding:8px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#f0f6fc;font-size:13px;font-family:inherit;">';
+  ["ALL","GK","DEF","MID","ATT"].forEach(function(pos){html+='<option value="'+pos+'"'+(poolPosFilter===pos?" selected":"")+'>'+pos+'</option>';});
+  html+='</select>';
+
+  // Sort
+  html+='<select onchange="poolSort=this.value;renderPoolTab();" style="padding:8px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#f0f6fc;font-size:13px;font-family:inherit;">';
+  [["pts_desc","Pts (High)"],["pts_asc","Pts (Low)"],["rating","Rating"],["name","Name"]].forEach(function(o){html+='<option value="'+o[0]+'"'+(poolSort===o[0]?" selected":"")+'>'+o[1]+'</option>';});
+  html+='</select>';
+
+  // Show filter
+  html+='<select onchange="poolShow=this.value;renderPoolTab();" style="padding:8px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#f0f6fc;font-size:13px;font-family:inherit;">';
+  [["all","All Players"],["undrafted","Undrafted"],["drafted","Drafted"]].forEach(function(o){html+='<option value="'+o[0]+'"'+(poolShow===o[0]?" selected":"")+'>'+o[1]+'</option>';});
+  html+='</select>';
+
+  html+='</div>';
+
+  // Player count
+  html+='<div style="color:#484f58;font-size:12px;margin-bottom:10px;">'+filtered.length+' players</div>';
+
+  // Player list
+  filtered.forEach(function(p){
+    var dim=p.picker?0.5:1;
+    var borderCol=p.picker?"#21262d":"#30363d";
+    var pickerLabel=p.picker?'<span style="font-size:11px;color:#8b949e;margin-left:6px;">Picked by '+p.picker+'</span>':'<span style="font-size:11px;color:#10b981;margin-left:6px;">Available</span>';
+    html+='<div style="background:#161b22;border:1px solid '+borderCol+';border-radius:10px;padding:10px 14px;margin-bottom:5px;opacity:'+dim+';">'
+      +'<div style="display:flex;align-items:center;gap:10px;">'
+      +'<span class="badge badge-'+p.position+'">'+p.position+'</span>'
+      +'<div style="flex:1;">'
+      +'<div style="font-size:14px;font-weight:700;color:#f0f6fc;">'+p.name+pickerLabel+'</div>'
+      +'<div style="font-size:12px;color:#8b949e;">'+p.club+' &middot; &pound;'+p.fplPrice+'m &middot; &#x2B50;'+p.rating+'/10</div>'
+      +'</div>'
+      +'<div style="text-align:right;">'
+      +'<div style="color:#10b981;font-size:16px;font-weight:700;">'+p.seasonPts+'pts</div>'
+      +'<div style="color:#484f58;font-size:11px;">this season</div>'
+      +'</div></div></div>';
+  });
+
+  if(filtered.length===0) html+='<div style="padding:30px;text-align:center;color:#484f58;">No players match these filters</div>';
+  html+='</div>';
+  el.innerHTML=html;
+}
+
+// ── ENHANCED STATS ─────────────────────────────────────────────────────────────
+function renderStatsSection(standings){
+  var allPts=[];
+  S.draftOrder.forEach(function(name){
+    var t=S.teams[name]||{};
+    ["GK","DEF","MID","ATT"].forEach(function(pos){
+      (t[pos]||[]).forEach(function(p){
+        allPts.push({name:p.name,club:p.club,pos:p.position,owner:name,pts:getPlayerPts(p.name+"|"+p.club,name)});
+      });
+    });
+  });
+  allPts.sort(function(a,b){return b.pts-a.pts;});
+  var top5=allPts.slice(0,5);
+  var bot5=allPts.slice(-5).reverse();
+
+  var bestGW=S.draftOrder.map(function(name){
+    var best=0,bestG=0;
+    for(var g=1;g<=S.currentGW;g++){var pts=getPersonGWPts(name,g);if(pts>best){best=pts;bestG=g;}}
+    return {name:name,pts:best,gw:bestG};
+  }).sort(function(a,b){return b.pts-a.pts;});
+
+  var html='';
+
+  // Top/bottom players
+  html+='<div class="sec-hdr">Top 5 Individual Players</div><table class="tbl" style="margin-bottom:16px;"><thead><tr><th>#</th><th>Player</th><th>Club</th><th>Owner</th><th>Pts</th></tr></thead><tbody>';
+  top5.forEach(function(p,i){html+='<tr><td>'+(i+1)+'</td><td><span class="badge badge-'+p.pos+'">'+p.pos+'</span> '+p.name+'</td><td style="font-size:12px;">'+p.club+'</td><td style="font-size:12px;">'+p.owner+'</td><td style="color:#10b981;font-weight:700;">'+p.pts+'</td></tr>';});
+  html+='</tbody></table>';
+
+  html+='<div class="sec-hdr">Bottom 5 Individual Players</div><table class="tbl" style="margin-bottom:16px;"><thead><tr><th>#</th><th>Player</th><th>Club</th><th>Owner</th><th>Pts</th></tr></thead><tbody>';
+  bot5.forEach(function(p,i){html+='<tr><td>'+(i+1)+'</td><td><span class="badge badge-'+p.pos+'">'+p.pos+'</span> '+p.name+'</td><td style="font-size:12px;">'+p.club+'</td><td style="font-size:12px;">'+p.owner+'</td><td style="color:#ef4444;font-weight:700;">'+p.pts+'</td></tr>';});
+  html+='</tbody></table>';
+
+  // Best GW
+  html+='<div class="sec-hdr">Best Single Gameweek</div><table class="tbl" style="margin-bottom:16px;"><thead><tr><th>Name</th><th>Best GW</th><th>Points</th></tr></thead><tbody>';
+  bestGW.forEach(function(b){html+='<tr><td style="font-weight:700;">'+b.name+(b.name===S.myName?" &#x1F464;":"")+'</td><td>GW'+(b.gw||"-")+'</td><td style="color:#10b981;font-weight:700;">'+b.pts+'</td></tr>';});
+  html+='</tbody></table>';
+
+  // Week by week rank changes
+  html+='<div class="sec-hdr">Gameweek Rank Changes</div>';
+  html+='<div style="overflow-x:auto;margin-bottom:16px;"><table class="tbl"><thead><tr><th>Name</th>';
+  for(var g=1;g<=Math.min(S.currentGW,10);g++) html+='<th>GW'+g+'</th>';
+  html+='</tr></thead><tbody>';
+  S.draftOrder.forEach(function(name){
+    html+='<tr><td style="font-weight:700;">'+name+(name===S.myName?" &#x1F464;":"")+'</td>';
+    var prevRank=null;
+    for(var g=1;g<=Math.min(S.currentGW,10);g++){
+      var ranked=S.draftOrder.map(function(n){return {name:n,pts:getPersonTotalPts(n,g)};}).sort(function(a,b){return b.pts-a.pts;});
+      var rank=ranked.findIndex(function(r){return r.name===name;})+1;
+      var arrow="";
+      if(prevRank!==null){
+        if(rank<prevRank) arrow='<span style="color:#10b981;">&#x25B2;</span>';
+        else if(rank>prevRank) arrow='<span style="color:#ef4444;">&#x25BC;</span>';
+        else arrow='<span style="color:#484f58;">&#x2014;</span>';
+      }
+      html+='<td style="font-size:12px;">'+arrow+rank+'</td>';
+      prevRank=rank;
+    }
+    html+='</tr>';
+  });
+  html+='</tbody></table></div>';
+
+  // Points by position chart
+  html+='<div class="sec-hdr">Points by Position</div>';
+  html+='<div class="chart-wrap"><canvas id="pos-chart"></canvas></div>';
+
+  // Monthly performance chart
+  html+='<div class="sec-hdr">Monthly Performance</div>';
+  html+='<div class="chart-wrap"><canvas id="monthly-chart"></canvas></div>';
+
+  // Captain efficiency
+  html+='<div class="sec-hdr">Captain Efficiency</div>';
+  html+='<table class="tbl" style="margin-bottom:16px;"><thead><tr><th>Name</th><th>Captain</th><th>Cap Pts</th><th>Best Player</th><th>Best Pts</th><th>Efficiency</th></tr></thead><tbody>';
+  S.draftOrder.forEach(function(name){
+    var cap=S.captains[name];
+    if(!cap) return;
+    var capKey=cap.player.name+"|"+cap.player.club;
+    var capPts=getPlayerPts(capKey,name);
+    // Find best non-captain player
+    var team=S.teams[name]||{},bestPts=0,bestName="";
+    ["GK","DEF","MID","ATT"].forEach(function(pos){
+      (team[pos]||[]).forEach(function(p){
+        var key=p.name+"|"+p.club;
+        if(key===capKey) return;
+        var pts=getPlayerPts(key,name);
+        if(pts>bestPts){bestPts=pts;bestName=p.name;}
+      });
+    });
+    var rawCapPts=Math.round(capPts/2); // un-double to compare fairly
+    var efficient=rawCapPts>=bestPts;
+    html+='<tr><td style="font-weight:700;">'+name+'</td><td style="font-size:12px;">'+cap.player.name+'</td><td style="color:#10b981;">'+rawCapPts+'</td><td style="font-size:12px;">'+bestName+'</td><td>'+bestPts+'</td><td>'+(efficient?'<span style="color:#10b981;">&#x2713; Good</span>':'<span style="color:#ef4444;">&#x2717; Suboptimal</span>')+'</td></tr>';
+  });
+  html+='</tbody></table>';
+
+  return html;
+}
+
+function drawExtraCharts(){
+  drawPosChart();
+  drawMonthlyChart();
+}
+
+function drawPosChart(){
+  var ctx=document.getElementById("pos-chart");
+  if(!ctx) return;
+  var positions=["GK","DEF","MID","ATT"];
+  var datasets=S.draftOrder.map(function(name,i){
+    return {
+      label:name,
+      data:positions.map(function(pos){
+        var t=S.teams[name]||{},total=0;
+        (t[pos]||[]).forEach(function(p){total+=getPlayerPts(p.name+"|"+p.club,name);});
+        return total;
+      }),
+      backgroundColor:CHART_COLORS[i%CHART_COLORS.length]+"99",
+      borderColor:CHART_COLORS[i%CHART_COLORS.length],
+      borderWidth:1
+    };
+  });
+  new Chart(ctx,{type:"bar",data:{labels:positions,datasets:datasets},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:"#8b949e",font:{size:11}}}},scales:{x:{ticks:{color:"#484f58"}},y:{ticks:{color:"#484f58"},grid:{color:"#21262d"}}}}});
+}
+
+function drawMonthlyChart(){
+  var ctx=document.getElementById("monthly-chart");
+  if(!ctx) return;
+  // Group gameweeks by month (approx: 4 GWs per month starting Aug)
+  var months=["Aug","Sep","Oct","Nov","Dec","Jan","Feb","Mar","Apr","May"];
+  var gwPerMonth=Math.ceil(38/months.length);
+  var labels=[];
+  var monthData={};
+  S.draftOrder.forEach(function(name){monthData[name]=[];});
+  for(var m=0;m<months.length;m++){
+    var startGW=m*gwPerMonth+1,endGW=Math.min((m+1)*gwPerMonth,S.currentGW);
+    if(startGW>S.currentGW) break;
+    labels.push(months[m]);
+    S.draftOrder.forEach(function(name){
+      var total=0;
+      for(var g=startGW;g<=endGW;g++) total+=getPersonGWPts(name,g);
+      monthData[name].push(total);
+    });
+  }
+  var datasets=S.draftOrder.map(function(name,i){
+    return {label:name,data:monthData[name],backgroundColor:CHART_COLORS[i%CHART_COLORS.length]+"99",borderColor:CHART_COLORS[i%CHART_COLORS.length],borderWidth:1};
+  });
+  new Chart(ctx,{type:"bar",data:{labels:labels,datasets:datasets},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:"#8b949e",font:{size:11}}}},scales:{x:{ticks:{color:"#484f58"}},y:{ticks:{color:"#484f58"},grid:{color:"#21262d"}}}}});
+}
 
 </script>
 </body>
