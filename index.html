@@ -769,8 +769,9 @@ function isClubBlocked(pickerName, club){
 }
 
 // ── DRAFT CORE ─────────────────────────────────────────────────────────────────
-function currentPicker(){ return S.snakeOrder[S.pickIdx]||"—"; }
+function currentPicker(){ return S.snakeOrder[S.pickIdx]||null; }
 function isMyTurn(){ return currentPicker()===S.myName; }
+function draftComplete(){ return S.pickIdx >= S.snakeOrder.length; }
 
 function available(){
   return S.playerPool.filter(p=>!S.pickedMap[p.name+"|"+p.club]);
@@ -864,16 +865,144 @@ Return JSON only: {"pick":{"name":"","club":"","position":"","fplPrice":0,"lastS
   renderAdviceTab();
 }
 
+// ── AUTO FILL (test data) ─────────────────────────────────────────────────────
+function autoFillDraft(){
+  if(S.playerPool.length === 0){
+    showToast("Load players first before auto-filling.");
+    return;
+  }
+
+  // Reset draft state but keep pool and settings
+  S.pickedMap = {};
+  S.teams = {};
+  S.pickIdx = 0;
+  S.draftDone = false;
+  S.hideDraft = false;
+  S.history = [];
+  S.advice = null;
+  initTeams();
+
+  // Shuffle pool copy
+  const shuffled = [...S.playerPool].sort(()=>Math.random()-0.5);
+  let poolIdx = 0;
+
+  // Go through entire snake order and assign players
+  for(let i=0; i<S.snakeOrder.length; i++){
+    const picker = S.snakeOrder[i];
+    const team = S.teams[picker];
+
+    // Find what slots this picker still needs
+    const needs = [];
+    Object.entries(SLOTS).forEach(([pos, needed])=>{
+      const have = (team[pos]||[]).length;
+      if(have < needed) needs.push(pos);
+    });
+    if(needs.length === 0) continue;
+
+    // Pick the first slot needed
+    const targetPos = needs[0];
+
+    // Find next available player of that position not already picked
+    // that doesn't violate club limit
+    let assigned = false;
+    let attempts = 0;
+    while(poolIdx < shuffled.length && attempts < shuffled.length){
+      const p = shuffled[poolIdx % shuffled.length];
+      poolIdx++;
+      attempts++;
+      const key = p.name+"|"+p.club;
+      if(S.pickedMap[key]) continue;
+      // For non-WC slots check position matches
+      if(targetPos !== "WC" && p.position !== targetPos) continue;
+      // Check club limit (skip for WC)
+      if(targetPos !== "WC" && isClubBlocked(picker, p.club)) continue;
+
+      S.pickedMap[key] = picker;
+      team[targetPos].push(p);
+      assigned = true;
+      break;
+    }
+
+    // If we couldn't fill the exact position, grab any available player
+    if(!assigned){
+      for(let j=0; j<shuffled.length; j++){
+        const p = shuffled[j];
+        const key = p.name+"|"+p.club;
+        if(S.pickedMap[key]) continue;
+        if(targetPos !== "WC" && isClubBlocked(picker, p.club)) continue;
+        S.pickedMap[key] = picker;
+        team[targetPos].push(p);
+        break;
+      }
+    }
+  }
+
+  // Move pickIdx to end
+  S.pickIdx = S.snakeOrder.length;
+
+  // Auto-assign captains (second pick for each person)
+  S.draftOrder.forEach(name=>{
+    const myPicks = S.snakeOrder
+      .map((p,i)=>({picker:p,idx:i}))
+      .filter(x=>x.picker===name);
+    if(myPicks.length >= 2){
+      const secondPickIdx = myPicks[1].idx;
+      // Find who was picked at that snake position
+      const team = S.teams[name];
+      let allPlayers = [];
+      ["GK","DEF","MID","ATT"].forEach(pos=>{
+        (team[pos]||[]).forEach(p=>allPlayers.push(p));
+      });
+      if(allPlayers.length >= 2){
+        S.captains[name] = {
+          player: allPlayers[1],
+          dateSet: new Date().toISOString()
+        };
+      }
+    }
+  });
+
+  // Add some fake scores for testing league/stats views
+  for(let gw=1; gw<=5; gw++){
+    const gwScores = {};
+    Object.keys(S.pickedMap).forEach(key=>{
+      gwScores[key] = Math.floor(Math.random()*12);
+    });
+    S.scores[gw] = gwScores;
+  }
+  S.currentGW = 5;
+
+  saveAll();
+  renderTopBar();
+  checkCaptainBanner();
+  showToast("✅ Test data filled — all teams populated with 5 GWs of fake scores!");
+  closeModal();
+  showTab("myteam");
+}
+
 // ── RENDER: TOP BAR ────────────────────────────────────────────────────────────
 function renderTopBar(){
   const picker = currentPicker();
   const myT = isMyTurn();
-  document.getElementById("topbar-title").textContent = myT ? "🟢 YOUR TURN" : `${picker}'s pick`;
-  document.getElementById("topbar-info").textContent = S.draftDone ? "Draft complete" : `Pick ${S.pickIdx+1}/${S.snakeOrder.length}`;
+  const allPicksDone = draftComplete();
+
+  if(S.draftDone){
+    document.getElementById("topbar-title").textContent = "🏆 Draft Complete";
+    document.getElementById("topbar-info").textContent = "Season underway";
+  } else if(allPicksDone){
+    document.getElementById("topbar-title").textContent = "✅ All picks made!";
+    document.getElementById("topbar-info").textContent = "Tap End Draft to confirm";
+  } else if(myT){
+    document.getElementById("topbar-title").textContent = "🟢 YOUR TURN";
+    document.getElementById("topbar-info").textContent = `Pick ${S.pickIdx+1}/${S.snakeOrder.length}`;
+  } else {
+    document.getElementById("topbar-title").textContent = `${picker}'s pick`;
+    document.getElementById("topbar-info").textContent = `Pick ${Math.min(S.pickIdx+1, S.snakeOrder.length)}/${S.snakeOrder.length}`;
+  }
+
   const undoBtn = document.getElementById("undo-btn");
   undoBtn.style.display = S.history.length>0&&!S.draftDone ? "block" : "none";
 
-  // Update nav buttons
   document.querySelectorAll(".nav-btn[data-tab='draft']").forEach(b=>{
     b.style.display = S.hideDraft ? "none" : "";
   });
@@ -884,7 +1013,7 @@ function renderTopBar(){
 
 function checkAdviceBanner(){
   const banner = document.getElementById("advice-banner");
-  const show = isMyTurn() && !S.draftDone;
+  const show = isMyTurn() && !S.draftDone && !draftComplete();
   banner.style.display = show ? "flex" : "none";
   if(show && !S.advice && !S.adviceLoading){
     generateAdvice();
@@ -925,8 +1054,20 @@ function endDraft(){
 
 function renderDraftTab(){
   const el = document.getElementById("tab-draft");
-  if(S.draftDone){ el.innerHTML = `<div style="padding:40px;text-align:center;color:#8b949e;">🏆 Draft complete!<br><br>Good luck this season.</div>`; return; }
-
+  if(S.draftDone){
+    el.innerHTML = `<div style="padding:40px;text-align:center;color:#8b949e;">🏆 Draft complete!<br><br>Good luck this season.</div>`;
+    return;
+  }
+  if(draftComplete()){
+    el.innerHTML = `<div style="padding:32px 20px;text-align:center;">
+      <div style="font-size:48px;margin-bottom:12px;">✅</div>
+      <div style="font-size:20px;font-weight:700;color:#f0f6fc;margin-bottom:8px;">All picks made!</div>
+      <div style="color:#8b949e;font-size:14px;margin-bottom:24px;">Every player has been selected. Confirm the draft is complete to begin the season.</div>
+      <button class="btn btn-green" onclick="confirmEndDraft()">🏆 End Draft & Start Season</button>
+      <button class="btn btn-gray" style="margin-top:8px;" onclick="undoPick()">↩ Undo Last Pick</button>
+    </div>`;
+    return;
+  }
   if(!selectedClub){
     renderClubGrid(el);
   } else {
@@ -1624,6 +1765,7 @@ function renderSettingsTab(){
       <div style="color:#f0f6fc;font-weight:700;margin-bottom:6px;">Data</div>
       <div style="color:#8b949e;font-size:12px;margin-bottom:12px;">Player pool: ${S.playerPool.length} players · Scores: GW${S.currentGW} · Last refresh: ${S.lastRefreshed?new Date(S.lastRefreshed).toLocaleDateString():"Never"}</div>
       <button class="btn btn-gray" style="margin-bottom:8px;" onclick="doRefreshScores()">🔄 Refresh Scores Now</button>
+      <button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #8b5cf6;color:#8b5cf6;" onclick="confirmAutoFill()">🎲 Auto-Fill Test Data</button>
       <button class="btn btn-red" onclick="confirmReset()">⚠ Reset All Data</button>
     </div>
   `;
@@ -1638,14 +1780,72 @@ function saveSettings(){
   renderTopBar();
 }
 
-function confirmReset(){
-  showModal(`<h3>⚠ Reset All Data</h3>
-    <p style="color:#8b949e;margin-bottom:14px;">This will erase all draft picks, scores, and teams. Cannot be undone.</p>
-    <button class="btn btn-red" onclick="doReset()">Yes, Reset Everything</button>
-    <button class="btn btn-gray" style="margin-top:8px;" onclick="closeModal()">Cancel</button>`);
+function confirmAutoFill(){
+  showModal(`
+    <h3>🎲 Auto-Fill Test Data</h3>
+    <p style="color:#8b949e;font-size:13px;margin-bottom:16px;">
+      Randomly assigns players from the loaded pool to all teams, auto-sets captains,
+      and generates 5 gameweeks of fake scores so you can explore the league and stats views.
+    </p>
+    <p style="color:#f59e0b;font-size:13px;margin-bottom:16px;">
+      ⚠ This will overwrite any existing draft picks and scores.
+    </p>
+    <button class="btn btn-blue" onclick="autoFillDraft()">🎲 Yes, Fill Test Data</button>
+    <button class="btn btn-gray" style="margin-top:8px;" onclick="closeModal()">Cancel</button>
+  `);
 }
 
-function doReset(){
+function confirmReset(){
+  showModal(`
+    <h3>Reset Data</h3>
+    <p style="color:#8b949e;font-size:13px;margin-bottom:16px;">Choose what to reset. All actions are permanent and cannot be undone.</p>
+
+    <div class="card" style="margin-bottom:8px;">
+      <div style="font-weight:700;color:#f0f6fc;margin-bottom:4px;">Reset Draft Only</div>
+      <div style="color:#8b949e;font-size:12px;margin-bottom:10px;">Clears picks, teams, player pool and snake order. Keeps your API key, friend names, draft order and season scores.</div>
+      <button class="btn btn-gray" style="border:1px solid #f59e0b;color:#f59e0b;" onclick="doResetDraft()">Reset Draft</button>
+    </div>
+
+    <div class="card" style="margin-bottom:8px;">
+      <div style="font-weight:700;color:#f0f6fc;margin-bottom:4px;">Reset Season Scores</div>
+      <div style="color:#8b949e;font-size:12px;margin-bottom:10px;">Clears all score data only. Keeps everything else including teams and draft.</div>
+      <button class="btn btn-gray" style="border:1px solid #f59e0b;color:#f59e0b;" onclick="doResetScores()">Reset Scores</button>
+    </div>
+
+    <div class="card" style="margin-bottom:8px;">
+      <div style="font-weight:700;color:#f0f6fc;margin-bottom:4px;">Full Reset</div>
+      <div style="color:#8b949e;font-size:12px;margin-bottom:10px;">Clears absolutely everything including your API key. Use this if starting completely from scratch.</div>
+      <button class="btn btn-red" onclick="doResetFull()">Full Reset</button>
+    </div>
+
+    <button class="btn btn-gray" style="margin-top:4px;" onclick="closeModal()">Cancel</button>
+  `);
+}
+
+function doResetDraft(){
+  ["pool","picked","teams","snake","clubs","wildcards","history"].forEach(k=>localStorage.removeItem(DB_PREFIX+k));
+  // Keep settings (API key, names) and scores
+  const settings = load("settings",{});
+  const scores = load("scores",{});
+  const meta = load("meta",{});
+  Object.keys(localStorage).filter(k=>k.startsWith(DB_PREFIX)).forEach(k=>localStorage.removeItem(k));
+  save("settings", settings);
+  save("scores", scores);
+  save("meta", meta);
+  closeModal();
+  showToast("Draft reset. Reload to start fresh.");
+  setTimeout(()=>location.reload(), 1500);
+}
+
+function doResetScores(){
+  localStorage.removeItem(DB_PREFIX+"scores");
+  localStorage.removeItem(DB_PREFIX+"meta");
+  closeModal();
+  showToast("Season scores cleared.");
+  setTimeout(()=>location.reload(), 1500);
+}
+
+function doResetFull(){
   Object.keys(localStorage).filter(k=>k.startsWith(DB_PREFIX)).forEach(k=>localStorage.removeItem(k));
   location.reload();
 }
