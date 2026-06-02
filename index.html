@@ -332,6 +332,7 @@ function saveAll(){
   save("wildcards",S.wildcardSubs);
   save("scores",S.scores);
   save("meta",{lastRefreshed:S.lastRefreshed,currentGW:S.currentGW});
+  save("clubs",PL_CLUBS);
 }
 
 function loadAll(){
@@ -355,6 +356,9 @@ function loadAll(){
   const meta = load("meta",{});
   S.lastRefreshed = meta.lastRefreshed||null;
   S.currentGW = meta.currentGW||1;
+  // Restore dynamic club list
+  const savedClubs = load("clubs",[]);
+  if(savedClubs.length > 0) PL_CLUBS = savedClubs;
 }
 
 // ── SNAKE ORDER ────────────────────────────────────────────────────────────────
@@ -446,7 +450,7 @@ async function loadAllPlayers(){
     const errMsg = e.message;
     document.getElementById("load-title").textContent = "❌ API Error";
     document.getElementById("load-subtitle").textContent = "Could not connect to Claude API";
-    document.getElementById("load-errors").innerHTML = 
+    document.getElementById("load-errors").innerHTML =
       `<div class="error-msg" style="font-size:14px;padding:14px;">
         <strong>Error details:</strong><br><br>${errMsg}<br><br>
         <strong>Common causes:</strong><br>
@@ -488,31 +492,128 @@ async function loadAllPlayers(){
 
   S.playerPool = pool;
   save("pool", pool);
-  updateLoadUI(PL_CLUBS.length, PL_CLUBS.length, "Complete", clubCounts, errors, pool.length);
+
+  const failedClubs = PL_CLUBS.filter(c => (clubCounts[c]||0) === 0);
+  updateLoadUI(PL_CLUBS.length, PL_CLUBS.length, "Complete", clubCounts, errors, pool.length, failedClubs);
+
+  if(failedClubs.length === 0){
+    // All loaded — auto proceed after short delay so user can see completion
+    setTimeout(()=>{
+      showScreen("main");
+      renderTopBar();
+      checkAdviceBanner();
+      checkCaptainBanner();
+      document.getElementById("undo-btn").addEventListener("click", undoPick);
+      showTab(S.defaultTab||"draft");
+      if(isMyTurn()) generateAdvice();
+    }, 1000);
+  }
+  // If there are failed clubs, retry/continue buttons are shown by updateLoadUI
+
   return pool;
 }
 
-function updateLoadUI(done, total, club, counts, errors, totalPlayers){
+// Retry loading specific failed clubs without resetting anything
+async function retryFailedClubs(clubs){
+  const retryBtn = document.getElementById("retry-btn");
+  if(retryBtn) retryBtn.disabled = true;
+
+  let pool = [...S.playerPool];
+  const clubCounts = {};
+  const stillFailed = [];
+
+  for(let i=0; i<clubs.length; i++){
+    const club = clubs[i];
+    document.getElementById("load-subtitle").textContent = `Retrying ${club} (${i+1}/${clubs.length})...`;
+    try{
+      const players = await fetchClub(club);
+      if(players.length > 0){
+        // Remove any old entries for this club and add fresh ones
+        pool = pool.filter(p => p.club !== club).concat(players);
+        clubCounts[club] = players.length;
+      } else {
+        throw new Error("0 players returned");
+      }
+    }catch(e){
+      stillFailed.push(club);
+      console.warn(`Retry failed for ${club}:`, e.message);
+    }
+  }
+
+  // Dedupe
+  const seen = new Set();
+  pool = pool.filter(p=>{
+    const k=(p.name+"|"+p.club).toLowerCase();
+    if(seen.has(k)) return false;
+    seen.add(k); return true;
+  }).sort((a,b)=>b.rating-a.rating);
+
+  S.playerPool = pool;
+  save("pool", pool);
+
+  if(stillFailed.length === 0){
+    // All retries succeeded — proceed to main app
+    document.getElementById("load-subtitle").textContent = "All clubs loaded successfully!";
+    document.getElementById("load-errors").innerHTML = "";
+    setTimeout(()=>{
+      showScreen("main");
+      renderTopBar();
+      checkAdviceBanner();
+      checkCaptainBanner();
+      showTab(S.defaultTab||"draft");
+    }, 800);
+  } else {
+    // Some still failed — show retry button again for remaining clubs
+    document.getElementById("load-subtitle").textContent = `${stillFailed.length} club(s) still failed.`;
+    document.getElementById("load-errors").innerHTML =
+      `<div class="error-msg" style="font-size:13px;padding:12px;">
+        Still failed: ${stillFailed.join(", ")}<br>
+        Check your connection and try again, or skip and continue without these clubs.
+      </div>
+      <button id="retry-btn" class="btn btn-blue" style="margin-top:8px;" onclick="retryFailedClubs(${JSON.stringify(stillFailed)})">🔄 Retry These Clubs</button>
+      <button class="btn btn-gray" style="margin-top:8px;" onclick="proceedWithoutFailed()">Continue Without These Clubs →</button>`;
+  }
+}
+
+function proceedWithoutFailed(){
+  showScreen("main");
+  renderTopBar();
+  checkAdviceBanner();
+  checkCaptainBanner();
+  document.getElementById("undo-btn").addEventListener("click", undoPick);
+  showTab(S.defaultTab||"draft");
+}
+
+function updateLoadUI(done, total, club, counts, errors, totalPlayers, failedClubs){
   const pct = Math.round((done/total)*100);
   document.getElementById("load-bar").style.width = pct+"%";
   document.getElementById("load-pct").textContent = pct+"%";
-  document.getElementById("load-subtitle").textContent = done<total ? `${club} (${done}/${total} clubs)` : "Finalising…";
-  document.getElementById("load-total").textContent = totalPlayers > 0 ? `${totalPlayers} players loaded so far` : "";
+  document.getElementById("load-subtitle").textContent = done<total ? `${club} (${done}/${total} clubs)` : "Complete!";
+  document.getElementById("load-total").textContent = totalPlayers > 0 ? `${totalPlayers} players loaded` : "";
 
   const clubsEl = document.getElementById("load-clubs");
   clubsEl.innerHTML = PL_CLUBS.map((c,i)=>{
     const cnt = counts[c];
     const isDone = i < done;
-    const thin = isDone && cnt !== undefined && cnt < 10;
-    const bg = isDone ? (thin?"#3a1a1a":"#1a3a2a") : "#1c2128";
-    const col = isDone ? (thin?"#ef4444":"#10b981") : "#484f58";
-    const bdr = isDone ? (thin?"#ef4444":"#238636") : "#30363d";
-    const label = isDone ? (thin?`⚠ ${c} (${cnt})`:`✓ ${c} (${cnt})`) : c;
+    const failed = isDone && (cnt === 0 || cnt === undefined);
+    const thin = isDone && !failed && cnt < 10;
+    const bg = isDone ? (failed?"#3a1a1a":thin?"#2a2a0a":"#1a3a2a") : "#1c2128";
+    const col = isDone ? (failed?"#ef4444":thin?"#f59e0b":"#10b981") : "#484f58";
+    const bdr = isDone ? (failed?"#ef4444":thin?"#f59e0b":"#238636") : "#30363d";
+    const label = isDone ? (failed?`✗ ${c}`:`✓ ${c} (${cnt})`) : c;
     return `<span class="club-tag" style="background:${bg};color:${col};border:1px solid ${bdr};">${label}</span>`;
   }).join("");
 
-  if(errors.length>0){
-    document.getElementById("load-errors").innerHTML = `<div class="error-msg">⚠ ${errors.length} clubs failed:<br>${errors.slice(0,5).map(e=>`<small>${e}</small>`).join("<br>")}</div>`;
+  // Show retry button if we have failed clubs at the end
+  if(failedClubs && failedClubs.length > 0){
+    document.getElementById("load-errors").innerHTML =
+      `<div class="error-msg" style="margin-top:10px;font-size:13px;padding:12px;">
+        ⚠ ${failedClubs.length} club(s) failed to load: <strong>${failedClubs.join(", ")}</strong>
+      </div>
+      <button id="retry-btn" class="btn btn-blue" style="margin-top:8px;margin-bottom:6px;" onclick="retryFailedClubs(${JSON.stringify(failedClubs)})">🔄 Retry Failed Clubs</button>
+      <button class="btn btn-gray" style="margin-bottom:6px;" onclick="proceedWithoutFailed()">Continue Without These Clubs →</button>`;
+  } else if(done === total && errors.length === 0){
+    document.getElementById("load-errors").innerHTML = "";
   }
 }
 
@@ -693,10 +794,8 @@ function confirmPick(player, picker){
   team[slot].push(player);
   S.pickIdx++;
 
-  if(S.pickIdx >= S.snakeOrder.length){
-    S.draftDone = true;
-    S.hideDraft = true;
-  }
+  // Note: draft completion is confirmed explicitly by the user via "End Draft" button
+  // We don't auto-complete based on pickIdx to avoid premature completion
 
   saveAll();
   renderTopBar();
@@ -808,6 +907,22 @@ let selectedClub = null;
 let posFilter = "ALL";
 let tappedPlayer = null;
 
+function confirmEndDraft(){
+  showModal(`<h3>End Draft?</h3>
+    <p style="color:#8b949e;margin-bottom:14px;">Mark the draft as complete. All clubs and player browsing will be hidden and season scoring will begin.</p>
+    <button class="btn btn-green" onclick="endDraft()">Yes, Draft is Complete</button>
+    <button class="btn btn-gray" style="margin-top:8px;" onclick="closeModal()">Cancel</button>`);
+}
+
+function endDraft(){
+  S.draftDone = true;
+  S.hideDraft = true;
+  saveAll();
+  closeModal();
+  renderTopBar();
+  showTab(S.defaultTab||"myteam");
+}
+
 function renderDraftTab(){
   const el = document.getElementById("tab-draft");
   if(S.draftDone){ el.innerHTML = `<div style="padding:40px;text-align:center;color:#8b949e;">🏆 Draft complete!<br><br>Good luck this season.</div>`; return; }
@@ -822,7 +937,13 @@ function renderDraftTab(){
 function renderClubGrid(el){
   const picker = currentPicker();
   const avail = available();
-  let html = `<div style="padding:12px 14px 4px;"><div class="sec-hdr">Select Club — ${picker}'s pick</div></div><div class="club-grid">`;
+  const picksLeft = S.snakeOrder.length - S.pickIdx;
+  let html = `<div style="padding:12px 14px 8px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+      <div class="sec-hdr" style="margin:0;">Select Club — ${picker}'s pick (${picksLeft} picks left)</div>
+      <button onclick="confirmEndDraft()" class="btn btn-gray" style="width:auto;padding:6px 12px;font-size:12px;border:1px solid #ef4444;color:#ef4444;">End Draft</button>
+    </div>
+  </div><div class="club-grid">`;
   PL_CLUBS.forEach(club=>{
     const clubAvail = avail.filter(p=>p.club===club);
     const total = S.playerPool.filter(p=>p.club===club).length;
@@ -966,7 +1087,7 @@ function confirmWildcard(){
   S.teams[picker].WC.push(player);
   S.pickedMap[name+"|"+club] = picker;
   S.pickIdx++;
-  if(S.pickIdx>=S.snakeOrder.length){ S.draftDone=true; S.hideDraft=true; }
+  // Draft completion confirmed explicitly by user
   saveAll();
   closeModal();
   renderTopBar();
