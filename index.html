@@ -161,7 +161,8 @@
         <option value="3">3 players max per club</option>
       </select>
       <div style="margin-top:16px;margin-bottom:6px;">
-        <button class="btn btn-blue" id="setup-btn" onclick="handleSetupClick()">Load Players & Start Draft →</button>
+        <button class="btn btn-blue" id="setup-btn" onclick="handleSetupClick()" style="font-size:18px;padding:18px;">Load Players & Start Draft →</button>
+      <div id="debug-out" style="margin-top:12px;padding:10px;background:#1c2128;border-radius:8px;color:#10b981;font-size:13px;font-family:monospace;display:none;"></div>
       </div>
       <p style="color:#484f58;font-size:12px;text-align:center;margin-top:8px;">
         Season scoring uses the free FPL API — no extra cost.
@@ -1907,17 +1908,25 @@ function showToast(msg){
 }
 
 // ── SETUP FLOW ────────────────────────────────────────────────────────────────
+function dbg(msg){
+  const el = document.getElementById("debug-out");
+  if(el){ el.style.display="block"; el.innerHTML += msg+"<br>"; }
+  console.log(msg);
+}
+
 async function handleSetupClick(){
+  dbg("Button tapped ✓");
   try{
     const apiKey=document.getElementById("setup-apikey").value.trim();
+    dbg("API key length: "+apiKey.length);
     const myName=document.getElementById("setup-myname").value.trim();
     const orderRaw=document.getElementById("setup-order").value.trim().split("\n").map(l=>l.trim()).filter(Boolean);
     const clubMax=parseInt(document.getElementById("setup-clubmax").value);
 
-    if(!apiKey){ showToast("Please enter your API key"); return; }
-    if(!myName){ showToast("Please enter your name"); return; }
-    if(orderRaw.length<2){ showToast("Enter at least 2 names"); return; }
-    if(!orderRaw.includes(myName)){ showToast("Your name must be in the draft order"); return; }
+    if(!apiKey){ dbg("No API key"); showToast("Please enter your API key"); return; }
+    if(!myName){ dbg("No name"); showToast("Please enter your name"); return; }
+    if(orderRaw.length<2){ dbg("Not enough names: "+orderRaw.length); showToast("Enter at least 2 names"); return; }
+    if(!orderRaw.includes(myName)){ dbg("Name not in order"); showToast("Your name must be in the draft order"); return; }
 
     // Clear any previous draft data so we start fresh
     S.myName=myName; S.apiKey=apiKey; S.draftOrder=orderRaw; S.clubMax=clubMax;
@@ -1928,6 +1937,7 @@ async function handleSetupClick(){
     initTeams();
     saveAll();
 
+    dbg("Validation passed, switching to loading screen...");
     // Switch to loading screen first so user sees progress
     showScreen("loading");
     document.getElementById("load-title").textContent = "Loading Player Pool…";
