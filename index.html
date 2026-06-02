@@ -423,6 +423,107 @@ function normalise(p, club){
 }
 
 // ── PLAYER LOADING ─────────────────────────────────────────────────────────────
+async function loadAllPlayers(){
+  let pool = [];
+
+  // Step 1: Test API key
+  try{
+    await callClaude({system:"Reply with the single word: ok", userMsg:"ok", maxTokens:10});
+  }catch(e){
+    document.getElementById("load-title").textContent = "API Error";
+    document.getElementById("load-subtitle").textContent = "Could not connect to Claude API";
+    document.getElementById("load-errors").innerHTML =
+      '<div class="error-msg" style="font-size:14px;padding:14px;"><strong>Error:</strong><br><br>'+e.message+'<br><br>Common causes:<br>• API key incorrect<br>• No billing credit<br>• Network issue</div>'+
+      '<button class="btn btn-gray" style="margin-top:10px;" onclick="showScreen('setup')">Go Back</button>';
+    return [];
+  }
+
+  // Step 2: Try FPL API first
+  document.getElementById("load-subtitle").textContent = "Fetching official FPL player data...";
+  document.getElementById("load-bar").style.width = "10%";
+
+  try{
+    const fplData = await fetchAllPlayersFromFPL();
+    pool = fplData.players;
+    PL_CLUBS = fplData.clubs;
+
+    const seen = new Set();
+    pool = pool.filter(function(p){
+      const k=(p.name+"|"+p.club).toLowerCase();
+      if(seen.has(k)) return false;
+      seen.add(k); return true;
+    }).sort(function(a,b){return b.rating-a.rating;});
+
+    S.playerPool = pool;
+    save("pool", pool);
+    save("clubs", PL_CLUBS);
+
+    const clubCounts = {};
+    PL_CLUBS.forEach(function(c){ clubCounts[c] = pool.filter(function(p){return p.club===c;}).length; });
+
+    document.getElementById("load-bar").style.width = "100%";
+    document.getElementById("load-pct").textContent = "100%";
+    document.getElementById("load-subtitle").textContent = "Loaded "+pool.length+" players from "+PL_CLUBS.length+" clubs";
+    document.getElementById("load-clubs").innerHTML = PL_CLUBS.map(function(c){
+      const cnt = clubCounts[c]||0;
+      const col = cnt>0?"#10b981":"#ef4444";
+      const bg = cnt>0?"#1a3a2a":"#3a1a1a";
+      const bdr = cnt>0?"#238636":"#ef4444";
+      return '<span class="club-tag" style="background:'+bg+';color:'+col+';border:1px solid '+bdr+';">'+c+' ('+cnt+')</span>';
+    }).join("");
+
+    return pool;
+
+  }catch(e){
+    console.warn("FPL API failed, falling back:", e.message);
+    document.getElementById("load-errors").innerHTML = '<div class="warn">FPL API unavailable. Using club-by-club search as fallback...</div>';
+  }
+
+  // Step 3: Fallback per-club
+  PL_CLUBS = await fetchPLClubs();
+  document.getElementById("load-subtitle").textContent = "Found "+PL_CLUBS.length+" clubs. Loading squads...";
+
+  const clubCounts2 = {};
+  const errors = [];
+
+  for(let i=0;i<PL_CLUBS.length;i++){
+    const club = PL_CLUBS[i];
+    updateLoadUI(i, PL_CLUBS.length, club, clubCounts2, errors, pool.length);
+    try{
+      const raw = await callClaude({
+        maxTokens:2000,
+        system:"Premier League fantasy expert. Today: "+new Date().toDateString()+". Return ONLY a raw JSON array starting with [ of ALL first-team players for "+club+" 2026-27 season. Each: {"name":string,"position":"GK"|"DEF"|"MID"|"ATT","fplPrice":number,"lastSeasonPts":number,"rating":number} Aim for 20-25 players.",
+        userMsg:club+" squad JSON array."
+      });
+      const players = extractJSON(raw);
+      if(Array.isArray(players)&&players.length>=5){
+        const normed = players.map(function(p){return normalise(p,club);});
+        clubCounts2[club]=normed.length;
+        pool=pool.concat(normed);
+      } else throw new Error("Too few players: "+(players?players.length:0));
+    }catch(e){
+      clubCounts2[club]=0;
+      errors.push(club+": "+e.message);
+    }
+    updateLoadUI(i+1, PL_CLUBS.length, club, clubCounts2, errors, pool.length);
+  }
+
+  const seen2 = new Set();
+  pool = pool.filter(function(p){
+    const k=(p.name+"|"+p.club).toLowerCase();
+    if(seen2.has(k)) return false;
+    seen2.add(k); return true;
+  }).sort(function(a,b){return b.rating-a.rating;});
+
+  S.playerPool = pool;
+  save("pool", pool);
+  save("clubs", PL_CLUBS);
+
+  const failedClubs = PL_CLUBS.filter(function(c){return (clubCounts2[c]||0)===0;});
+  updateLoadUI(PL_CLUBS.length, PL_CLUBS.length, "Complete", clubCounts2, errors, pool.length, failedClubs);
+  return pool;
+}
+
 
 async function retryFailedClubs(clubs){
   const retryBtn = document.getElementById("retry-btn");
@@ -1807,38 +1908,70 @@ function showToast(msg){
 
 // ── SETUP FLOW ────────────────────────────────────────────────────────────────
 document.getElementById("setup-btn").addEventListener("click", async()=>{
-  const apiKey=document.getElementById("setup-apikey").value.trim();
-  const myName=document.getElementById("setup-myname").value.trim();
-  const orderRaw=document.getElementById("setup-order").value.trim().split("\n").map(l=>l.trim()).filter(Boolean);
-  const clubMax=parseInt(document.getElementById("setup-clubmax").value);
+  try{
+    const apiKey=document.getElementById("setup-apikey").value.trim();
+    const myName=document.getElementById("setup-myname").value.trim();
+    const orderRaw=document.getElementById("setup-order").value.trim().split("\n").map(l=>l.trim()).filter(Boolean);
+    const clubMax=parseInt(document.getElementById("setup-clubmax").value);
 
-  if(!apiKey){ showToast("Please enter your API key"); return; }
-  if(!myName){ showToast("Please enter your name"); return; }
-  if(orderRaw.length<2){ showToast("Enter at least 2 names"); return; }
-  if(!orderRaw.includes(myName)){ showToast("Your name must be in the draft order"); return; }
+    if(!apiKey){ showToast("Please enter your API key"); return; }
+    if(!myName){ showToast("Please enter your name"); return; }
+    if(orderRaw.length<2){ showToast("Enter at least 2 names"); return; }
+    if(!orderRaw.includes(myName)){ showToast("Your name must be in the draft order"); return; }
 
-  S.apiKey=apiKey; S.myName=myName; S.draftOrder=orderRaw; S.clubMax=clubMax;
-  S.snakeOrder=buildSnake(orderRaw,TOTAL_PICKS);
-  initTeams();
-  saveAll();
+    // Clear any previous draft data so we start fresh
+    S.myName=myName; S.apiKey=apiKey; S.draftOrder=orderRaw; S.clubMax=clubMax;
+    S.snakeOrder=buildSnake(orderRaw,TOTAL_PICKS);
+    S.pickedMap={}; S.teams={}; S.pickIdx=0;
+    S.draftDone=false; S.hideDraft=false; S.history=[];
+    S.playerPool=[]; S.advice=null;
+    initTeams();
+    saveAll();
 
-  const pool = await loadAllPlayers();
+    // Switch to loading screen first so user sees progress
+    showScreen("loading");
+    document.getElementById("load-title").textContent = "Loading Player Pool…";
+    document.getElementById("load-subtitle").textContent = "Starting…";
+    document.getElementById("load-bar").style.width = "0%";
+    document.getElementById("load-pct").textContent = "0%";
+    document.getElementById("load-clubs").innerHTML = "";
+    document.getElementById("load-errors").innerHTML = "";
+    document.getElementById("load-total").textContent = "";
 
-  // Only proceed to main screen if we got players back
-  // If there was an API error, loadAllPlayers shows the error and returns []
-  // and we stay on the loading screen so the user can read the message
-  if(pool.length === 0 && document.getElementById("load-errors").innerHTML !== ""){
-    // Error already shown on loading screen — don't navigate away
-    return;
+    // Small delay so screen transition renders before heavy work starts
+    await new Promise(r=>setTimeout(r,100));
+
+    const pool = await loadAllPlayers();
+
+    if(pool.length === 0 && document.getElementById("load-errors").innerHTML !== ""){
+      return; // Error shown on loading screen
+    }
+
+    showScreen("main");
+    renderTopBar();
+    checkAdviceBanner();
+    checkCaptainBanner();
+    // Remove any previous undo listener before adding new one
+    const undoBtn = document.getElementById("undo-btn");
+    const newUndoBtn = undoBtn.cloneNode(true);
+    undoBtn.parentNode.replaceChild(newUndoBtn, undoBtn);
+    newUndoBtn.addEventListener("click", undoPick);
+    showTab("draft");
+    if(isMyTurn()) generateAdvice();
+  }catch(e){
+    console.error("Setup error:", e);
+    // If we're on loading screen, show error there
+    const loadErrors = document.getElementById("load-errors");
+    if(loadErrors){
+      document.getElementById("load-title").textContent = "❌ Error";
+      loadErrors.innerHTML = `<div class="error-msg" style="font-size:14px;padding:14px;">
+        <strong>Unexpected error:</strong><br><br>${e.message}<br><br>
+        <button class="btn btn-gray" style="margin-top:10px;" onclick="showScreen('setup')">← Go Back</button>
+      </div>`;
+    } else {
+      showToast("Error: "+e.message);
+    }
   }
-
-  showScreen("main");
-  renderTopBar();
-  checkAdviceBanner();
-  checkCaptainBanner();
-  document.getElementById("undo-btn").addEventListener("click",undoPick);
-  showTab("draft");
-  if(isMyTurn()) generateAdvice();
 });
 
 // ── BOOT ──────────────────────────────────────────────────────────────────────
