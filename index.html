@@ -423,97 +423,7 @@ function normalise(p, club){
 }
 
 // ── PLAYER LOADING ─────────────────────────────────────────────────────────────
-async function fetchClub(club){
-  const today = new Date().toDateString();
-  const system = `You are a Premier League fantasy football expert. Today is ${today}.
-Return the first-team squad for ${club} in the 2025-26 Premier League season including all summer 2025 transfers.
-Return ONLY a raw JSON array starting with [. No markdown, no explanation.
-Each object: {"name":string,"position":"GK"|"DEF"|"MID"|"ATT","fplPrice":number,"lastSeasonPts":number,"rating":number}
-Aim for 20-25 players. fplPrice in £m (e.g. 8.5). lastSeasonPts from FPL 2024-25 (0 if new signing). rating 1-10.`;
-  const raw = await callClaude({system, userMsg:`Return ${club} 2025-26 squad as JSON array.`, maxTokens:2000});
-  if(!raw||raw.trim().length===0) throw new Error("Empty response");
-  const parsed = extractJSON(raw);
-  if(!Array.isArray(parsed)||parsed.length<5) throw new Error(`Only ${parsed?parsed.length:0} players`);
-  return parsed.map(p=>normalise(p,club));
-}
 
-async function loadAllPlayers(){
-  showScreen("loading");
-  const clubCounts = {};
-  const errors = [];
-  let pool = [];
-
-  // Test API key first with a minimal call
-  try{
-    await callClaude({system:"Reply with the single word: ok", userMsg:"ok", maxTokens:10});
-  }catch(e){
-    const errMsg = e.message;
-    document.getElementById("load-title").textContent = "❌ API Error";
-    document.getElementById("load-subtitle").textContent = "Could not connect to Claude API";
-    document.getElementById("load-errors").innerHTML =
-      `<div class="error-msg" style="font-size:14px;padding:14px;">
-        <strong>Error details:</strong><br><br>${errMsg}<br><br>
-        <strong>Common causes:</strong><br>
-        • API key entered incorrectly<br>
-        • No billing credit on your Anthropic account<br>
-        • Network connection issue<br><br>
-        This message will stay here until you go back.
-      </div>
-      <button class="btn btn-gray" style="margin-top:10px;" onclick="showScreen('setup')">← Go Back & Fix API Key</button>`;
-    return [];
-  }
-
-  // Dynamically fetch the correct 20 PL clubs for the upcoming season
-  PL_CLUBS = await fetchPLClubs();
-  document.getElementById("load-subtitle").textContent = `Found ${PL_CLUBS.length} clubs. Loading squads...`;
-
-  for(let i=0;i<PL_CLUBS.length;i++){
-    const club = PL_CLUBS[i];
-    updateLoadUI(i, PL_CLUBS.length, club, clubCounts, errors, pool.length);
-    try{
-      const players = await fetchClub(club);
-      clubCounts[club] = players.length;
-      pool = pool.concat(players);
-    }catch(e){
-      clubCounts[club] = 0;
-      errors.push(`${club}: ${e.message}`);
-      console.warn(`${club} failed:`, e.message);
-    }
-    updateLoadUI(i+1, PL_CLUBS.length, club, clubCounts, errors, pool.length);
-  }
-
-  // dedupe
-  const seen = new Set();
-  pool = pool.filter(p=>{
-    const k=(p.name+"|"+p.club).toLowerCase();
-    if(seen.has(k)) return false;
-    seen.add(k); return true;
-  }).sort((a,b)=>b.rating-a.rating);
-
-  S.playerPool = pool;
-  save("pool", pool);
-
-  const failedClubs = PL_CLUBS.filter(c => (clubCounts[c]||0) === 0);
-  updateLoadUI(PL_CLUBS.length, PL_CLUBS.length, "Complete", clubCounts, errors, pool.length, failedClubs);
-
-  if(failedClubs.length === 0){
-    // All loaded — auto proceed after short delay so user can see completion
-    setTimeout(()=>{
-      showScreen("main");
-      renderTopBar();
-      checkAdviceBanner();
-      checkCaptainBanner();
-      document.getElementById("undo-btn").addEventListener("click", undoPick);
-      showTab(S.defaultTab||"draft");
-      if(isMyTurn()) generateAdvice();
-    }, 1000);
-  }
-  // If there are failed clubs, retry/continue buttons are shown by updateLoadUI
-
-  return pool;
-}
-
-// Retry loading specific failed clubs without resetting anything
 async function retryFailedClubs(clubs){
   const retryBtn = document.getElementById("retry-btn");
   if(retryBtn) retryBtn.disabled = true;
@@ -788,11 +698,13 @@ function confirmPick(player, picker){
   });
 
   S.pickedMap[key] = picker;
+  // Store pick number on the player object so we can display it in team views
+  const playerWithPick = Object.assign({}, player, { pickNumber: S.pickIdx + 1 });
   const team = S.teams[picker];
   const pos = player.position;
   const hasSlot = (SLOTS[pos]||0)-(team[pos]||[]).length > 0;
   const slot = hasSlot ? pos : "WC";
-  team[slot].push(player);
+  team[slot].push(playerWithPick);
   S.pickIdx++;
 
   // Note: draft completion is confirmed explicitly by the user via "End Draft" button
@@ -1284,7 +1196,7 @@ function renderMyTeamTab(){
         html += `<div class="roster-slot filled" style="${subbed?"opacity:0.4;":""}">
           <div style="display:flex;align-items:center;justify-content:space-between;">
             <div>
-              <div class="rname">${p.name}${isCap?'<span class="cap-badge">C ×2</span>':""}</div>
+              <div class="rname">${p.name}${isCap?'<span class="cap-badge">C ×2</span>':""}<span style="font-size:10px;color:#484f58;font-weight:normal;margin-left:5px;">${p.pickNumber?"#"+p.pickNumber:""}</span></div>
               <div class="rsub">${p.club}${subbed?" · <span style='color:#ef4444'>Subbed out</span>":""}</div>
             </div>
             <div style="text-align:right;">
@@ -1386,7 +1298,7 @@ function renderFriendDetail(el, name){
         html += `<div class="roster-slot filled" style="${subbed?"opacity:0.4;":""}">
           <div style="display:flex;align-items:center;justify-content:space-between;">
             <div>
-              <div class="rname">${p.name}${isCap?'<span class="cap-badge">C ×2</span>':""}</div>
+              <div class="rname">${p.name}${isCap?'<span class="cap-badge">C ×2</span>':""}<span style="font-size:10px;color:#484f58;font-weight:normal;margin-left:5px;">${p.pickNumber?"#"+p.pickNumber:""}</span></div>
               <div class="rsub">${p.club}${subbed?" · <span style='color:#ef4444;'>Subbed out</span>":""}</div>
             </div>
             <div style="text-align:right;">
