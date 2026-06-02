@@ -426,10 +426,16 @@ function normalise(p, club){
 // ── PLAYER LOADING ─────────────────────────────────────────────────────────────
 
 async function fetchAllPlayersFromFPL(){
-  // Direct browser fetch of the public FPL API
-  const response = await fetch("https://fantasy.premierleague.com/api/bootstrap-static/", {
-    method:"GET", headers:{"Accept":"application/json"}
-  });
+  // Route through CORS proxy since FPL API blocks direct browser requests
+  const FPL_URL = "https://fantasy.premierleague.com/api/bootstrap-static/";
+  const PROXY_URL = "https://corsproxy.io/?" + encodeURIComponent(FPL_URL);
+  let response;
+  try{
+    response = await fetch(PROXY_URL, { method:"GET", headers:{"Accept":"application/json"} });
+  }catch(e){
+    // Try direct as fallback (works in some environments)
+    response = await fetch(FPL_URL, { method:"GET", headers:{"Accept":"application/json"} });
+  }
   if(!response.ok) throw new Error("FPL API HTTP " + response.status);
   const data = await response.json();
   if(!data.elements || data.elements.length < 100)
@@ -666,7 +672,8 @@ function updateLoadUI(done, total, club, counts, errors, totalPlayers, failedClu
 async function refreshScores(){
   try{
     // Get current gameweek from FPL
-    const r = await fetch("https://fantasy.premierleague.com/api/bootstrap-static/");
+    const fplBase = "https://fantasy.premierleague.com/api/bootstrap-static/";
+    const r = await fetch("https://corsproxy.io/?"+encodeURIComponent(fplBase));
     const d = await r.json();
     const events = d.events||[];
     const currentEvent = events.find(e=>e.is_current) || events.find(e=>e.is_next) || events[0];
@@ -692,7 +699,8 @@ async function refreshScores(){
 
     for(const g of gwsNeeded){
       try{
-        const gr = await fetch(`https://fantasy.premierleague.com/api/event/${g}/live/`);
+        const gwUrl = "https://fantasy.premierleague.com/api/event/"+g+"/live/";
+        const gr = await fetch("https://corsproxy.io/?"+encodeURIComponent(gwUrl));
         const gd = await gr.json();
         const gwScores = {};
         (gd.elements||[]).forEach(el=>{
