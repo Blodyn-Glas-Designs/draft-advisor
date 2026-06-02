@@ -161,7 +161,7 @@
         <option value="3">3 players max per club</option>
       </select>
       <div style="margin-top:16px;margin-bottom:6px;">
-        <button class="btn btn-blue" id="setup-btn">Load Players & Start Draft →</button>
+        <button class="btn btn-blue" id="setup-btn" onclick="handleSetupClick()">Load Players & Start Draft →</button>
       </div>
       <p style="color:#484f58;font-size:12px;text-align:center;margin-top:8px;">
         Season scoring uses the free FPL API — no extra cost.
@@ -1907,7 +1907,7 @@ function showToast(msg){
 }
 
 // ── SETUP FLOW ────────────────────────────────────────────────────────────────
-document.getElementById("setup-btn").addEventListener("click", async()=>{
+async function handleSetupClick(){
   try{
     const apiKey=document.getElementById("setup-apikey").value.trim();
     const myName=document.getElementById("setup-myname").value.trim();
@@ -1960,21 +1960,18 @@ document.getElementById("setup-btn").addEventListener("click", async()=>{
     if(isMyTurn()) generateAdvice();
   }catch(e){
     console.error("Setup error:", e);
-    // If we're on loading screen, show error there
     const loadErrors = document.getElementById("load-errors");
     if(loadErrors){
-      document.getElementById("load-title").textContent = "❌ Error";
-      loadErrors.innerHTML = `<div class="error-msg" style="font-size:14px;padding:14px;">
-        <strong>Unexpected error:</strong><br><br>${e.message}<br><br>
-        <button class="btn btn-gray" style="margin-top:10px;" onclick="showScreen('setup')">← Go Back</button>
-      </div>`;
+      document.getElementById("load-title").textContent = "Error";
+      loadErrors.innerHTML = '<div class="error-msg" style="font-size:14px;padding:14px;"><strong>Unexpected error:</strong><br><br>'+e.message+'<br><br><button class="btn btn-gray" style="margin-top:10px;" onclick="showScreen('setup')">Go Back</button></div>';
     } else {
       showToast("Error: "+e.message);
     }
   }
-});
+}
 
 // ── BOOT ──────────────────────────────────────────────────────────────────────
+document.addEventListener("DOMContentLoaded", function(){
 (function boot(){
   loadAll();
   if(S.myName && S.draftOrder.length>0 && S.playerPool.length>0){
@@ -1990,6 +1987,7 @@ document.getElementById("setup-btn").addEventListener("click", async()=>{
     if(S.apiKey) document.getElementById("setup-apikey").value=S.apiKey;
   }
 })();
+}); // DOMContentLoaded
 </script>
 </body>
 </html>
