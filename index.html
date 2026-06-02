@@ -424,6 +424,39 @@ function normalise(p, club){
 }
 
 // ── PLAYER LOADING ─────────────────────────────────────────────────────────────
+
+async function fetchAllPlayersFromFPL(){
+  // Direct browser fetch of the public FPL API
+  const response = await fetch("https://fantasy.premierleague.com/api/bootstrap-static/", {
+    method:"GET", headers:{"Accept":"application/json"}
+  });
+  if(!response.ok) throw new Error("FPL API HTTP " + response.status);
+  const data = await response.json();
+  if(!data.elements || data.elements.length < 100)
+    throw new Error("FPL data incomplete: " + (data.elements||[]).length + " players");
+
+  const teamMap = {};
+  (data.teams||[]).forEach(function(t){ teamMap[t.id] = t.name; });
+  const POS = {1:"GK",2:"DEF",3:"MID",4:"ATT"};
+
+  const players = data.elements.map(function(p){
+    const club = teamMap[p.team] || "Unknown";
+    const pos = POS[p.element_type] || "MID";
+    const price = (p.now_cost||0)/10;
+    const pts = p.total_points||0;
+    const rating = pts>=200?9:pts>=150?8:pts>=100?7:pts>=60?5:3;
+    return {
+      name:(p.web_name||p.second_name||"Unknown").trim(),
+      club:club, position:pos,
+      fplPrice:parseFloat(price.toFixed(1)),
+      lastSeasonPts:pts, rating:rating, fplId:p.id||null
+    };
+  }).filter(function(p){ return p.club !== "Unknown"; });
+
+  const clubs = (data.teams||[]).map(function(t){ return t.name; }).filter(Boolean).sort();
+  return {players:players, clubs:clubs};
+}
+
 async function loadAllPlayers(){
   let pool = [];
 
