@@ -435,7 +435,7 @@ async function loadAllPlayers(){
     document.getElementById("load-subtitle").textContent = "Could not connect to Claude API";
     document.getElementById("load-errors").innerHTML =
       '<div class="error-msg" style="font-size:14px;padding:14px;"><strong>Error:</strong><br><br>'+e.message+'<br><br>Common causes:<br>• API key incorrect<br>• No billing credit<br>• Network issue</div>'+
-      '<button class="btn btn-gray" style="margin-top:10px;" onclick="showScreen('setup')">Go Back</button>';
+      '<button class="btn btn-gray" style="margin-top:10px;" onclick="goToSetup()">Go Back</button>';
     return [];
   }
 
@@ -493,7 +493,7 @@ async function loadAllPlayers(){
     try{
       const raw = await callClaude({
         maxTokens:2000,
-        system:"Premier League fantasy expert. Today: "+new Date().toDateString()+". Return ONLY a raw JSON array starting with [ of ALL first-team players for "+club+" 2026-27 season. Each: {"name":string,"position":"GK"|"DEF"|"MID"|"ATT","fplPrice":number,"lastSeasonPts":number,"rating":number} Aim for 20-25 players.",
+        system:"Premier League fantasy expert. Return ALL first-team players for "+club+" 2026-27 PL season as a JSON array. Each object needs name, position (GK/DEF/MID/ATT), fplPrice (pounds), lastSeasonPts, rating (1-10). About 20-25 players. No markdown.",
         userMsg:club+" squad JSON array."
       });
       const players = extractJSON(raw);
@@ -1908,6 +1908,8 @@ function showToast(msg){
 }
 
 // ── SETUP FLOW ────────────────────────────────────────────────────────────────
+function goToSetup(){ showScreen('setup'); }
+
 function dbg(msg){
   const el = document.getElementById("debug-out");
   if(el){ el.style.display="block"; el.innerHTML += msg+"<br>"; }
@@ -1973,7 +1975,7 @@ async function handleSetupClick(){
     const loadErrors = document.getElementById("load-errors");
     if(loadErrors){
       document.getElementById("load-title").textContent = "Error";
-      loadErrors.innerHTML = '<div class="error-msg" style="font-size:14px;padding:14px;"><strong>Unexpected error:</strong><br><br>'+e.message+'<br><br><button class="btn btn-gray" style="margin-top:10px;" onclick="showScreen('setup')">Go Back</button></div>';
+      loadErrors.innerHTML = '<div class="error-msg" style="font-size:14px;padding:14px;"><strong>Unexpected error:</strong><br><br>'+e.message+'<br><br><button class="btn btn-gray" style="margin-top:10px;" onclick="goToSetup()">Go Back</button></div>';
     } else {
       showToast("Error: "+e.message);
     }
