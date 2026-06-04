@@ -118,6 +118,30 @@ label.lbl{display:block;color:#8b949e;font-size:11px;text-transform:uppercase;le
       </div>
     </div>
   </div>
+  <div id="welcome-screen" class="screen">
+    <div style="flex:1;display:flex;flex-direction:column;overflow:hidden;position:relative;">
+      <!-- Background gradient art -->
+      <div style="position:absolute;inset:0;background:linear-gradient(160deg,#0d1117 0%,#0f2027 40%,#1a0a2e 70%,#0d1117 100%);z-index:0;"></div>
+      <!-- Animated orbs for atmosphere -->
+      <div style="position:absolute;width:300px;height:300px;border-radius:50%;background:radial-gradient(circle,rgba(16,185,129,0.15) 0%,transparent 70%);top:-80px;right:-80px;z-index:0;animation:orb1 6s ease-in-out infinite;"></div>
+      <div style="position:absolute;width:250px;height:250px;border-radius:50%;background:radial-gradient(circle,rgba(139,92,246,0.12) 0%,transparent 70%);bottom:100px;left:-60px;z-index:0;animation:orb2 8s ease-in-out infinite;"></div>
+      <div style="position:absolute;width:180px;height:180px;border-radius:50%;background:radial-gradient(circle,rgba(59,130,246,0.1) 0%,transparent 70%);top:200px;right:20px;z-index:0;animation:orb1 5s ease-in-out infinite reverse;"></div>
+      <!-- Content -->
+      <div style="position:relative;z-index:1;flex:1;display:flex;flex-direction:column;justify-content:center;align-items:center;padding:32px 24px;text-align:center;">
+        <!-- Badge -->
+        <div style="font-size:64px;margin-bottom:8px;filter:drop-shadow(0 0 20px rgba(16,185,129,0.6));">&#x26BD;</div>
+        <div style="font-size:11px;letter-spacing:3px;color:#10b981;text-transform:uppercase;margin-bottom:12px;font-weight:700;">Fantasy Draft</div>
+        <h1 style="font-size:36px;font-weight:900;color:#f0f6fc;margin:0 0 6px;letter-spacing:-1px;line-height:1.1;">Draft<br><span style="color:#10b981;">Advisor</span></h1>
+        <p style="color:#8b949e;font-size:14px;margin:0 0 40px;max-width:280px;line-height:1.6;" id="welcome-subtitle">Premier League Fantasy &bull; Snake Draft</p>
+        <!-- Action buttons -->
+        <div style="width:100%;max-width:320px;display:flex;flex-direction:column;gap:10px;" id="welcome-buttons"></div>
+      </div>
+      <!-- Bottom info -->
+      <div style="position:relative;z-index:1;padding:16px;text-align:center;flex-shrink:0;">
+        <div style="color:#484f58;font-size:11px;" id="welcome-footer"></div>
+      </div>
+    </div>
+  </div>
   <div id="loading-screen" class="screen">
     <div style="flex:1;overflow-y:auto;display:flex;align-items:center;justify-content:center;padding:20px;">
       <div style="background:#161b22;border:1px solid #30363d;border-radius:16px;padding:28px;width:100%;max-width:440px;text-align:center;">
@@ -460,41 +484,51 @@ function proceedToApp(){
 // ── FPL SCORE REFRESH ──────────────────────────────────────────────────────────
 async function refreshScores(){
   try{
-    var r=await fetch("https://fantasy.premierleague.com/api/bootstrap-static/");
-    var d=await r.json();
-    var events=d.events||[];
-    var cur=events.find(function(e){return e.is_current;})||events.find(function(e){return e.is_next;})||events[0];
-    if(!cur) return false;
-    S.currentGW=cur.id;
-    var fplPlayers=d.elements||[];
-    var nameToId={};
-    fplPlayers.forEach(function(p){
-      nameToId[(p.web_name||"").toLowerCase()]=p.id;
-      nameToId[((p.first_name||"")+" "+(p.second_name||"")).toLowerCase().trim()]=p.id;
+    var sys = 'Premier League fantasy football data assistant. Today: ' + new Date().toDateString() + '. Fetch https://fantasy.premierleague.com/api/bootstrap-static/ and return JSON with currentGW (integer, the current active gameweek id) and players (array of objects with id, web_name, total_points). Raw JSON only starting with {.';
+    var raw = await callClaude(sys, 'Fetch FPL bootstrap-static and return current gameweek and all player points as JSON.', 4000);
+    var d = extractJSON(raw);
+    if(!d || !d.currentGW) throw new Error('Could not get current gameweek');
+    var gw = parseInt(d.currentGW);
+    S.currentGW = gw;
+
+    var nameToId = {};
+    (d.players||[]).forEach(function(p){
+      if(p.web_name) nameToId[p.web_name.toLowerCase()] = p.id;
     });
-    var needed=[];
-    for(var g=1;g<=S.currentGW;g++){if(!S.scores[g])needed.push(g);}
-    for(var ni=0;ni<needed.length;ni++){
-      var gw=needed[ni];
-      try{
-        var gr=await fetch("https://fantasy.premierleague.com/api/event/"+gw+"/live/");
-        var gd=await gr.json();
-        var gwScores={};
-        (gd.elements||[]).forEach(function(el){gwScores[el.id]=el.stats&&el.stats.total_points||0;});
-        var mapped={};
-        getAllPlayers().forEach(function(p){
-          var nl=p.name.toLowerCase();
-          var fid=p.fplId||nameToId[nl]||nameToId[p.name.split(" ").pop().toLowerCase()];
-          if(fid&&gwScores[fid]!==undefined) mapped[p.name+"|"+p.club]=gwScores[fid];
-        });
-        S.scores[gw]=mapped;
-      }catch(e){console.warn("GW "+gw+" failed:",e);}
+
+    var needed = [];
+    for(var g = 1; g <= gw; g++){ if(!S.scores[g]) needed.push(g); }
+    if(needed.length === 0){
+      S.lastRefreshed = new Date().toISOString();
+      sv('meta', {lastRefreshed: S.lastRefreshed, currentGW: S.currentGW});
+      return true;
     }
-    S.lastRefreshed=new Date().toISOString();
-    sv("scores",S.scores); sv("meta",{lastRefreshed:S.lastRefreshed,currentGW:S.currentGW});
+
+    var sys2 = 'Premier League fantasy football data assistant. For each gameweek number in the list, fetch https://fantasy.premierleague.com/api/event/[GW]/live/ substituting [GW] with the number. Return a JSON object where keys are gameweek numbers as strings and values are objects mapping each player web_name to their total_points integer for that gameweek. Raw JSON only starting with {.';
+    var raw2 = await callClaude(sys2, 'Fetch FPL live scores for gameweeks: ' + needed.join(', ') + '. Return as JSON.', 4000);
+    var gwData = extractJSON(raw2);
+
+    needed.forEach(function(g){
+      var gwScores = gwData[g] || gwData[String(g)] || {};
+      var mapped = {};
+      getAllPlayers().forEach(function(p){
+        var nl = p.name.toLowerCase();
+        var pts = gwScores[p.name] || gwScores[nl] || gwScores[p.name.split(' ').pop()] || 0;
+        mapped[p.name + '|' + p.club] = parseInt(pts) || 0;
+      });
+      S.scores[g] = mapped;
+    });
+
+    S.lastRefreshed = new Date().toISOString();
+    sv('scores', S.scores);
+    sv('meta', {lastRefreshed: S.lastRefreshed, currentGW: S.currentGW});
     return true;
-  }catch(e){console.error("Score refresh failed:",e);return false;}
+  }catch(e){
+    console.error('Score refresh failed:', e);
+    return false;
+  }
 }
+
 
 // ── SCORING ────────────────────────────────────────────────────────────────────
 function getAllPlayers(){
@@ -1135,6 +1169,89 @@ function autoFillDraft(){
   showTab("myteam");
 }
 
+
+// ── BACKUP & RESTORE ──────────────────────────────────────────────────────────
+function exportBackup(){
+  var backup={
+    version:1,
+    exportedAt:new Date().toISOString(),
+    myName:S.myName,
+    draftOrder:S.draftOrder,
+    clubMax:S.clubMax,
+    draftDone:S.draftDone,
+    teams:S.teams,
+    pickedMap:S.pickedMap,
+    snakeOrder:S.snakeOrder,
+    pickIdx:S.pickIdx,
+    captains:S.captains,
+    wildcardSubs:S.wildcardSubs,
+    scores:S.scores,
+    currentGW:S.currentGW,
+    lastRefreshed:S.lastRefreshed,
+    playerPool:S.playerPool,
+    clubs:PL_CLUBS
+  };
+  var json=JSON.stringify(backup,null,2);
+  var blob=new Blob([json],{type:"application/json"});
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement("a");
+  a.href=url;
+  a.download="draft-advisor-backup-"+new Date().toISOString().slice(0,10)+".json";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  showToast("Backup downloaded!");
+}
+
+function importBackup(){
+  var input=document.createElement("input");
+  input.type="file"; input.accept=".json";
+  input.onchange=function(e){
+    var file=e.target.files[0];
+    if(!file) return;
+    var reader=new FileReader();
+    reader.onload=function(ev){
+      try{
+        var backup=JSON.parse(ev.target.result);
+        if(!backup.version||!backup.myName) throw new Error("Invalid backup file");
+        showModal('<h3>Restore Backup?</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Backup from '+new Date(backup.exportedAt).toLocaleDateString()+' for '+backup.myName+'. This will overwrite your current data.</p><button class="btn btn-blue" onclick="doImportBackup('+encodeURIComponent(JSON.stringify(backup))+')">Restore</button><button class="btn btn-gray" style="margin-top:8px;" onclick="closeModal()">Cancel</button>');
+      }catch(err){
+        showToast("Invalid backup file: "+err.message);
+      }
+    };
+    reader.readAsText(file);
+  };
+  input.click();
+}
+
+function doImportBackup(encodedData){
+  try{
+    var backup=JSON.parse(decodeURIComponent(encodedData));
+    S.myName=backup.myName||"";
+    S.draftOrder=backup.draftOrder||[];
+    S.clubMax=backup.clubMax||2;
+    S.draftDone=backup.draftDone||false;
+    S.teams=backup.teams||{};
+    S.pickedMap=backup.pickedMap||{};
+    S.snakeOrder=backup.snakeOrder||[];
+    S.pickIdx=backup.pickIdx||0;
+    S.captains=backup.captains||{};
+    S.wildcardSubs=backup.wildcardSubs||{};
+    S.scores=backup.scores||{};
+    S.currentGW=backup.currentGW||1;
+    S.lastRefreshed=backup.lastRefreshed||null;
+    S.playerPool=backup.playerPool||[];
+    if(backup.clubs&&backup.clubs.length>0) PL_CLUBS=backup.clubs;
+    saveAll();
+    closeModal();
+    showToast("Backup restored!");
+    setTimeout(function(){location.reload();},1000);
+  }catch(e){
+    showToast("Restore failed: "+e.message);
+  }
+}
+
 // ── NAVIGATION ─────────────────────────────────────────────────────────────────
 function showTab(tabId){
   document.querySelectorAll(".tab-content").forEach(function(el){el.classList.remove("active");});
@@ -1208,6 +1325,70 @@ function handleSetupClick(){
       document.getElementById("load-errors").innerHTML='<div class="error-msg">'+e.message+'</div><button class="btn btn-gray" style="margin-top:10px;" onclick="showScreen(\'setup\')">Go Back</button>';
     });
   },100);
+}
+
+
+// ── WELCOME SCREEN ─────────────────────────────────────────────────────────────
+function renderWelcomeScreen(){
+  // Add CSS animations if not already present
+  if(!document.getElementById('welcome-css')){
+    var style=document.createElement('style');
+    style.id='welcome-css';
+    style.textContent='@keyframes orb1{0%,100%{transform:translate(0,0) scale(1);}50%{transform:translate(20px,-20px) scale(1.1);}}@keyframes orb2{0%,100%{transform:translate(0,0) scale(1);}50%{transform:translate(-15px,15px) scale(0.9);}}';
+    document.head.appendChild(style);
+  }
+
+  var hasSavedData = S.myName && S.draftOrder.length>0;
+  var hasDraft = hasSavedData && S.playerPool.length>0;
+  var isDraftInProgress = hasDraft && !S.draftDone && S.pickIdx>0;
+  var isDraftDone = hasDraft && S.draftDone;
+
+  var subtitle = hasSavedData ? ('Welcome back, '+S.myName+'!') : 'Premier League Fantasy • Snake Draft';
+  document.getElementById('welcome-subtitle').textContent = subtitle;
+
+  var footer = '';
+  if(hasDraft){
+    footer = S.playerPool.length+' players loaded';
+    if(S.lastRefreshed) footer += ' • Last refresh: '+new Date(S.lastRefreshed).toLocaleDateString();
+  }
+  document.getElementById('welcome-footer').textContent = footer;
+
+  var btns = document.getElementById('welcome-buttons');
+  var html = '';
+
+  if(isDraftDone){
+    html += makeWelcomeBtn('&#x1F4CA; View League Table','#10b981',function(){showScreen('main');showTab('league');});
+    html += makeWelcomeBtn('&#x1F464; My Team','#1f6feb',function(){showScreen('main');showTab('myteam');});
+    html += makeWelcomeBtn('&#x1F30D; Player Pool','#8b5cf6',function(){showScreen('main');showTab('pool');});
+    html += makeWelcomeBtn('&#x1F465; Friends Teams','#30363d',function(){showScreen('main');showTab('friends');});
+  } else if(isDraftInProgress){
+    html += makeWelcomeBtn('&#x25B6; Continue Draft','#10b981',function(){showScreen('main');showTab('draft');});
+    html += makeWelcomeBtn('&#x1F464; My Team So Far','#1f6feb',function(){showScreen('main');showTab('myteam');});
+    html += makeWelcomeBtn('&#x2699; Settings','#30363d',function(){showScreen('main');showTab('settings');});
+  } else if(hasDraft){
+    html += makeWelcomeBtn('&#x1F3DF; Start Draft','#10b981',function(){showScreen('main');showTab('draft');});
+    html += makeWelcomeBtn('&#x2699; Settings','#30363d',function(){showScreen('main');showTab('settings');});
+  } else {
+    html += makeWelcomeBtn('&#x26BD; Set Up New Draft','#10b981',function(){showScreen('setup');});
+    if(hasSavedData){
+      html += makeWelcomeBtn('&#x2B06; Restore from Backup','#30363d',function(){importBackup();});
+    }
+  }
+
+  // Always show settings access
+  if(hasDraft && !html.includes('Settings')){
+    html += makeWelcomeBtn('&#x2699; Settings','#21262d',function(){showScreen('main');showTab('settings');});
+  }
+
+  btns.innerHTML = html;
+}
+
+var welcomeBtnFns={};
+function makeWelcomeBtn(label, color, fn){
+  var id = 'wb'+Object.keys(welcomeBtnFns).length;
+  welcomeBtnFns[id] = fn;
+  var txtColor = (color==='#30363d'||color==='#21262d') ? '#f0f6fc' : '#fff';
+  return '<button onclick="welcomeBtnFns[\'' + id + '\']();" style="width:100%;padding:16px;background:'+color+';color:'+txtColor+';border:none;border-radius:12px;font-size:16px;font-weight:700;cursor:pointer;font-family:inherit;letter-spacing:0.2px;">'+label+'</button>';
 }
 
 // ── BOOT ───────────────────────────────────────────────────────────────────────
