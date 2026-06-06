@@ -1395,15 +1395,11 @@ function makeWelcomeBtn(label, color, fn){
 document.addEventListener("DOMContentLoaded",function(){
   loadAll();
   if(S.apiKey) document.getElementById("setup-apikey").value=S.apiKey;
-  if(S.myName&&S.draftOrder.length>0&&S.playerPool.length>0){
-    showScreen("main");
-    renderTopBar(); checkAdviceBanner(); checkCaptainBanner();
-    showTab(S.draftDone?(S.defaultTab||"myteam"):"draft");
-  // Show/hide pool tab based on draft completion
+  // Pool tab visibility
   document.querySelectorAll(".nav-btn[data-tab='pool']").forEach(function(b){b.style.display=S.draftDone?"":"none";});
-  } else {
-    showScreen("setup");
-  }
+  // Always show welcome screen first
+  renderWelcomeScreen();
+  showScreen("welcome");
 });
 
 // ── POOL TAB ───────────────────────────────────────────────────────────────────
