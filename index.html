@@ -1237,6 +1237,9 @@ function exportBackup(){
   }
 }
 
+// Store pending backup in memory to avoid URL size limits
+var pendingBackup = null;
+
 function importBackup(){
   var input=document.createElement("input");
   input.type="file"; input.accept=".json";
@@ -1247,8 +1250,15 @@ function importBackup(){
     reader.onload=function(ev){
       try{
         var backup=JSON.parse(ev.target.result);
-        if(!backup.version||!backup.myName) throw new Error("Invalid backup file");
-        showModal('<h3>Restore Backup?</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Backup from '+new Date(backup.exportedAt).toLocaleDateString()+' for '+backup.myName+'. This will overwrite your current data.</p><button class="btn btn-blue" onclick="doImportBackup('+encodeURIComponent(JSON.stringify(backup))+')">Restore</button><button class="btn btn-gray" style="margin-top:8px;" onclick="closeModal()">Cancel</button>');
+        if(!backup.myName) throw new Error("Invalid backup file - missing player name");
+        pendingBackup=backup;
+        var msg='<h3>Restore Backup?</h3>';
+        msg+='<p style="color:#8b949e;font-size:13px;margin-bottom:6px;">Backup from: '+new Date(backup.exportedAt||Date.now()).toLocaleDateString()+'</p>';
+        msg+='<p style="color:#8b949e;font-size:13px;margin-bottom:14px;">For: '+backup.myName+' &middot; '+( backup.draftOrder?backup.draftOrder.length:0)+' players &middot; '+(backup.playerPool?backup.playerPool.length:0)+' in pool</p>';
+        msg+='<p style="color:#f59e0b;font-size:13px;margin-bottom:14px;">This will overwrite your current data.</p>';
+        msg+='<button class="btn btn-blue" style="margin-bottom:8px;" onclick="doImportBackup()">Restore</button>';
+        msg+='<button class="btn btn-gray" onclick="closeModal()">Cancel</button>';
+        showModal(msg);
       }catch(err){
         showToast("Invalid backup file: "+err.message);
       }
@@ -1258,9 +1268,10 @@ function importBackup(){
   input.click();
 }
 
-function doImportBackup(encodedData){
+function doImportBackup(){
+  if(!pendingBackup){ showToast("No backup data found. Please select a file again."); return; }
   try{
-    var backup=JSON.parse(decodeURIComponent(encodedData));
+    var backup=pendingBackup;
     S.myName=backup.myName||"";
     S.draftOrder=backup.draftOrder||[];
     S.clubMax=backup.clubMax||2;
@@ -1277,6 +1288,7 @@ function doImportBackup(encodedData){
     S.playerPool=backup.playerPool||[];
     if(backup.clubs&&backup.clubs.length>0) PL_CLUBS=backup.clubs;
     saveAll();
+    pendingBackup=null;
     closeModal();
     showToast("Backup restored!");
     setTimeout(function(){location.reload();},1000);
