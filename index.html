@@ -1429,9 +1429,7 @@ function renderWelcomeScreen(){
     html += makeWelcomeBtn('&#x2699; Settings','#30363d',function(){showScreen('main');showTab('settings');});
   } else {
     html += makeWelcomeBtn('&#x26BD; Set Up New Draft','#10b981',function(){showScreen('setup');});
-    if(hasSavedData){
-      html += makeWelcomeBtn('&#x2B06; Restore from Backup','#30363d',function(){importBackup();});
-    }
+    html += makeWelcomeBtn('&#x2B06; Restore from Backup','#30363d',function(){importBackup();});
   }
 
   // Always show settings access
