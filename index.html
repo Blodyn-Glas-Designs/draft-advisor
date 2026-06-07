@@ -1582,12 +1582,31 @@ var poolClubFilter="ALL",poolPosFilter="ALL",poolSort="pts_desc",poolShow="all";
 function renderPoolTab(){
   var el=document.getElementById("tab-pool");
   if(!el) return;
+
+  // Only build the outer shell once - avoids destroying the search input on every keystroke
+  if(!el.querySelector("#pool-srch")){
+    el.innerHTML='<div style="padding:10px 14px 0;flex-shrink:0;">'+
+      '<input class="inp" id="pool-srch" placeholder="Search players or clubs..." '+
+      'oninput="searchQuery=this.value;renderPoolResults();" style="font-size:14px;">'+
+      '</div>'+
+      '<div id="pool-results" style="padding:14px;overflow-y:auto;flex:1;"></div>';
+    // Restore search value if any
+    document.getElementById("pool-srch").value = searchQuery;
+  }
+  renderPoolResults();
+}
+
+function renderPoolResults(){
+  var el=document.getElementById("pool-results");
+  if(!el) return;
+
   var allPlayers=S.playerPool.slice();
-  if(searchQuery&&searchQuery.length>1){
+  if(searchQuery&&searchQuery.length>0){
     var sq=searchQuery.toLowerCase();
     allPlayers=allPlayers.filter(function(p){return p.name.toLowerCase().includes(sq)||p.club.toLowerCase().includes(sq);});
   }
-  // Attach draft info and current season points to each player
+
+  // Attach draft info and current season points
   allPlayers=allPlayers.map(function(p){
     var key=p.name+"|"+p.club;
     var picker=S.pickedMap[key]||null;
@@ -1600,14 +1619,13 @@ function renderPoolTab(){
   var undrafted=allPlayers.filter(function(p){return !p.picker;}).sort(function(a,b){return b.seasonPts-a.seasonPts;});
   var topMiss=undrafted[0]||null;
 
-  // Filters
+  // Apply filters
   var filtered=allPlayers.slice();
   if(poolClubFilter!=="ALL") filtered=filtered.filter(function(p){return p.club===poolClubFilter;});
   if(poolPosFilter!=="ALL") filtered=filtered.filter(function(p){return p.position===poolPosFilter;});
   if(poolShow==="undrafted") filtered=filtered.filter(function(p){return !p.picker;});
   if(poolShow==="drafted") filtered=filtered.filter(function(p){return !!p.picker;});
 
-  // Sort
   filtered.sort(function(a,b){
     if(poolSort==="pts_desc") return b.seasonPts-a.seasonPts;
     if(poolSort==="pts_asc") return a.seasonPts-b.seasonPts;
@@ -1616,68 +1634,55 @@ function renderPoolTab(){
     return 0;
   });
 
-  var posColors={GK:"#f59e0b",DEF:"#3b82f6",MID:"#10b981",ATT:"#ef4444"};
-  var html='<div style="display:flex;flex-direction:column;flex:1;overflow:hidden;"><div style="padding:10px 14px 0;flex-shrink:0;"><input class="inp" id="pool-srch" placeholder="Search players or clubs..." oninput="searchQuery=this.value;renderPoolTab();" value="'+searchQuery+'"></div><div style="padding:14px;overflow-y:auto;flex:1;">';
+  var html='';
 
   // Summary strip
-  html+='<div class="stat-grid" style="margin-bottom:12px;">'
-    +'<div class="stat-card"><div class="sv">'+undrafted.length+'</div><div class="sl">Undrafted Players</div></div>'
-    +'<div class="stat-card"><div class="sv">'+(topMiss?topMiss.seasonPts:0)+'</div><div class="sl">'+(topMiss?"Best Undrafted ("+topMiss.name+")":"Best Undrafted")+'</div></div>'
-    +'</div>';
+  html+='<div class="stat-grid" style="margin-bottom:12px;">'+
+    '<div class="stat-card"><div class="sv">'+undrafted.length+'</div><div class="sl">Undrafted</div></div>'+
+    '<div class="stat-card"><div class="sv">'+(topMiss?topMiss.seasonPts:0)+'</div><div class="sl">'+(topMiss?"Best: "+topMiss.name:"Best Undrafted")+'</div></div>'+
+    '</div>';
 
   // Filter bar
   html+='<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;">';
-
-  // Club dropdown
-  html+='<select onchange="poolClubFilter=this.value;renderPoolTab();" style="flex:1;min-width:120px;padding:8px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#f0f6fc;font-size:13px;font-family:inherit;">';
+  html+='<select onchange="poolClubFilter=this.value;renderPoolResults();" style="flex:1;min-width:110px;padding:8px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#f0f6fc;font-size:13px;font-family:inherit;">';
   html+='<option value="ALL"'+(poolClubFilter==="ALL"?" selected":"")+'>All Clubs</option>';
   PL_CLUBS.forEach(function(c){html+='<option value="'+c+'"'+(poolClubFilter===c?" selected":"")+'>'+c+'</option>';});
   html+='</select>';
-
-  // Position filter
-  html+='<select onchange="poolPosFilter=this.value;renderPoolTab();" style="padding:8px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#f0f6fc;font-size:13px;font-family:inherit;">';
+  html+='<select onchange="poolPosFilter=this.value;renderPoolResults();" style="padding:8px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#f0f6fc;font-size:13px;font-family:inherit;">';
   ["ALL","GK","DEF","MID","ATT"].forEach(function(pos){html+='<option value="'+pos+'"'+(poolPosFilter===pos?" selected":"")+'>'+pos+'</option>';});
   html+='</select>';
-
-  // Sort
-  html+='<select onchange="poolSort=this.value;renderPoolTab();" style="padding:8px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#f0f6fc;font-size:13px;font-family:inherit;">';
-  [["pts_desc","Pts (High)"],["pts_asc","Pts (Low)"],["rating","Rating"],["name","Name"]].forEach(function(o){html+='<option value="'+o[0]+'"'+(poolSort===o[0]?" selected":"")+'>'+o[1]+'</option>';});
+  html+='<select onchange="poolSort=this.value;renderPoolResults();" style="padding:8px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#f0f6fc;font-size:13px;font-family:inherit;">';
+  [["pts_desc","Pts High"],["pts_asc","Pts Low"],["rating","Rating"],["name","A-Z"]].forEach(function(o){html+='<option value="'+o[0]+'"'+(poolSort===o[0]?" selected":"")+'>'+o[1]+'</option>';});
   html+='</select>';
-
-  // Show filter
-  html+='<select onchange="poolShow=this.value;renderPoolTab();" style="padding:8px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#f0f6fc;font-size:13px;font-family:inherit;">';
-  [["all","All Players"],["undrafted","Undrafted"],["drafted","Drafted"]].forEach(function(o){html+='<option value="'+o[0]+'"'+(poolShow===o[0]?" selected":"")+'>'+o[1]+'</option>';});
+  html+='<select onchange="poolShow=this.value;renderPoolResults();" style="padding:8px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#f0f6fc;font-size:13px;font-family:inherit;">';
+  [["all","All"],["undrafted","Undrafted"],["drafted","Drafted"]].forEach(function(o){html+='<option value="'+o[0]+'"'+(poolShow===o[0]?" selected":"")+'>'+o[1]+'</option>';});
   html+='</select>';
-
   html+='</div>';
 
-  // Player count
   html+='<div style="color:#484f58;font-size:12px;margin-bottom:10px;">'+filtered.length+' players</div>';
 
   // Player list
   filtered.forEach(function(p){
     var dim=p.picker?0.5:1;
-    var borderCol=p.picker?"#21262d":"#30363d";
-    var pickerLabel=p.picker?'<span style="font-size:11px;color:#8b949e;margin-left:6px;">Picked by '+p.picker+'</span>':'<span style="font-size:11px;color:#10b981;margin-left:6px;">Available</span>';
-    html+='<div style="background:#161b22;border:1px solid '+borderCol+';border-radius:10px;padding:10px 14px;margin-bottom:5px;opacity:'+dim+';">'
-      +'<div style="display:flex;align-items:center;gap:10px;">'
-      +'<span class="badge badge-'+p.position+'">'+p.position+'</span>'
-      +'<div style="flex:1;">'
-      +'<div style="font-size:14px;font-weight:700;color:#f0f6fc;">'+p.name+pickerLabel+'</div>'
-      +'<div style="font-size:12px;color:#8b949e;">'+p.club+' &middot; &pound;'+p.fplPrice+'m &middot; &#x2B50;'+p.rating+'/10</div>'
-      +'</div>'
-      +'<div style="text-align:right;">'
-      +'<div style="color:#10b981;font-size:16px;font-weight:700;">'+p.seasonPts+'pts</div>'
-      +'<div style="color:#484f58;font-size:11px;">this season</div>'
-      +'</div></div></div>';
+    var border=p.picker?"#21262d":"#30363d";
+    var pickerLabel=p.picker?'<span style="font-size:11px;color:#8b949e;margin-left:6px;">'+p.picker+'</span>':'<span style="font-size:11px;color:#10b981;margin-left:6px;">Available</span>';
+    html+='<div style="background:#161b22;border:1px solid '+border+';border-radius:10px;padding:10px 14px;margin-bottom:5px;opacity:'+dim+';">'+
+      '<div style="display:flex;align-items:center;gap:10px;">'+
+      '<span class="badge badge-'+p.position+'">'+p.position+'</span>'+
+      '<div style="flex:1;">'+
+      '<div style="font-size:14px;font-weight:700;color:#f0f6fc;">'+p.name+pickerLabel+'</div>'+
+      '<div style="font-size:12px;color:#8b949e;">'+p.club+' &middot; &pound;'+p.fplPrice+'m &middot; &#x2B50;'+p.rating+'/10</div>'+
+      '</div>'+
+      '<div style="text-align:right;">'+
+      '<div style="color:#10b981;font-size:16px;font-weight:700;">'+p.seasonPts+'</div>'+
+      '<div style="color:#484f58;font-size:10px;">pts</div>'+
+      '</div></div></div>';
   });
 
   if(filtered.length===0) html+='<div style="padding:30px;text-align:center;color:#484f58;">No players match these filters</div>';
-  html+='</div></div>';
   el.innerHTML=html;
 }
 
-// ── ENHANCED STATS ─────────────────────────────────────────────────────────────
 function renderStatsSection(standings){
   if(Object.keys(S.scores).length===0){
     return '<div class="warn" style="margin-top:10px;">&#x26A0; No scores loaded yet. Use Refresh Scores to fetch the latest FPL data.</div>';
