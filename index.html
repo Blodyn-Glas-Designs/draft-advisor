@@ -797,10 +797,11 @@ function undoPick(){
 async function generateAdvice(){
   S.adviceLoading=true; S.advice=null;
   renderAdviceTab();
+
   var avail=available();
   var myTeam=S.teams[S.myName]||{};
   var slotsLeft={};
-  Object.keys(SLOTS).forEach(function(pos){slotsLeft[pos]=SLOTS[pos]-(myTeam[pos]||[]).length;});
+  Object.keys(SLOTS).forEach(function(pos){ slotsLeft[pos]=SLOTS[pos]-(myTeam[pos]||[]).length; });
   var totalLeft=Object.values(slotsLeft).reduce(function(a,b){return a+b;},0);
   var topGKs=avail.filter(function(p){return p.position==="GK"&&p.rating>=7;}).length;
   var upcoming=S.snakeOrder.slice(S.pickIdx+1);
@@ -812,465 +813,105 @@ async function generateAdvice(){
       if(clubCountForPicker(S.myName,p.club)>=S.clubMax&&!blockedClubs.includes(p.club)) blockedClubs.push(p.club);
     });
   });
-  var sys="You are an elite Premier League fantasy draft strategist.\nMY TEAM: "+JSON.stringify(myTeam)+"\nSLOTS NEEDED: "+JSON.stringify(slotsLeft)+" ("+totalLeft+" picks left)\nPICKS UNTIL MY NEXT TURN: "+(nextTurn<0?"last pick":nextTurn)+"\nTOP GKs AVAILABLE (rated 7+): "+topGKs+"\nCLUBS AT LIMIT (cannot pick from): "+blockedClubs.join(",")+"\nMAX PER CLUB: "+S.clubMax+"\nTOP 60 AVAILABLE: "+JSON.stringify(avail.slice(0,60).map(function(p){return {n:p.name,c:p.club,pos:p.position,price:p.fplPrice,pts:p.lastSeasonPts,r:p.rating};}))+"\nNEXT 20 PICKS: "+S.snakeOrder.slice(S.pickIdx,S.pickIdx+20).join(", ")+"\nReturn JSON only: {\"pick\":{\"name\":\"\",\"club\":\"\",\"position\":\"\",\"fplPrice\":0,\"lastSeasonPts\":0,\"rating\":0},\"reason\":\"2-3 sentences\",\"scarcity\":\"one line or empty\",\"nextTarget\":\"brief note\"}";
+
+  // Top candidates to research (top 10 available by rating)
+  var topCandidates = avail.slice(0,10).map(function(p){ return p.name+" ("+p.club+")"; }).join(", ");
+
   try{
-    var raw=await callClaude(sys,"Recommend my next draft pick.",500);
-    S.advice=extractJSON(raw);
+    // Step 1: Web search for current news on top candidates
+    var searchSys = "You are a Premier League football news researcher. Today is "+new Date().toDateString()+". "+
+      "Search for the latest news on these players: "+topCandidates+". "+
+      "For each player find: injury status, likelihood of starting, any transfer rumours affecting their team, manager changes, fixture difficulty for the first 10 gameweeks, set piece roles (penalties/free kicks), rotation risk. "+
+      "Return a JSON object where keys are player names and values are objects with fields: "+
+      "{injury: string or null, startingRisk: 'low'|'medium'|'high', fixtureRating: 1-10 (10=easiest), setPiece: boolean, keyNews: string (one sentence of most important news), recommendation: 'strong'|'consider'|'avoid'}. "+
+      "Raw JSON only starting with {.";
+
+    var newsRaw = await callClaude(searchSys, "Search for latest Premier League news and injury updates for these players: "+topCandidates+". Return as JSON.", 3000);
+    var playerNews = {};
+    try{ playerNews = extractJSON(newsRaw); }catch(e){ console.warn("News parse failed:", e.message); }
+
+    // Step 2: Search for general PL context
+    var contextSys = "Premier League fantasy football expert. Today: "+new Date().toDateString()+". "+
+      "Search for: current Premier League injury list 2026, manager changes 2025-26 season, key transfer news summer 2026. "+
+      "Return a brief JSON: {injuries: [list of notable injured players], managerChanges: [list of manager changes and impact], transferNews: [key signings affecting fantasy value]}. "+
+      "Raw JSON only starting with {.";
+
+    var contextRaw = await callClaude(contextSys, "Search for current PL injuries, manager changes and transfer news for fantasy football. Return JSON.", 1500);
+    var leagueContext = {};
+    try{ leagueContext = extractJSON(contextRaw); }catch(e){ console.warn("Context parse failed:", e.message); }
+
+    // Step 3: Decline risk analysis on top 5 candidates
+    var top5names = avail.slice(0,5).map(function(p){ return p.name+" ("+p.club+")"; }).join(", ");
+    var declineSys = "You are a Premier League fantasy football risk analyst. Today: "+new Date().toDateString()+". "+
+      "For each of these players search for decline risk: "+top5names+". "+
+      "Check: exact age (flag if 30+), contract status (final year?), pre-season 2026 form, "+
+      "whether last season was consistent multi-year form or a one-off peak, "+
+      "key teammate dependencies (did a key creator or partner leave?), "+
+      "regression risk (did they massively outperform xG/xA?). "+
+      "Return JSON only starting with {. Keys are player names, values: "+
+      "{age:number,ageRisk:'low'|'medium'|'high',contractRisk:'low'|'medium'|'high',"+
+      "formTrend:'rising'|'stable'|'declining'|'unknown',"+
+      "keyDependency:string_or_null,declineFlag:boolean,declineReason:string_or_null}.";
+    var declineRaw = await callClaude(declineSys, "Search decline risk for: "+top5names+". Return JSON.", 2000);
+    var declineRisk = {};
+    try{ declineRisk = extractJSON(declineRaw); }catch(e){ console.warn("Decline parse failed:", e.message); }
+
+    // Step 4: Generate recommendation with all enriched context
+    var sysLines = [
+      "You are an elite Premier League fantasy draft strategist with access to current news. Today: "+new Date().toDateString()+".",
+      "MY TEAM: "+JSON.stringify(myTeam),
+      "SLOTS NEEDED: "+JSON.stringify(slotsLeft)+" ("+totalLeft+" picks left)",
+      "PICKS UNTIL MY NEXT TURN: "+(nextTurn<0?"last pick":nextTurn),
+      "TOP GKs AVAILABLE (rated 7+): "+topGKs,
+      "CLUBS AT MY LIMIT: "+blockedClubs.join(","),
+      "MAX PER CLUB: "+S.clubMax,
+      "NEXT 20 PICKS: "+S.snakeOrder.slice(S.pickIdx,S.pickIdx+20).join(", "),
+      "TOP 40 AVAILABLE PLAYERS: "+JSON.stringify(avail.slice(0,40).map(function(p){
+        var news=playerNews[p.name]||{};
+        var decline=declineRisk[p.name]||{};
+        return {name:p.name,club:p.club,pos:p.position,price:p.fplPrice,lastPts:p.lastSeasonPts,rating:p.rating,
+          injury:news.injury||null,startingRisk:news.startingRisk||"unknown",
+          fixtureRating:news.fixtureRating||null,setPiece:news.setPiece||false,
+          keyNews:news.keyNews||null,signal:news.recommendation||"unknown",
+          age:decline.age||null,ageRisk:decline.ageRisk||null,
+          formTrend:decline.formTrend||null,contractRisk:decline.contractRisk||null,
+          keyDependency:decline.keyDependency||null,
+          declineFlag:decline.declineFlag||false,declineReason:decline.declineReason||null};
+      })),
+      "CURRENT LEAGUE CONTEXT: "+JSON.stringify(leagueContext),
+      "DECISION FRAMEWORK - weight in this order: "+
+      "1. PRIMARY: Last season FPL points (core quality signal), FPL price (value for money), position scarcity in this draft. "+
+      "2. SUPPLEMENT: Use current news to CONFIRM or FLAG CONCERNS about top stat-based candidates. "+
+      "If a high-points player has an injury concern, flag it but still consider them if injury is minor. "+
+      "If a high-points player has high rotation risk, downgrade them. "+
+      "If a player has great fixtures for first 10 GWs, upgrade them slightly. "+
+      "3. DECLINE RISK - This is critical. Before recommending a high-scoring player from last season, check: "+
+      "Is their declineFlag true? If so, explicitly warn. "+
+      "Age 30+ with high ageRisk = serious concern, especially for attackers. "+
+      "formTrend=declining = major red flag even with high last season points. "+
+      "contractRisk=high = motivation/focus concern. "+
+      "keyDependency = if that teammate left, their value may have collapsed. "+
+      "A player like Salah who had a great 23/24 but is now 33, in contract year, lost key teammate = HIGH RISK despite stats. "+
+      "4. NEVER ignore a high-points player purely based on one minor factor - but multiple decline flags = serious downgrade. "+
+      "5. Also consider: GK scarcity, blocking rivals, snake position, club limits.",
+      "Return JSON only: {pick:{name,club,position,fplPrice,lastSeasonPts,rating},reason:'2-3 sentences covering stats AND current context',scarcity:'position scarcity warning or empty',riskFlag:'injury or rotation concern or empty',declineWarning:'decline risk warning if age/form/contract flags present - be specific eg Salah 33 declining form lost Trent or empty',fixtureNote:'fixture difficulty note or empty',nextTarget:'brief next turn target'}"
+    ];
+    var sys = sysLines.join(" ");
+    var rec = await callClaude(sys, "Give me my best draft pick recommendation based on current form, injuries and news.", 600);
+    S.advice = extractJSON(rec);
+
   }catch(e){
-    S.advice={pick:avail[0]||null,reason:"Could not generate recommendation. Pick the highest rated available player for your most needed position.",scarcity:"",nextTarget:""};
+    console.error("Advice failed:", e.message);
+    S.advice = {
+      pick: avail[0]||null,
+      reason: "Could not generate recommendation. Pick the highest rated available player for your most needed position.",
+      scarcity:"", riskFlag:"", fixtureNote:"", nextTarget:""
+    };
   }
+
   S.adviceLoading=false;
   renderAdviceTab();
 }
-
-// ── RENDER: TOP BAR ────────────────────────────────────────────────────────────
-function renderTopBar(){
-  var picker=currentPicker(),myT=isMyTurn(),allDone=draftComplete();
-  var title,info;
-  if(S.draftDone){title="&#x1F3C6; Draft Complete";info="Season underway";}
-  else if(allDone){title="&#x2705; All picks made!";info="Tap End Draft to confirm";}
-  else if(myT){title="&#x1F7E2; YOUR TURN";info="Pick "+(S.pickIdx+1)+"/"+S.snakeOrder.length;}
-  else if(picker){title=picker+"'s pick";info="Pick "+(S.pickIdx+1)+"/"+S.snakeOrder.length;}
-  else{title="Draft Advisor";info="";}
-  document.getElementById("topbar-title").innerHTML=title;
-  document.getElementById("topbar-info").textContent=info;
-  var undoBtn=document.getElementById("undo-btn");
-  undoBtn.style.display=(S.history.length>0&&!S.draftDone)?"block":"none";
-  document.querySelectorAll(".nav-btn[data-tab='draft']").forEach(function(b){b.style.display=S.hideDraft?"none":"";});
-  document.querySelectorAll(".nav-btn[data-tab='advice']").forEach(function(b){b.classList.toggle("my-turn",myT&&!S.draftDone&&!allDone);});
-}
-function checkAdviceBanner(){
-  var show=isMyTurn()&&!S.draftDone&&!draftComplete();
-  document.getElementById("advice-banner").style.display=show?"flex":"none";
-  if(show&&!S.advice&&!S.adviceLoading) generateAdvice();
-}
-function checkCaptainBanner(){
-  var d=capDaysLeft(S.myName);
-  var banner=document.getElementById("captain-banner");
-  if(d!==null&&d<=7){
-    document.getElementById("captain-banner-text").textContent=d<=0?"&#x26A0;&#xFE0F; Your captain has expired - change them now!":"&#x26A0;&#xFE0F; Captain expires in "+d+" days";
-    banner.style.display="block";
-  } else banner.style.display="none";
-}
-
-// ── RENDER: DRAFT ──────────────────────────────────────────────────────────────
-var selectedClub=null,posFilter="ALL",tappedPlayer=null;
-
-function renderDraftTab(){
-  var el=document.getElementById("tab-draft");
-  if(S.draftDone){el.innerHTML='<div style="padding:40px;text-align:center;color:#8b949e;">&#x1F3C6; Draft complete! Good luck this season.</div>';return;}
-  if(draftComplete()){
-    el.innerHTML='<div style="padding:32px 20px;text-align:center;"><div style="font-size:48px;margin-bottom:12px;">&#x2705;</div><div style="font-size:20px;font-weight:700;margin-bottom:8px;">All picks made!</div><div style="color:#8b949e;font-size:14px;margin-bottom:24px;">Every player has been selected. Confirm the draft is complete to begin the season.</div><button class="btn btn-green" onclick="confirmEndDraft()">&#x1F3C6; End Draft &amp; Start Season</button><button class="btn btn-gray" style="margin-top:8px;" onclick="undoPick()">&#x21A9; Undo Last Pick</button></div>';
-    return;
-  }
-  if(!selectedClub) renderClubGrid(el);
-  else renderClubPlayers(el);
-}
-
-function renderClubGrid(el){
-  var picker=currentPicker()||"?";
-  var avail=available();
-  var picksLeft=S.snakeOrder.length-S.pickIdx;
-  var html='<div style="padding:12px 14px 8px;flex-shrink:0;"><div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;"><div class="sec-hdr" style="margin:0;">'+picker+"'s pick &mdash; "+picksLeft+" picks left</div>"+'<button class="btn btn-gray" style="width:auto;padding:6px 12px;font-size:12px;border:1px solid #ef4444;color:#ef4444;" onclick="confirmEndDraft()">End Draft</button></div></div><div class="club-grid">';
-  PL_CLUBS.forEach(function(club){
-    var clubAvail=avail.filter(function(p){return p.club===club;});
-    var total=S.playerPool.filter(function(p){return p.club===club;}).length;
-    var picked=total-clubAvail.length;
-    var blocked=isClubBlocked(picker,club);
-    var col=getClubColor(club);
-    var dim=(clubAvail.length===0||blocked)?' style="opacity:0.35;pointer-events:none;"':"";
-    var blockLabel=blocked?'<div style="color:#ef4444;font-size:10px;">Limit reached</div>':"";
-    html+='<button class="club-btn"'+dim+' onclick="selectClub(\''+club.replace(/'/g,"\\'")+'\')\" style="border-color:'+col+';">'+'<div class="cdot" style="background:'+col+';"></div>'+'<div class="cname">'+club+'</div>'+'<div class="cavail">'+clubAvail.length+' available</div>'+(picked>0?'<div style="color:#484f58;font-size:10px;">'+picked+' picked</div>':"")+blockLabel+"</button>";
-  });
-  html+='<button class="club-btn" onclick="openWildcardModal()" style="border-color:#8b5cf6;border-style:dashed;"><div class="cdot" style="background:#8b5cf6;"></div><div class="cname" style="color:#8b5cf6;">Non-PL Wildcard</div><div class="cavail">Free type</div></button>';
-  html+="</div>";
-  el.innerHTML=html;
-}
-
-function selectClub(club){
-  if(isClubBlocked(currentPicker()||"",club)){showToast(currentPicker()+" already has "+S.clubMax+" players from "+club);return;}
-  selectedClub=club; posFilter="ALL"; tappedPlayer=null;
-  renderClubPlayers(document.getElementById("tab-draft"));
-}
-
-function renderClubPlayers(el){
-  var picker=currentPicker()||"?";
-  var col=getClubColor(selectedClub);
-  var allAvail=available().filter(function(p){return p.club===selectedClub;});
-  var filtered=allAvail.filter(function(p){return posFilter==="ALL"||p.position===posFilter;});
-  var posColors={GK:"#f59e0b",DEF:"#3b82f6",MID:"#10b981",ATT:"#ef4444"};
-  var html='<div style="padding:12px 14px;flex-shrink:0;"><div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;"><button class="btn btn-gray" style="width:auto;padding:7px 12px;font-size:13px;" onclick="selectedClub=null;tappedPlayer=null;renderDraftTab();">&#x2190; Clubs</button><div style="flex:1;font-weight:700;font-size:15px;">'+selectedClub+'</div><div style="width:12px;height:12px;border-radius:50%;background:'+col+';"></div></div><div class="pos-filters">';
-  ["ALL","GK","DEF","MID","ATT"].forEach(function(pos){
-    var active=posFilter===pos;
-    var bg=active?(pos==="ALL"?"#30363d":(posColors[pos]||"#333")):"#21262d";
-    var tc=active?"#fff":"#8b949e";
-    html+='<button class="pos-btn" onclick="posFilter=\''+pos+'\';renderClubPlayers(document.getElementById(\'tab-draft\'));" style="background:'+bg+';color:'+tc+';">'+pos+'</button>';
-  });
-  html+='</div></div><div style="padding:0 14px 14px;overflow-y:auto;flex:1;">';
-  if(filtered.length===0){
-    html+='<div style="padding:20px;text-align:center;color:#484f58;">No available '+(posFilter==="ALL"?"players":posFilter)+" from "+selectedClub+"</div>";
-  } else {
-    filtered.forEach(function(p){
-      var isTapped=tappedPlayer&&tappedPlayer.name===p.name&&tappedPlayer.club===p.club;
-      var posCol=posColors[p.position]||"#333";
-      html+='<div class="player-row'+(isTapped?" tapped":"")+'" onclick="tapPlayer(\''+p.name.replace(/'/g,"\\'")+'\',\''+p.club.replace(/'/g,"\\'")+'\')">'+
-        '<div style="display:flex;align-items:center;gap:10px;">'+
-        '<span class="badge badge-'+p.position+'">'+p.position+'</span>'+
-        '<div style="flex:1;"><div class="pname">'+p.name+'</div><div class="psub">&pound;'+p.fplPrice+'m &middot; '+p.lastSeasonPts+'pts &middot; &#x2B50;'+p.rating+'/10</div></div></div>';
-      if(isTapped){
-        html+='<div class="confirm-btns"><button class="cb-yes" onclick="event.stopPropagation();doConfirmPick()">&#x2713; Pick for '+picker+'</button><button class="cb-no" onclick="event.stopPropagation();tappedPlayer=null;renderDraftTab();">&#x2717; Cancel</button></div>';
-      }
-      html+="</div>";
-    });
-  }
-  html+="</div>";
-  el.innerHTML=html;
-}
-
-function tapPlayer(name,club){
-  var p=available().find(function(p){return p.name===name&&p.club===club;});
-  if(!p) return;
-  tappedPlayer=(tappedPlayer&&tappedPlayer.name===name&&tappedPlayer.club===club)?null:p;
-  renderClubPlayers(document.getElementById("tab-draft"));
-}
-
-function doConfirmPick(){
-  if(!tappedPlayer) return;
-  var picker=currentPicker();
-  if(tappedPlayer.position!=="WC"&&isClubBlocked(picker,tappedPlayer.club)){
-    showToast("Cannot pick - "+picker+" already has "+S.clubMax+" from "+tappedPlayer.club);
-    tappedPlayer=null; renderDraftTab(); return;
-  }
-  confirmPick(tappedPlayer,picker);
-  tappedPlayer=null; selectedClub=null;
-  showTab(isMyTurn()&&!S.draftDone?"advice":"draft");
-}
-
-function openWildcardModal(){
-  var picker=currentPicker();
-  var team=S.teams[picker]||{};
-  if(SLOTS.WC-(team.WC||[]).length<=0){showToast(picker+" has no wildcard slots left");return;}
-  showModal('<h3>&#x1F0CF; Non-PL Wildcard</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Free-type a player not in the Premier League. They won\'t score until subbed in (by which point they must be at a PL club).</p><label class="lbl">Player Name</label><input class="inp" id="wc-name" placeholder="e.g. Kylian Mbappe" style="margin-bottom:10px;"><label class="lbl">Position</label><select class="inp" id="wc-pos" style="margin-bottom:10px;"><option value="GK">GK</option><option value="DEF">DEF</option><option value="MID">MID</option><option value="ATT" selected>ATT</option></select><label class="lbl">Current Club (non-PL)</label><input class="inp" id="wc-club" placeholder="e.g. Real Madrid" style="margin-bottom:14px;"><button class="btn btn-blue" onclick="confirmWildcard()">Add as Wildcard</button>');
-}
-
-function confirmWildcard(){
-  var name=document.getElementById("wc-name").value.trim();
-  var pos=document.getElementById("wc-pos").value;
-  var club=document.getElementById("wc-club").value.trim()||"Unknown";
-  if(!name){showToast("Please enter a player name");return;}
-  var player={name:name,club:club,position:pos,fplPrice:0,lastSeasonPts:0,rating:5,isNonPL:true,pickNumber:S.pickIdx+1};
-  var picker=currentPicker();
-  S.teams[picker].WC.push(player);
-  S.pickedMap[name+"|"+club]=picker;
-  S.pickIdx++;
-  saveAll(); closeModal(); renderTopBar(); checkAdviceBanner(); renderDraftTab();
-}
-
-function confirmEndDraft(){
-  showModal('<h3>End Draft?</h3><p style="color:#8b949e;margin-bottom:14px;">Mark the draft as complete. All clubs and player browsing will be hidden and season scoring will begin.</p><button class="btn btn-green" onclick="endDraft()">Yes, Draft is Complete</button><button class="btn btn-gray" style="margin-top:8px;" onclick="closeModal()">Cancel</button>');
-}
-function endDraft(){
-  S.draftDone=true; S.hideDraft=true;
-  saveAll(); closeModal(); renderTopBar();
-  document.querySelectorAll(".nav-btn[data-tab='pool']").forEach(function(b){b.style.display="";});
-  showTab(S.defaultTab||"myteam");
-}
-
-// ── RENDER: MY TEAM ────────────────────────────────────────────────────────────
-function renderMyTeamTab(){
-  var el=document.getElementById("tab-myteam");
-  var team=S.teams[S.myName]||{};
-  var totalPts=getPersonTotalPts(S.myName);
-  var cap=S.captains[S.myName];
-  var html='<div style="padding:14px;overflow-y:auto;flex:1;"><div class="stat-grid"><div class="stat-card"><div class="sv">'+totalPts+'</div><div class="sl">Total Points</div></div><div class="stat-card"><div class="sv">'+getPersonGWPts(S.myName,S.currentGW)+'</div><div class="sl">GW'+S.currentGW+' Points</div></div></div>';
-  if(cap){
-    html+='<div class="card" style="border-color:#f59e0b;"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><span style="font-size:13px;color:#8b949e;">Captain:</span><strong>'+cap.player.name+'</strong><span class="cap-badge">C</span>'+capTimerHtml(S.myName)+'<button class="btn btn-gray" style="width:auto;padding:5px 10px;font-size:12px;margin-left:auto;" onclick="openCaptainModal(\''+S.myName.replace(/'/g,"\\'")+'\')" >Change</button></div></div>';
-  } else if(S.draftDone){
-    html+='<div class="warn">&#x26A0;&#xFE0F; No captain nominated!<button class="btn btn-blue" style="margin-top:8px;" onclick="openCaptainModal(\''+S.myName.replace(/'/g,"\\'")+'\')">Nominate Captain</button></div>';
-  }
-  html+='<div class="sec-hdr">My Squad</div>';
-  Object.entries(SLOTS).forEach(function(entry){
-    var pos=entry[0],needed=entry[1];
-    html+='<div style="margin-bottom:14px;"><div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;"><span class="badge badge-'+pos+'">'+pos+'</span><span style="color:#484f58;font-size:12px;">'+(team[pos]||[]).length+"/"+needed+"</span></div>";
-    for(var i=0;i<needed;i++){
-      var p=(team[pos]||[])[i];
-      if(p){
-        var key=p.name+"|"+p.club;
-        var isCap=cap&&(cap.player.name+"|"+cap.player.club)===key;
-        var pts=getPlayerPts(key,S.myName);
-        var subbed=(S.wildcardSubs[S.myName]||[]).find(function(s){return (s.outPlayer.name+"|"+s.outPlayer.club)===key;});
-        html+='<div class="roster-slot filled"'+(subbed?' style="opacity:0.4;"':"")+"><div style='display:flex;align-items:center;justify-content:space-between;'><div><div style='font-size:14px;font-weight:700;'>"+p.name+(isCap?'<span class="cap-badge">C &times;2</span>':"")+' <span style="font-size:10px;color:#484f58;font-weight:normal;">'+(p.pickNumber?"#"+p.pickNumber:"")+"</span></div><div style='font-size:12px;color:#8b949e;'>"+p.club+(subbed?" &middot; <span style='color:#ef4444;'>Subbed out</span>":"")+"</div></div><div style='text-align:right;'><div style='color:#10b981;font-size:14px;font-weight:700;'>"+pts+"pts</div><div style='color:#484f58;font-size:11px;'>&pound;"+p.fplPrice+"m</div></div></div></div>";
-      } else {
-        html+='<div class="roster-slot"><div style="color:#484f58;font-size:13px;">Empty slot</div></div>';
-      }
-    }
-    if(pos==="WC"&&S.draftDone){
-      (team[pos]||[]).forEach(function(p,i){
-        var key=p.name+"|"+p.club;
-        var subIn=(S.wildcardSubs[S.myName]||[]).find(function(s){return (s.inPlayer.name+"|"+s.inPlayer.club)===key;});
-        if(!subIn&&!p.isNonPL){
-          html+='<button class="btn btn-gray" style="margin-top:4px;font-size:12px;padding:8px;" onclick="openSubModal(\''+S.myName.replace(/'/g,"\\'")+'\','+i+')">Sub in '+p.name+"</button>";
-        } else if(p.isNonPL&&!subIn){
-          html+='<button class="btn btn-gray" style="margin-top:4px;font-size:12px;padding:8px;border-color:#f59e0b;" onclick="resolveWildcard(\''+S.myName.replace(/'/g,"\\'")+'\','+i+')">&#x26A0; Resolve '+p.name+" (Non-PL)</button>";
-        }
-      });
-    }
-    html+="</div>";
-  });
-  html+="</div>";
-  el.innerHTML=html;
-}
-
-// ── RENDER: FRIENDS ────────────────────────────────────────────────────────────
-var viewingFriend=null;
-function renderFriendsTab(){
-  var el=document.getElementById("tab-friends");
-  if(viewingFriend){renderFriendDetail(el,viewingFriend);return;}
-  var html='<div style="padding:14px;overflow-y:auto;flex:1;"><div class="sec-hdr">Friends\' Teams</div>';
-  S.draftOrder.filter(function(n){return n!==S.myName;}).forEach(function(name){
-    var team=S.teams[name]||{};
-    var total=Object.values(team).reduce(function(a,arr){return a+arr.length;},0);
-    var pts=getPersonTotalPts(name);
-    var cap=S.captains[name];
-    html+='<button onclick="viewingFriend=\''+name.replace(/'/g,"\\'")+'\';renderFriendsTab();" style="display:flex;align-items:center;width:100%;background:#161b22;border:1px solid #30363d;border-radius:12px;padding:14px 16px;margin-bottom:8px;cursor:pointer;text-align:left;font-family:inherit;"><div style="flex:1;"><div style="color:#f0f6fc;font-weight:700;font-size:15px;">'+name+'</div><div style="color:#8b949e;font-size:12px;margin-top:2px;">'+total+"/"+TOTAL_PICKS+" players &middot; "+pts+"pts"+(cap?" &middot; C: "+cap.player.name:"")+'</div></div><div style="color:#8b949e;font-size:18px;">&#x203A;</div></button>';
-  });
-  html+="</div>";
-  el.innerHTML=html;
-}
-
-function renderFriendDetail(el,name){
-  var team=S.teams[name]||{};
-  var totalPts=getPersonTotalPts(name);
-  var cap=S.captains[name];
-  var html='<div style="padding:14px;overflow-y:auto;flex:1;"><div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;"><button class="btn btn-gray" style="width:auto;padding:7px 12px;font-size:13px;" onclick="viewingFriend=null;renderFriendsTab();">&#x2190; Friends</button><div style="flex:1;font-weight:700;font-size:15px;">'+name+'</div></div><div class="stat-grid"><div class="stat-card"><div class="sv">'+totalPts+'</div><div class="sl">Total Points</div></div><div class="stat-card"><div class="sv">'+getPersonGWPts(name,S.currentGW)+'</div><div class="sl">GW'+S.currentGW+' Points</div></div></div>';
-  if(cap){
-    html+='<div class="card" style="border-color:#f59e0b;margin-bottom:10px;"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><span style="font-size:13px;color:#8b949e;">Captain:</span><strong>'+cap.player.name+'</strong><span class="cap-badge">C</span>'+capTimerHtml(name)+'<button class="btn btn-gray" style="width:auto;padding:5px 10px;font-size:12px;margin-left:auto;" onclick="openCaptainModal(\''+name.replace(/'/g,"\\'")+'\')" >Change</button></div></div>';
-  } else if(S.draftDone){
-    html+='<div class="warn">No captain.<button class="btn btn-blue" style="margin-top:8px;" onclick="openCaptainModal(\''+name.replace(/'/g,"\\'")+'\')">Nominate</button></div>';
-  }
-  Object.entries(SLOTS).forEach(function(entry){
-    var pos=entry[0],needed=entry[1];
-    html+='<div style="margin-bottom:12px;"><div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;"><span class="badge badge-'+pos+'">'+pos+'</span><span style="color:#484f58;font-size:12px;">'+(team[pos]||[]).length+"/"+needed+"</span></div>";
-    for(var i=0;i<needed;i++){
-      var p=(team[pos]||[])[i];
-      if(p){
-        var key=p.name+"|"+p.club;
-        var isCap=cap&&(cap.player.name+"|"+cap.player.club)===key;
-        var pts=getPlayerPts(key,name);
-        var subbed=(S.wildcardSubs[name]||[]).find(function(s){return (s.outPlayer.name+"|"+s.outPlayer.club)===key;});
-        html+='<div class="roster-slot filled"'+(subbed?' style="opacity:0.4;"':"")+"><div style='display:flex;align-items:center;justify-content:space-between;'><div><div style='font-size:14px;font-weight:700;'>"+p.name+(isCap?'<span class="cap-badge">C &times;2</span>':"")+' <span style="font-size:10px;color:#484f58;font-weight:normal;">'+(p.pickNumber?"#"+p.pickNumber:"")+"</span></div><div style='font-size:12px;color:#8b949e;'>"+p.club+(subbed?" &middot; <span style='color:#ef4444;'>Subbed out</span>":"")+"</div></div><div style='text-align:right;'><div style='color:#10b981;font-size:14px;font-weight:700;'>"+pts+"pts</div></div></div></div>";
-      } else {
-        html+='<div class="roster-slot"><div style="color:#484f58;font-size:13px;">Empty</div></div>';
-      }
-    }
-    if(pos==="WC"&&S.draftDone){
-      (team[pos]||[]).forEach(function(p,i){
-        var subIn=(S.wildcardSubs[name]||[]).find(function(s){return (s.inPlayer.name+"|"+s.inPlayer.club)===(p.name+"|"+p.club);});
-        if(!subIn&&!p.isNonPL) html+='<button class="btn btn-gray" style="margin-top:4px;font-size:12px;padding:8px;" onclick="openSubModal(\''+name.replace(/'/g,"\\'")+'\','+i+')">Sub in '+p.name+"</button>";
-      });
-    }
-    html+="</div>";
-  });
-  html+="</div>";
-  el.innerHTML=html;
-}
-
-// ── CAPTAIN MODAL ──────────────────────────────────────────────────────────────
-function openCaptainModal(personName){
-  var team=S.teams[personName]||{};
-  var existing=S.captains[personName];
-  var myPicks=Object.entries(S.pickedMap).filter(function(e){return e[1]===personName;}).map(function(e){return e[0];});
-  var firstPickKey=myPicks[0]||null;
-  var html='<h3>Nominate Captain for '+personName+'</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Cannot be their first pick. Points doubled for up to 3 months.</p>';
-  ["GK","DEF","MID","ATT"].forEach(function(pos){
-    (team[pos]||[]).forEach(function(p){
-      var key=p.name+"|"+p.club;
-      if(key===firstPickKey) return;
-      var isCur=existing&&(existing.player.name+"|"+existing.player.club)===key;
-      html+='<div class="player-row'+(isCur?" tapped":"")+'" onclick="setCaptain(\''+personName.replace(/'/g,"\\'")+'\',\''+p.name.replace(/'/g,"\\'")+'\',\''+p.club.replace(/'/g,"\\'")+'\')"><div style="display:flex;align-items:center;gap:10px;"><span class="badge badge-'+p.position+'">'+p.position+'</span><div style="flex:1;"><div class="pname">'+p.name+(isCur?' <span class="cap-badge">Current C</span>':"")+' <span style="font-size:10px;color:#484f58;font-weight:normal;">'+(p.pickNumber?"#"+p.pickNumber:"")+"</span></div><div class='psub'>"+p.club+"</div></div></div></div>";
-    });
-  });
-  showModal(html);
-}
-function setCaptain(personName,pName,pClub){
-  var team=S.teams[personName]||{},player=null;
-  ["GK","DEF","MID","ATT"].forEach(function(pos){(team[pos]||[]).forEach(function(p){if(p.name===pName&&p.club===pClub)player=p;});});
-  if(!player) return;
-  S.captains[personName]={player:player,dateSet:new Date().toISOString()};
-  sv("captains",S.captains);
-  closeModal(); checkCaptainBanner();
-  renderMyTeamTab(); renderFriendsTab();
-}
-
-// ── WILDCARD SUB ───────────────────────────────────────────────────────────────
-function openSubModal(personName,wcIdx){
-  var team=S.teams[personName]||{};
-  var wcPlayer=(team.WC||[])[wcIdx];
-  if(!wcPlayer) return;
-  var html='<h3>Sub In '+wcPlayer.name+'</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Select a player to permanently replace. They will stop scoring from now.</p>';
-  ["GK","DEF","MID","ATT"].forEach(function(pos){
-    (team[pos]||[]).forEach(function(p,i){
-      var key=p.name+"|"+p.club;
-      var gone=(S.wildcardSubs[personName]||[]).find(function(s){return (s.outPlayer.name+"|"+s.outPlayer.club)===key;});
-      if(gone) return;
-      html+='<div class="player-row" onclick="confirmSub(\''+personName.replace(/'/g,"\\'")+'\','+wcIdx+',\''+p.name.replace(/'/g,"\\'")+'\',\''+p.club.replace(/'/g,"\\'")+'\',\''+pos+'\','+i+')"><div style="display:flex;align-items:center;gap:10px;"><span class="badge badge-'+p.position+'">'+p.position+'</span><div style="flex:1;"><div class="pname">'+p.name+'</div><div class="psub">'+p.club+"</div></div></div></div>";
-    });
-  });
-  showModal(html);
-}
-function confirmSub(personName,wcIdx,outName,outClub,outPos,outIdx){
-  var team=S.teams[personName]||{};
-  var wcPlayer=(team.WC||[])[wcIdx];
-  var outPlayer=(team[outPos]||[])[outIdx];
-  if(!wcPlayer||!outPlayer){closeModal();return;}
-  if(!S.wildcardSubs[personName]) S.wildcardSubs[personName]=[];
-  S.wildcardSubs[personName].push({inPlayer:wcPlayer,outPlayer:outPlayer,gameweek:S.currentGW,wcIdx:wcIdx,outPos:outPos,outIdx:outIdx});
-  sv("wildcards",S.wildcardSubs);
-  closeModal(); renderMyTeamTab();
-  if(viewingFriend===personName) renderFriendDetail(document.getElementById("tab-friends"),personName);
-}
-function resolveWildcard(personName,wcIdx){
-  showModal('<h3>Resolve Wildcard</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">This player is now at a PL club. Select their club to link FPL scoring.</p><label class="lbl">Premier League Club</label><select class="inp" id="resolve-club" style="margin-bottom:14px;">'+PL_CLUBS.map(function(c){return '<option>'+c+'</option>';}).join("")+'</select><button class="btn btn-blue" onclick="doResolveWildcard(\''+personName.replace(/'/g,"\\'")+'\','+wcIdx+')">Resolve</button>');
-}
-function doResolveWildcard(personName,wcIdx){
-  var club=document.getElementById("resolve-club").value;
-  var team=S.teams[personName];
-  if(!team||!team.WC[wcIdx]) return;
-  team.WC[wcIdx].club=club; team.WC[wcIdx].isNonPL=false;
-  sv("teams",S.teams); closeModal(); renderMyTeamTab();
-}
-
-// ── RENDER: ADVICE ─────────────────────────────────────────────────────────────
-function renderAdviceTab(){
-  var el=document.getElementById("tab-advice");
-  if(S.draftDone){el.innerHTML='<div style="padding:40px;text-align:center;color:#8b949e;">Draft complete. Good luck!</div>';return;}
-  if(!isMyTurn()){el.innerHTML='<div style="padding:40px;text-align:center;color:#8b949e;">Waiting for '+(currentPicker()||"?")+"\\'s pick...</div>";return;}
-  if(S.adviceLoading){
-    el.innerHTML='<div style="padding:40px;text-align:center;"><div class="spinner"><div class="dot"></div><div class="dot" style="animation-delay:0.2s"></div><div class="dot" style="animation-delay:0.4s"></div></div><div style="color:#8b949e;font-size:14px;margin-top:8px;">Analysing the draft...</div></div>';
-    return;
-  }
-  if(!S.advice){el.innerHTML='<div style="padding:40px;text-align:center;color:#8b949e;">Generating recommendation...</div>';return;}
-  var p=S.advice.pick;
-  var html='<div style="padding:14px;overflow-y:auto;flex:1;"><div class="card" style="border-color:#10b981;background:linear-gradient(135deg,#1a3a2a,#1c2128);"><div style="color:#10b981;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px;">&#x1F916; Agent Recommendation</div>';
-  if(p){html+='<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;"><span class="badge badge-'+p.position+'">'+p.position+'</span><div><div style="font-size:18px;font-weight:700;">'+p.name+'</div><div style="color:#8b949e;font-size:13px;">'+p.club+' &middot; &pound;'+p.fplPrice+'m &middot; '+p.lastSeasonPts+'pts</div></div></div>';}
-  html+='<div style="color:#e6edf3;font-size:14px;line-height:1.6;margin-bottom:10px;">'+(S.advice.reason||"")+"</div>";
-  if(S.advice.scarcity) html+='<div style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.3);border-radius:8px;padding:8px 12px;color:#ef4444;font-size:13px;margin-bottom:10px;">&#x26A0;&#xFE0F; '+S.advice.scarcity+"</div>";
-  if(S.advice.nextTarget) html+='<div style="color:#8b949e;font-size:12px;">&#x1F504; Next: '+S.advice.nextTarget+"</div>";
-  html+="</div>";
-  if(p){html+='<div style="display:flex;gap:10px;margin-top:12px;"><button class="btn btn-green" style="flex:2;" onclick="acceptAdvice()">&#x2713; Accept Pick</button><button class="btn btn-gray" style="flex:1;" onclick="overrideAdvice()">Override</button></div>';}
-  html+="</div>";
-  el.innerHTML=html;
-}
-function acceptAdvice(){
-  if(!S.advice||!S.advice.pick) return;
-  var p=S.advice.pick;
-  var found=S.playerPool.find(function(pl){return pl.name===p.name&&pl.club===p.club;})||S.playerPool.find(function(pl){return pl.name===p.name;});
-  if(!found){showToast("Player not found - please pick manually.");overrideAdvice();return;}
-  S.advice=null;
-  confirmPick(found,S.myName);
-  selectedClub=null;
-  showTab("draft");
-}
-function overrideAdvice(){S.advice=null;showTab("draft");}
-
-// ── RENDER: LEAGUE ─────────────────────────────────────────────────────────────
-var cumulChart=null,gwChart=null;
-function renderLeagueTab(){
-  var el=document.getElementById("tab-league");
-  if(totwGW===null) totwGW=S.currentGW;
-  var viewGW=totwGW; // everything on this tab reflects this gameweek
-
-  // Standings up to viewGW
-  var standings=S.draftOrder.map(function(name){
-    return {
-      name:name,
-      total:getPersonTotalPts(name,viewGW),
-      gw:getPersonGWPts(name,viewGW),
-      cap:(S.captains[name]&&S.captains[name].player.name)||"None",
-      capDays:capDaysLeft(name)
-    };
-  }).sort(function(a,b){return b.total-a.total;});
-
-  var html='<div style="padding:14px;overflow-y:auto;flex:1;">';
-
-  // ── GAMEWEEK SELECTOR (master control) ───────────────────────────────────
-  html+='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;background:#161b22;border:1px solid #30363d;border-radius:12px;padding:10px 14px;">';
-  html+='<button onclick="totwGW=Math.max(1,totwGW-1);renderLeagueTab();" style="background:#21262d;border:none;color:#f0f6fc;border-radius:8px;padding:8px 16px;cursor:pointer;font-size:20px;font-weight:700;'+(viewGW<=1?'opacity:0.3;':'')+'"'+(viewGW<=1?' disabled':'')+'>&#x2039;</button>';
-  html+='<div style="text-align:center;">';
-  html+='<div style="color:#f0f6fc;font-weight:700;font-size:20px;">GW'+viewGW+'</div>';
-  html+='<div style="color:#8b949e;font-size:11px;">'+(viewGW===S.currentGW?'Current Gameweek':'Gameweek '+viewGW+' of '+S.currentGW)+'</div>';
-  html+='</div>';
-  html+='<button onclick="totwGW=Math.min(S.currentGW,totwGW+1);renderLeagueTab();" style="background:#21262d;border:none;color:#f0f6fc;border-radius:8px;padding:8px 16px;cursor:pointer;font-size:20px;font-weight:700;'+(viewGW>=S.currentGW?'opacity:0.3;':'')+'"'+(viewGW>=S.currentGW?' disabled':'')+'>&#x203A;</button>';
-  html+='</div>';
-
-  // ── LEAGUE TABLE ──────────────────────────────────────────────────────────
-  html+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">';
-  html+='<div class="sec-hdr" style="margin:0;">&#x1F4CA; League Table</div>';
-  html+='<div style="display:flex;gap:6px;">';
-  html+='<button class="btn btn-gray" style="width:auto;padding:7px 10px;font-size:12px;" onclick="doRefreshScores()">&#x1F504; Refresh</button>';
-  html+='<button class="btn btn-gray" style="width:auto;padding:7px 10px;font-size:12px;" onclick="shareWhatsApp()">&#x1F4F2; Share All</button>';
-  html+='</div></div>';
-
-  if(S.lastRefreshed) html+='<div style="color:#484f58;font-size:11px;margin-bottom:10px;">Last refreshed: '+new Date(S.lastRefreshed).toLocaleString()+'</div>';
-
-  html+='<div style="overflow-x:auto;margin-bottom:16px;"><table class="tbl"><thead><tr>';
-  html+='<th>#</th><th>Name</th><th>Total (to GW'+viewGW+')</th><th>GW'+viewGW+'</th><th>Captain</th>';
-  html+='</tr></thead><tbody>';
-  standings.forEach(function(s,i){
-    var me=s.name===S.myName?'background:#1a2a1a;':'';
-    var ct=s.capDays!==null&&s.capDays<=7?'<span class="cap-timer '+(s.capDays<=0?'red':'amber')+'" style="margin-left:4px;">'+(s.capDays<=0?'EXP':s.capDays+'d')+'</span>':'';
-    html+='<tr style="'+me+'"><td style="font-weight:700;">'+(i+1)+'</td>';
-    html+='<td style="font-weight:700;">'+s.name+(s.name===S.myName?' &#x1F464;':'')+'</td>';
-    html+='<td style="color:#10b981;font-weight:700;">'+s.total+'</td>';
-    html+='<td>'+s.gw+'</td>';
-    html+='<td style="font-size:12px;">'+s.cap+ct+'</td></tr>';
-  });
-  html+='</tbody></table></div>';
-
-  // ── CHARTS (up to viewGW) ─────────────────────────────────────────────────
-  html+='<div class="sec-hdr">Cumulative Points (to GW'+viewGW+')</div>';
-  html+='<div class="chart-wrap"><canvas id="cumul-chart"></canvas></div>';
-  html+='<div class="sec-hdr">Points Per Gameweek (to GW'+viewGW+')</div>';
-  html+='<div class="chart-wrap"><canvas id="gw-chart"></canvas></div>';
-
-  // ── TEAM OF THE WEEK ─────────────────────────────────────────────────────
-  html+='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px;">';
-  html+='<div class="sec-hdr" style="margin:0;">&#x1F4C5; Team of the Week &mdash; GW'+viewGW+'</div>';
-  html+='<button onclick="shareTOTW()" style="background:#238636;border:none;color:#fff;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:12px;font-weight:700;">&#x1F4F2; Share</button>';
-  html+='</div>';
-
-  if(Object.keys(S.scores).length===0||!S.scores[viewGW]){
-    html+='<div class="warn">No scores for GW'+viewGW+'. Refresh scores first.</div>';
-  } else {
-    html+=renderXITable(getBestXI(viewGW),false);
-  }
-
-  html+='</div>';
-  el.innerHTML=html;
-
-  // Draw charts filtered to viewGW
-  setTimeout(function(){
-    drawCumulChartToGW(viewGW);
-    drawGWChartToGW(viewGW);
-  },150);
-}
-function drawCumulChartToGW(maxGW){
-  var ctx=document.getElementById("cumul-chart");
-  if(!ctx) return;
-  if(cumulChart) cumulChart.destroy();
-  var gws=Array.from({length:maxGW},function(_,i){return i+1;});
-  var datasets=S.draftOrder.map(function(name,i){return {label:name,data:gws.map(function(g){return getPersonTotalPts(name,g);}),borderColor:CHART_COLORS[i%CHART_COLORS.length],backgroundColor:"transparent",borderWidth:name===S.myName?3:1.5,pointRadius:3,tension:0.3};});
-  cumulChart=new Chart(ctx,{type:"line",data:{labels:gws.map(function(g){return "GW"+g;}),datasets:datasets},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:"#8b949e",font:{size:11}}}},scales:{x:{ticks:{color:"#484f58",font:{size:10}}},y:{ticks:{color:"#484f58",font:{size:10}},grid:{color:"#21262d"}}}}});
-}
-function drawGWChartToGW(maxGW){
-  var ctx=document.getElementById("gw-chart");
-  if(!ctx) return;
-  if(gwChart) gwChart.destroy();
-  var gws=Array.from({length:maxGW},function(_,i){return i+1;});
-  var datasets=S.draftOrder.map(function(name,i){return {label:name,data:gws.map(function(g){return getPersonGWPts(name,g);}),borderColor:CHART_COLORS[i%CHART_COLORS.length],backgroundColor:CHART_COLORS[i%CHART_COLORS.length]+"22",borderWidth:name===S.myName?3:1.5,pointRadius:3,tension:0.3};});
-  gwChart=new Chart(ctx,{type:"line",data:{labels:gws.map(function(g){return "GW"+g;}),datasets:datasets},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:"#8b949e",font:{size:11}}}},scales:{x:{ticks:{color:"#484f58",font:{size:10}}},y:{ticks:{color:"#484f58",font:{size:10}},grid:{color:"#21262d"}}}}});
-}
-
 async function doRefreshScores(){
   var msg='<h3>&#x1F504; Refreshing Scores</h3>';
   msg+='<p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Fetching latest FPL data. This may take 20-30 seconds.</p>';
@@ -1696,6 +1337,25 @@ function renderStatsTab(){
   html+='</div>';
   el.innerHTML=html;
   setTimeout(function(){drawPosChart();drawMonthlyChart();},150);
+}
+
+
+
+function acceptAdvice(){
+  if(!S.advice||!S.advice.pick) return;
+  var p=S.advice.pick;
+  var found=S.playerPool.find(function(pl){return pl.name===p.name&&pl.club===p.club;})||
+    S.playerPool.find(function(pl){return pl.name===p.name;});
+  if(!found){ showToast("Player not found - please pick manually."); overrideAdvice(); return; }
+  S.advice=null;
+  confirmPick(found,S.myName);
+  selectedClub=null;
+  showTab("draft");
+}
+
+function overrideAdvice(){
+  S.advice=null;
+  showTab("draft");
 }
 
 
@@ -2169,4 +1829,74 @@ function drawMonthlyChart(){
 
 </script>
 </body>
-</html>
+</htmlfunction renderAdviceTab(){
+  var el=document.getElementById("tab-advice");
+  if(S.draftDone){el.innerHTML='<div style="padding:40px;text-align:center;color:#8b949e;">Draft complete. Good luck!</div>';return;}
+  if(!isMyTurn()){el.innerHTML='<div style="padding:40px;text-align:center;color:#8b949e;">Waiting for '+(currentPicker()||"?")+"\'s pick...</div>";return;}
+  if(S.adviceLoading){
+    el.innerHTML='<div style="padding:40px;text-align:center;">'+
+      '<div class="spinner"><div class="dot"></div><div class="dot" style="animation-delay:0.2s"></div><div class="dot" style="animation-delay:0.4s"></div></div>'+
+      '<div style="color:#8b5cf6;font-size:14px;margin-top:12px;font-family:Rajdhani,system-ui;letter-spacing:1px;">Researching players...</div>'+
+      '<div style="color:#484f58;font-size:12px;margin-top:6px;">Checking injuries, form & news</div>'+
+      '</div>';
+    return;
+  }
+  if(!S.advice){el.innerHTML='<div style="padding:40px;text-align:center;color:#8b949e;">Generating recommendation...</div>';return;}
+
+  var p=S.advice.pick;
+  var html='<div style="padding:14px;overflow-y:auto;flex:1;">';
+  html+='<div class="card" style="border-color:#8b5cf6;background:linear-gradient(135deg,rgba(139,92,246,0.1),rgba(8,12,18,0.9));">';
+  html+='<div style="color:#a78bfa;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:2px;margin-bottom:10px;font-family:Rajdhani,system-ui;">&#x1F916; Agent Recommendation</div>';
+
+  if(p){
+    html+='<div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">';
+    html+='<span class="badge badge-'+p.position+'">'+p.position+'</span>';
+    html+='<div>';
+    html+='<div style="font-size:20px;font-weight:700;font-family:Bangers,cursive;letter-spacing:1px;color:#f0f6fc;text-shadow:0 0 10px rgba(139,92,246,0.3);">'+p.name+'</div>';
+    html+='<div style="color:#8b949e;font-size:13px;">'+p.club+' &middot; &pound;'+p.fplPrice+'m &middot; '+p.lastSeasonPts+'pts last season</div>';
+    html+='</div></div>';
+  }
+
+  // Main reason
+  html+='<div style="color:#e6edf3;font-size:14px;line-height:1.6;margin-bottom:10px;font-family:Rajdhani,system-ui;">'+( S.advice.reason||"")+'</div>';
+
+  // Decline risk - shown first if present (most important warning)
+  if(S.advice.declineWarning){
+    html+='<div style="background:rgba(245,158,11,0.12);border:1px solid #f59e0b;border-radius:8px;padding:10px 12px;color:#fbbf24;font-size:13px;margin-bottom:8px;font-family:Rajdhani,system-ui;">'+
+      '&#x1F4C9; <strong>DECLINE RISK:</strong> '+S.advice.declineWarning+'</div>';
+  }
+  // Risk flag - injury/rotation warning
+  if(S.advice.riskFlag){
+    html+='<div style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.4);border-radius:8px;padding:8px 12px;color:#f87171;font-size:13px;margin-bottom:8px;">'+
+      '&#x1F915; <strong>Risk:</strong> '+S.advice.riskFlag+'</div>';
+  }
+
+  // Scarcity warning
+  if(S.advice.scarcity){
+    html+='<div style="background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.4);border-radius:8px;padding:8px 12px;color:#fbbf24;font-size:13px;margin-bottom:8px;">'+
+      '&#x26A0;&#xFE0F; '+S.advice.scarcity+'</div>';
+  }
+
+  // Fixture note
+  if(S.advice.fixtureNote){
+    html+='<div style="background:rgba(59,130,246,0.1);border:1px solid rgba(59,130,246,0.3);border-radius:8px;padding:8px 12px;color:#60a5fa;font-size:13px;margin-bottom:8px;">'+
+      '&#x1F4C5; '+S.advice.fixtureNote+'</div>';
+  }
+
+  // Next target
+  if(S.advice.nextTarget){
+    html+='<div style="color:#484f58;font-size:12px;margin-top:4px;font-family:Rajdhani,system-ui;">&#x1F504; Next: '+S.advice.nextTarget+'</div>';
+  }
+
+  html+='</div>';
+
+  if(p){
+    html+='<div style="display:flex;gap:10px;margin-top:12px;">';
+    html+='<button class="btn btn-green" style="flex:2;" onclick="acceptAdvice()">&#x2713; Accept Pick</button>';
+    html+='<button class="btn btn-gray" style="flex:1;" onclick="overrideAdvice()">Override</button>';
+    html+='</div>';
+  }
+  html+='</div>';
+  el.innerHTML=html;
+}
+>
