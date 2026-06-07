@@ -1044,7 +1044,7 @@ function renderLeagueTab(){
   html+=renderStatsSection(standings);
   html+="</div>";
   el.innerHTML=html;
-  setTimeout(function(){drawCumulChart();drawGWChart();},100);
+  setTimeout(function(){drawCumulChart();drawGWChart();drawPosChart();drawMonthlyChart();},150);
 }
 function drawCumulChart(){
   var ctx=document.getElementById("cumul-chart");
@@ -1338,7 +1338,7 @@ function showTab(tabId){
   if(tabId==="draft") renderDraftTab();
   else if(tabId==="myteam") renderMyTeamTab();
   else if(tabId==="friends") renderFriendsTab();
-  else if(tabId==="league") renderLeagueTab().then(function(){setTimeout(drawExtraCharts,150);});
+  else if(tabId==="league"){ renderLeagueTab(); setTimeout(drawExtraCharts,300); }
   else if(tabId==="advice") renderAdviceTab();
   else if(tabId==="settings") renderSettingsTab();
   else if(tabId==="pool") renderPoolTab();
