@@ -1082,8 +1082,37 @@ function shareWhatsApp(){
 // ── RENDER: SETTINGS ───────────────────────────────────────────────────────────
 function renderSettingsTab(){
   var el=document.getElementById("tab-settings");
-  el.innerHTML='<div style="padding:14px;overflow-y:auto;flex:1;"><div class="sec-hdr">Settings</div><div class="card"><label class="lbl" style="margin-top:0;">Anthropic API Key</label><input class="inp" id="s-apikey" type="password" value="'+S.apiKey+'" placeholder="sk-ant-api03-..."><label class="lbl">Default Tab on Open</label><select class="inp" id="s-defaulttab"><option value="myteam"'+(S.defaultTab==="myteam"?" selected":"")+'>My Team</option><option value="league"'+(S.defaultTab==="league"?" selected":"")+'>League</option><option value="friends"'+(S.defaultTab==="friends"?" selected":"")+'>Friends</option></select><label class="lbl">Draft Tab</label><select class="inp" id="s-hidedraft"><option value="false"'+(!S.hideDraft?" selected":"")+'>Visible</option><option value="true"'+(S.hideDraft?" selected":"")+'>Hidden</option></select><button class="btn btn-blue" style="margin-top:14px;" onclick="saveSettings()">Save Settings</button></div><div class="card"><div style="font-weight:700;margin-bottom:6px;">Data</div><div style="color:#8b949e;font-size:12px;margin-bottom:12px;">Players: '+S.playerPool.length+' &middot; GW: '+S.currentGW+' &middot; Last refresh: '+(S.lastRefreshed?new Date(S.lastRefreshed).toLocaleDateString():"Never")+'</div><button class="btn btn-gray" style="margin-bottom:8px;" onclick="doRefreshScores()">&#x1F504; Refresh Scores</button><button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #8b5cf6;color:#8b5cf6;" onclick="confirmAutoFill()">&#x1F3B2; Auto-Fill Test Data</button><button class="btn btn-gray" onclick="<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #10b981;color:#10b981;" onclick="exportBackup()">Export Backup</button><button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #10b981;color:#10b981;" onclick="importBackup()">Import Backup</button>confirmReset()">&#x26A0; Reset Data</button></div></div>';
+  var html='<div style="padding:14px;overflow-y:auto;flex:1;">';
+  html+='<div class="sec-hdr">Settings</div>';
+  html+='<div class="card">';
+  html+='<label class="lbl" style="margin-top:0;">Anthropic API Key</label>';
+  html+='<input class="inp" id="s-apikey" type="password" value="'+S.apiKey+'" placeholder="sk-ant-api03-...">';
+  html+='<label class="lbl">Default Tab on Open</label>';
+  html+='<select class="inp" id="s-defaulttab">';
+  html+='<option value="myteam"'+(S.defaultTab==="myteam"?" selected":"")+'>My Team</option>';
+  html+='<option value="league"'+(S.defaultTab==="league"?" selected":"")+'>League</option>';
+  html+='<option value="friends"'+(S.defaultTab==="friends"?" selected":"")+'>Friends</option>';
+  html+='</select>';
+  html+='<label class="lbl">Draft Tab</label>';
+  html+='<select class="inp" id="s-hidedraft">';
+  html+='<option value="false"'+(!S.hideDraft?" selected":"")+'>Visible</option>';
+  html+='<option value="true"'+(S.hideDraft?" selected":"")+'>Hidden</option>';
+  html+='</select>';
+  html+='<button class="btn btn-blue" style="margin-top:14px;" onclick="saveSettings()">Save Settings</button>';
+  html+='</div>';
+  html+='<div class="card">';
+  html+='<div style="font-weight:700;margin-bottom:6px;">Data</div>';
+  html+='<div style="color:#8b949e;font-size:12px;margin-bottom:12px;">Players: '+S.playerPool.length+' &middot; GW: '+S.currentGW+' &middot; Last refresh: '+(S.lastRefreshed?new Date(S.lastRefreshed).toLocaleDateString():"Never")+'</div>';
+  html+='<button class="btn btn-gray" style="margin-bottom:8px;" onclick="doRefreshScores()">&#x1F504; Refresh Scores</button>';
+  html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #8b5cf6;color:#8b5cf6;" onclick="confirmAutoFill()">&#x1F3B2; Auto-Fill Test Data</button>';
+  html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #10b981;color:#10b981;" onclick="exportBackup()">&#x2B07; Export Backup</button>';
+  html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #10b981;color:#10b981;" onclick="importBackup()">&#x2B06; Import Backup</button>';
+  html+='<button class="btn btn-gray" onclick="confirmReset()">&#x26A0; Reset Data</button>';
+  html+='</div>';
+  html+='</div>';
+  el.innerHTML=html;
 }
+
 function saveSettings(){
   S.apiKey=document.getElementById("s-apikey").value.trim();
   S.defaultTab=document.getElementById("s-defaulttab").value;
@@ -1191,17 +1220,21 @@ function exportBackup(){
     playerPool:S.playerPool,
     clubs:PL_CLUBS
   };
-  var json=JSON.stringify(backup,null,2);
-  var blob=new Blob([json],{type:"application/json"});
-  var url=URL.createObjectURL(blob);
-  var a=document.createElement("a");
-  a.href=url;
-  a.download="draft-advisor-backup-"+new Date().toISOString().slice(0,10)+".json";
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-  showToast("Backup downloaded!");
+  try{
+    var json=JSON.stringify(backup,null,2);
+    var dataUri="data:application/json;charset=utf-8,"+encodeURIComponent(json);
+    var a=document.createElement("a");
+    a.href=dataUri;
+    a.download="draft-advisor-backup-"+new Date().toISOString().slice(0,10)+".json";
+    a.style.display="none";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function(){document.body.removeChild(a);},100);
+    showToast("Backup downloaded!");
+  }catch(e){
+    // Fallback: show JSON in modal for manual copy
+    showModal('<h3>Backup Data</h3><p style="color:#8b949e;font-size:12px;margin-bottom:10px;">Copy this text and save it somewhere safe.</p><textarea style="width:100%;height:200px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#f0f6fc;font-size:11px;padding:8px;font-family:monospace;" onclick="this.select()">'+JSON.stringify(backup)+'</textarea><button class="btn btn-gray" style="margin-top:8px;" onclick="closeModal()">Done</button>');
+  }
 }
 
 function importBackup(){
@@ -1329,6 +1362,30 @@ function handleSetupClick(){
 
 
 // ── WELCOME SCREEN ─────────────────────────────────────────────────────────────
+
+function confirmNewDraft(){
+  var msg='<h3>Start New Draft?</h3>';
+  msg+='<p style="color:#8b949e;font-size:13px;margin-bottom:8px;">Clears everything from last season. Only your API key is kept so you don\'t have to re-enter it.</p>';
+  msg+='<p style="color:#f59e0b;font-size:13px;margin-bottom:14px;">Export a backup first to save this season.</p>';
+  msg+='<button class="btn btn-green" style="margin-bottom:8px;" onclick="exportBackup()">&#x2B07; Export Backup First</button>';
+  msg+='<button class="btn btn-red" style="margin-bottom:8px;" onclick="doNewDraft()">Start New Draft</button>';
+  msg+='<button class="btn btn-gray" onclick="closeModal()">Cancel</button>';
+  showModal(msg);
+}
+
+function doNewDraft(){
+  // Keep only the API key
+  var cfg=ld("cfg",{});
+  var apiKey=cfg.apiKey||"";
+  // Wipe everything
+  Object.keys(localStorage).filter(function(k){return k.startsWith(DB);}).forEach(function(k){localStorage.removeItem(k);});
+  // Restore only API key
+  if(apiKey) sv("cfg",{apiKey:apiKey,defaultTab:"myteam",draftDone:false,hideDraft:false});
+  closeModal();
+  showToast("Ready for new draft!");
+  setTimeout(function(){location.reload();},1000);
+}
+
 function renderWelcomeScreen(){
   // Add CSS animations if not already present
   if(!document.getElementById('welcome-css')){
@@ -1361,9 +1418,11 @@ function renderWelcomeScreen(){
     html += makeWelcomeBtn('&#x1F464; My Team','#1f6feb',function(){showScreen('main');showTab('myteam');});
     html += makeWelcomeBtn('&#x1F30D; Player Pool','#8b5cf6',function(){showScreen('main');showTab('pool');});
     html += makeWelcomeBtn('&#x1F465; Friends Teams','#30363d',function(){showScreen('main');showTab('friends');});
+    html += makeWelcomeBtn('&#x1F504; Start New Draft','#21262d',function(){confirmNewDraft();});
   } else if(isDraftInProgress){
     html += makeWelcomeBtn('&#x25B6; Continue Draft','#10b981',function(){showScreen('main');showTab('draft');});
     html += makeWelcomeBtn('&#x1F464; My Team So Far','#1f6feb',function(){showScreen('main');showTab('myteam');});
+    html += makeWelcomeBtn('&#x1F504; Start New Draft','#21262d',function(){confirmNewDraft();});
     html += makeWelcomeBtn('&#x2699; Settings','#30363d',function(){showScreen('main');showTab('settings');});
   } else if(hasDraft){
     html += makeWelcomeBtn('&#x1F3DF; Start Draft','#10b981',function(){showScreen('main');showTab('draft');});
