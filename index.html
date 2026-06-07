@@ -484,49 +484,71 @@ function proceedToApp(){
 // ── FPL SCORE REFRESH ──────────────────────────────────────────────────────────
 async function refreshScores(){
   try{
-    var sys = 'Premier League fantasy football data assistant. Today: ' + new Date().toDateString() + '. Fetch https://fantasy.premierleague.com/api/bootstrap-static/ and return JSON with currentGW (integer, the current active gameweek id) and players (array of objects with id, web_name, total_points). Raw JSON only starting with {.';
-    var raw = await callClaude(sys, 'Fetch FPL bootstrap-static and return current gameweek and all player points as JSON.', 4000);
-    var d = extractJSON(raw);
-    if(!d || !d.currentGW) throw new Error('Could not get current gameweek');
-    var gw = parseInt(d.currentGW);
-    S.currentGW = gw;
+    // Step 1: Get current gameweek
+    var sys1 = 'You are a Premier League fantasy football assistant. Today is ' + new Date().toDateString() + '. What is the current Premier League FPL gameweek number? Return ONLY a JSON object like this: {"currentGW": 12}. Raw JSON only.';
+    var raw1 = await callClaude(sys1, 'What is the current FPL gameweek? Return JSON only.', 100);
+    var gwData = extractJSON(raw1);
+    if(!gwData || !gwData.currentGW) throw new Error('Could not determine current gameweek');
+    var currentGW = parseInt(gwData.currentGW);
+    if(isNaN(currentGW) || currentGW < 1 || currentGW > 38) throw new Error('Invalid gameweek: ' + currentGW);
+    S.currentGW = currentGW;
 
-    var nameToId = {};
-    (d.players||[]).forEach(function(p){
-      if(p.web_name) nameToId[p.web_name.toLowerCase()] = p.id;
-    });
-
+    // Step 2: Fetch scores one gameweek at a time (most recent first)
     var needed = [];
-    for(var g = 1; g <= gw; g++){ if(!S.scores[g]) needed.push(g); }
-    if(needed.length === 0){
-      S.lastRefreshed = new Date().toISOString();
-      sv('meta', {lastRefreshed: S.lastRefreshed, currentGW: S.currentGW});
-      return true;
+    for(var g = currentGW; g >= 1; g--){
+      if(!S.scores[g]) needed.push(g);
+      // Only fetch up to 3 missing gameweeks per refresh to keep cost/time reasonable
+      if(needed.length >= 3) break;
     }
 
-    var sys2 = 'Premier League fantasy football data assistant. For each gameweek number in the list, fetch https://fantasy.premierleague.com/api/event/[GW]/live/ substituting [GW] with the number. Return a JSON object where keys are gameweek numbers as strings and values are objects mapping each player web_name to their total_points integer for that gameweek. Raw JSON only starting with {.';
-    var raw2 = await callClaude(sys2, 'Fetch FPL live scores for gameweeks: ' + needed.join(', ') + '. Return as JSON.', 4000);
-    var gwData = extractJSON(raw2);
-
-    needed.forEach(function(g){
-      var gwScores = gwData[g] || gwData[String(g)] || {};
-      var mapped = {};
-      getAllPlayers().forEach(function(p){
-        var nl = p.name.toLowerCase();
-        var pts = gwScores[p.name] || gwScores[nl] || gwScores[p.name.split(' ').pop()] || 0;
-        mapped[p.name + '|' + p.club] = parseInt(pts) || 0;
-      });
-      S.scores[g] = mapped;
-    });
+    for(var ni = 0; ni < needed.length; ni++){
+      var gw = needed[ni];
+      var sys2 = 'You are a Premier League fantasy football assistant. Fetch the FPL API at https://fantasy.premierleague.com/api/event/' + gw + '/live/ and return the points scored by each player in gameweek ' + gw + '. Return ONLY a JSON object where keys are player web_names (short names like "Salah", "Haaland") and values are their integer points for that gameweek. Raw JSON only starting with {.';
+      try{
+        var raw2 = await callClaude(sys2, 'Get FPL points for all players in gameweek ' + gw + '. Return as JSON object mapping web_name to points.', 4000);
+        var gwScores = extractJSON(raw2);
+        if(gwScores && typeof gwScores === 'object' && !Array.isArray(gwScores)){
+          var mapped = {};
+          getAllPlayers().forEach(function(p){
+            var webName = p.name.toLowerCase();
+            var shortName = p.name.split(' ').pop().toLowerCase();
+            var pts = gwScores[p.name] || gwScores[webName] || gwScores[shortName] || 0;
+            mapped[p.name + '|' + p.club] = parseInt(pts) || 0;
+          });
+          S.scores[gw] = mapped;
+        }
+      }catch(e){
+        console.warn('GW ' + gw + ' scores failed:', e.message);
+      }
+    }
 
     S.lastRefreshed = new Date().toISOString();
     sv('scores', S.scores);
     sv('meta', {lastRefreshed: S.lastRefreshed, currentGW: S.currentGW});
     return true;
   }catch(e){
-    console.error('Score refresh failed:', e);
+    console.error('Score refresh failed:', e.message);
     return false;
   }
+}
+
+// Auto-refresh scores when app opens during the season
+// Only runs if draft is done and last refresh was more than 6 hours ago
+async function autoRefreshIfNeeded(){
+  if(!S.draftDone) return;
+  if(!S.apiKey) return;
+  var sixHours = 6 * 60 * 60 * 1000;
+  var lastRefresh = S.lastRefreshed ? new Date(S.lastRefreshed).getTime() : 0;
+  if(Date.now() - lastRefresh < sixHours) return;
+  // Silent background refresh - no toast on success, only on failure
+  try{
+    var ok = await refreshScores();
+    if(ok){
+      // Update any open league/stats views
+      var leagueTab = document.getElementById('tab-league');
+      if(leagueTab && leagueTab.classList.contains('active')) renderLeagueTab();
+    }
+  }catch(e){ console.warn('Auto-refresh failed:', e); }
 }
 
 
@@ -1069,9 +1091,18 @@ function renderStatsSection(standings){
 }
 async function doRefreshScores(){
   showToast("Refreshing scores...");
-  var ok=await refreshScores();
-  showToast(ok?"Scores updated!":"Refresh failed. Check connection.");
+  try{
+    var ok = await refreshScores();
+    if(ok){
+      showToast("Scores updated! GW" + S.currentGW);
+    } else {
+      showToast("Refresh failed - check your API key and connection");
+    }
+  }catch(e){
+    showToast("Error: " + e.message);
+  }
   renderLeagueTab();
+  renderSettingsTab();
 }
 function shareWhatsApp(){
   var standings=S.draftOrder.map(function(n){return {name:n,total:getPersonTotalPts(n)};}).sort(function(a,b){return b.total-a.total;});
@@ -1399,6 +1430,8 @@ function doNewDraft(){
 }
 
 function renderWelcomeScreen(){
+  // Trigger background score refresh if needed
+  if(S.draftDone) setTimeout(autoRefreshIfNeeded, 2000);
   // Add CSS animations if not already present
   if(!document.getElementById('welcome-css')){
     var style=document.createElement('style');
