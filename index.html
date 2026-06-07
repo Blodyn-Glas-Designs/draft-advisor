@@ -1031,57 +1031,95 @@ var cumulChart=null,gwChart=null;
 function renderLeagueTab(){
   var el=document.getElementById("tab-league");
   if(totwGW===null) totwGW=S.currentGW;
+  var viewGW=totwGW; // everything on this tab reflects this gameweek
+
+  // Standings up to viewGW
   var standings=S.draftOrder.map(function(name){
-    return {name:name,total:getPersonTotalPts(name),gw:getPersonGWPts(name,S.currentGW),
-      cap:(S.captains[name]&&S.captains[name].player.name)||"None",capDays:capDaysLeft(name)};
+    return {
+      name:name,
+      total:getPersonTotalPts(name,viewGW),
+      gw:getPersonGWPts(name,viewGW),
+      cap:(S.captains[name]&&S.captains[name].player.name)||"None",
+      capDays:capDaysLeft(name)
+    };
   }).sort(function(a,b){return b.total-a.total;});
+
   var html='<div style="padding:14px;overflow-y:auto;flex:1;">';
-  html+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">';
-  html+='<div class="sec-hdr" style="margin:0;">&#x1F4CA; League Table &mdash; GW'+S.currentGW+'</div>';
+
+  // ── GAMEWEEK SELECTOR (master control) ───────────────────────────────────
+  html+='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;background:#161b22;border:1px solid #30363d;border-radius:12px;padding:10px 14px;">';
+  html+='<button onclick="totwGW=Math.max(1,totwGW-1);renderLeagueTab();" style="background:#21262d;border:none;color:#f0f6fc;border-radius:8px;padding:8px 16px;cursor:pointer;font-size:20px;font-weight:700;'+(viewGW<=1?'opacity:0.3;':'')+'"'+(viewGW<=1?' disabled':'')+'>&#x2039;</button>';
+  html+='<div style="text-align:center;">';
+  html+='<div style="color:#f0f6fc;font-weight:700;font-size:20px;">GW'+viewGW+'</div>';
+  html+='<div style="color:#8b949e;font-size:11px;">'+(viewGW===S.currentGW?'Current Gameweek':'Gameweek '+viewGW+' of '+S.currentGW)+'</div>';
+  html+='</div>';
+  html+='<button onclick="totwGW=Math.min(S.currentGW,totwGW+1);renderLeagueTab();" style="background:#21262d;border:none;color:#f0f6fc;border-radius:8px;padding:8px 16px;cursor:pointer;font-size:20px;font-weight:700;'+(viewGW>=S.currentGW?'opacity:0.3;':'')+'"'+(viewGW>=S.currentGW?' disabled':'')+'>&#x203A;</button>';
+  html+='</div>';
+
+  // ── LEAGUE TABLE ──────────────────────────────────────────────────────────
+  html+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;flex-wrap:wrap;gap:8px;">';
+  html+='<div class="sec-hdr" style="margin:0;">&#x1F4CA; League Table</div>';
   html+='<div style="display:flex;gap:6px;">';
   html+='<button class="btn btn-gray" style="width:auto;padding:7px 10px;font-size:12px;" onclick="doRefreshScores()">&#x1F504; Refresh</button>';
   html+='<button class="btn btn-gray" style="width:auto;padding:7px 10px;font-size:12px;" onclick="shareWhatsApp()">&#x1F4F2; Share All</button>';
   html+='</div></div>';
+
   if(S.lastRefreshed) html+='<div style="color:#484f58;font-size:11px;margin-bottom:10px;">Last refreshed: '+new Date(S.lastRefreshed).toLocaleString()+'</div>';
-  html+='<div style="overflow-x:auto;margin-bottom:16px;"><table class="tbl"><thead><tr><th>#</th><th>Name</th><th>Total</th><th>GW'+S.currentGW+'</th><th>Captain</th></tr></thead><tbody>';
+
+  html+='<div style="overflow-x:auto;margin-bottom:16px;"><table class="tbl"><thead><tr>';
+  html+='<th>#</th><th>Name</th><th>Total (to GW'+viewGW+')</th><th>GW'+viewGW+'</th><th>Captain</th>';
+  html+='</tr></thead><tbody>';
   standings.forEach(function(s,i){
     var me=s.name===S.myName?'background:#1a2a1a;':'';
     var ct=s.capDays!==null&&s.capDays<=7?'<span class="cap-timer '+(s.capDays<=0?'red':'amber')+'" style="margin-left:4px;">'+(s.capDays<=0?'EXP':s.capDays+'d')+'</span>':'';
-    html+='<tr style="'+me+'"><td style="font-weight:700;">'+(i+1)+'</td><td style="font-weight:700;">'+s.name+(s.name===S.myName?' &#x1F464;':'')+'</td><td style="color:#10b981;font-weight:700;">'+s.total+'</td><td>'+s.gw+'</td><td style="font-size:12px;">'+s.cap+ct+'</td></tr>';
+    html+='<tr style="'+me+'"><td style="font-weight:700;">'+(i+1)+'</td>';
+    html+='<td style="font-weight:700;">'+s.name+(s.name===S.myName?' &#x1F464;':'')+'</td>';
+    html+='<td style="color:#10b981;font-weight:700;">'+s.total+'</td>';
+    html+='<td>'+s.gw+'</td>';
+    html+='<td style="font-size:12px;">'+s.cap+ct+'</td></tr>';
   });
   html+='</tbody></table></div>';
-  html+='<div class="sec-hdr">Cumulative Points</div><div class="chart-wrap"><canvas id="cumul-chart"></canvas></div>';
-  html+='<div class="sec-hdr">Points Per Gameweek</div><div class="chart-wrap"><canvas id="gw-chart"></canvas></div>';
-  html+='<div style="display:flex;align-items:center;justify-content:space-between;margin-top:8px;margin-bottom:10px;flex-wrap:wrap;gap:8px;">';
-  html+='<div class="sec-hdr" style="margin:0;">&#x1F4C5; Team of the Week</div>';
-  html+='<div style="display:flex;align-items:center;gap:8px;">';
-  html+='<button onclick="totwGW=Math.max(1,totwGW-1);renderLeagueTab();" style="background:#21262d;border:none;color:#f0f6fc;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:16px;">&#x2039;</button>';
-  html+='<span style="color:#f0f6fc;font-weight:700;font-size:14px;">GW'+totwGW+'</span>';
-  html+='<button onclick="totwGW=Math.min(S.currentGW,totwGW+1);renderLeagueTab();" style="background:#21262d;border:none;color:#f0f6fc;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:16px;"'+(totwGW>=S.currentGW?' disabled':'')+'>'+'&#x203A;</button>';
-  html+='<button onclick="shareTOTW()" style="background:#238636;border:none;color:#fff;border-radius:6px;padding:6px 10px;cursor:pointer;font-size:12px;font-weight:700;">&#x1F4F2; Share</button>';
-  html+='</div></div>';
-  if(Object.keys(S.scores).length===0||!S.scores[totwGW]){
-    html+='<div class="warn">No scores for GW'+totwGW+'. Refresh scores first.</div>';
+
+  // ── CHARTS (up to viewGW) ─────────────────────────────────────────────────
+  html+='<div class="sec-hdr">Cumulative Points (to GW'+viewGW+')</div>';
+  html+='<div class="chart-wrap"><canvas id="cumul-chart"></canvas></div>';
+  html+='<div class="sec-hdr">Points Per Gameweek (to GW'+viewGW+')</div>';
+  html+='<div class="chart-wrap"><canvas id="gw-chart"></canvas></div>';
+
+  // ── TEAM OF THE WEEK ─────────────────────────────────────────────────────
+  html+='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px;">';
+  html+='<div class="sec-hdr" style="margin:0;">&#x1F4C5; Team of the Week &mdash; GW'+viewGW+'</div>';
+  html+='<button onclick="shareTOTW()" style="background:#238636;border:none;color:#fff;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:12px;font-weight:700;">&#x1F4F2; Share</button>';
+  html+='</div>';
+
+  if(Object.keys(S.scores).length===0||!S.scores[viewGW]){
+    html+='<div class="warn">No scores for GW'+viewGW+'. Refresh scores first.</div>';
   } else {
-    html+=renderXITable(getBestXI(totwGW),false);
+    html+=renderXITable(getBestXI(viewGW),false);
   }
+
   html+='</div>';
   el.innerHTML=html;
-  setTimeout(function(){drawCumulChart();drawGWChart();},150);
+
+  // Draw charts filtered to viewGW
+  setTimeout(function(){
+    drawCumulChartToGW(viewGW);
+    drawGWChartToGW(viewGW);
+  },150);
 }
-function drawCumulChart(){
+function drawCumulChartToGW(maxGW){
   var ctx=document.getElementById("cumul-chart");
   if(!ctx) return;
   if(cumulChart) cumulChart.destroy();
-  var gws=Array.from({length:S.currentGW},function(_,i){return i+1;});
+  var gws=Array.from({length:maxGW},function(_,i){return i+1;});
   var datasets=S.draftOrder.map(function(name,i){return {label:name,data:gws.map(function(g){return getPersonTotalPts(name,g);}),borderColor:CHART_COLORS[i%CHART_COLORS.length],backgroundColor:"transparent",borderWidth:name===S.myName?3:1.5,pointRadius:3,tension:0.3};});
   cumulChart=new Chart(ctx,{type:"line",data:{labels:gws.map(function(g){return "GW"+g;}),datasets:datasets},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:"#8b949e",font:{size:11}}}},scales:{x:{ticks:{color:"#484f58",font:{size:10}}},y:{ticks:{color:"#484f58",font:{size:10}},grid:{color:"#21262d"}}}}});
 }
-function drawGWChart(){
+function drawGWChartToGW(maxGW){
   var ctx=document.getElementById("gw-chart");
   if(!ctx) return;
   if(gwChart) gwChart.destroy();
-  var gws=Array.from({length:S.currentGW},function(_,i){return i+1;});
+  var gws=Array.from({length:maxGW},function(_,i){return i+1;});
   var datasets=S.draftOrder.map(function(name,i){return {label:name,data:gws.map(function(g){return getPersonGWPts(name,g);}),borderColor:CHART_COLORS[i%CHART_COLORS.length],backgroundColor:CHART_COLORS[i%CHART_COLORS.length]+"22",borderWidth:name===S.myName?3:1.5,pointRadius:3,tension:0.3};});
   gwChart=new Chart(ctx,{type:"line",data:{labels:gws.map(function(g){return "GW"+g;}),datasets:datasets},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:"#8b949e",font:{size:11}}}},scales:{x:{ticks:{color:"#484f58",font:{size:10}}},y:{ticks:{color:"#484f58",font:{size:10}},grid:{color:"#21262d"}}}}});
 }
@@ -1474,8 +1512,10 @@ function shareTOTW(){
 
 function shareWhatsApp(){
   var standings=S.draftOrder.map(function(n){return {name:n,total:getPersonTotalPts(n)};}).sort(function(a,b){return b.total-a.total;});
-  var text="⚽ Fantasy Draft - GW"+S.currentGW+"\n\n📊 League Table\n";
-  text+=standings.map(function(s,i){return (i+1)+". "+s.name+": "+s.total+"pts";}).join("\n");
+  var viewGW=totwGW||S.currentGW;
+  var text="⚽ Fantasy Draft - GW"+viewGW+"\n\n📊 League Table\n";
+  var gwStandings=S.draftOrder.map(function(n){return {name:n,total:getPersonTotalPts(n,viewGW)};}).sort(function(a,b){return b.total-a.total;});
+  text+=gwStandings.map(function(s,i){return (i+1)+". "+s.name+": "+s.total+"pts";}).join("\n");
   if(totwGW&&S.scores[totwGW]){
     var xi=getBestXI(totwGW);
     text+="\n\n📅 Team of the Week (GW"+totwGW+")\n";
@@ -1899,6 +1939,10 @@ function drawExtraCharts(){
   drawPosChart();
   drawMonthlyChart();
 }
+
+
+function drawCumulChart(){ drawCumulChartToGW(S.currentGW); }
+function drawGWChart(){ drawGWChartToGW(S.currentGW); }
 
 function drawPosChart(){
   var ctx=document.getElementById("pos-chart");
