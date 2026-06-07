@@ -179,14 +179,12 @@ label.lbl{display:block;color:#8b949e;font-size:11px;text-transform:uppercase;le
     <div id="tab-advice" class="tab-content"></div>
     <div id="tab-settings" class="tab-content"></div>
     <div id="tab-pool" class="tab-content"></div>
-    <div id="tab-stats" class="tab-content"></div>
     <div id="bottomnav">
       <button class="nav-btn" data-tab="draft" onclick="showTab('draft')"><span class="icon">&#x1F3DF;</span><span>Draft</span></button>
       <button class="nav-btn" data-tab="myteam" onclick="showTab('myteam')"><span class="icon">&#x1F464;</span><span>My Team</span></button>
       <button class="nav-btn" data-tab="friends" onclick="showTab('friends')"><span class="icon">&#x1F465;</span><span>Friends</span></button>
       <button class="nav-btn" data-tab="league" onclick="showTab('league')"><span class="icon">&#x1F4CA;</span><span>Weekly</span></button>
       <button class="nav-btn" data-tab="advice" onclick="showTab('advice')"><span class="icon">&#x1F916;</span><span>Advice</span></button>
-      <button class="nav-btn" data-tab="stats" onclick="showTab('stats')"><span class="icon">&#x1F4C8;</span><span>Stats</span></button>
       <button class="nav-btn" data-tab="pool" onclick="showTab('pool')" style="display:none;"><span class="icon">&#x1F30D;</span><span>Pool</span></button>
       <button class="nav-btn" data-tab="settings" onclick="showTab('settings')"><span class="icon">&#x2699;</span><span>Settings</span></button>
     </div>
@@ -1037,54 +1035,36 @@ function renderLeagueTab(){
     return {name:name,total:getPersonTotalPts(name),gw:getPersonGWPts(name,S.currentGW),
       cap:(S.captains[name]&&S.captains[name].player.name)||"None",capDays:capDaysLeft(name)};
   }).sort(function(a,b){return b.total-a.total;});
-
   var html='<div style="padding:14px;overflow-y:auto;flex:1;">';
-
-  // Header row with refresh and share
   html+='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px;">';
-  html+='<div class="sec-hdr" style="margin:0;">&#x1F4CA; League Table — GW'+S.currentGW+'</div>';
+  html+='<div class="sec-hdr" style="margin:0;">&#x1F4CA; League Table &mdash; GW'+S.currentGW+'</div>';
   html+='<div style="display:flex;gap:6px;">';
   html+='<button class="btn btn-gray" style="width:auto;padding:7px 10px;font-size:12px;" onclick="doRefreshScores()">&#x1F504; Refresh</button>';
   html+='<button class="btn btn-gray" style="width:auto;padding:7px 10px;font-size:12px;" onclick="shareWhatsApp()">&#x1F4F2; Share All</button>';
   html+='</div></div>';
-
   if(S.lastRefreshed) html+='<div style="color:#484f58;font-size:11px;margin-bottom:10px;">Last refreshed: '+new Date(S.lastRefreshed).toLocaleString()+'</div>';
-
-  // League table
-  html+='<div style="overflow-x:auto;margin-bottom:16px;"><table class="tbl"><thead><tr>';
-  html+='<th>#</th><th>Name</th><th>Total</th><th>GW'+S.currentGW+'</th><th>Captain</th>';
-  html+='</tr></thead><tbody>';
+  html+='<div style="overflow-x:auto;margin-bottom:16px;"><table class="tbl"><thead><tr><th>#</th><th>Name</th><th>Total</th><th>GW'+S.currentGW+'</th><th>Captain</th></tr></thead><tbody>';
   standings.forEach(function(s,i){
-    var meRow=s.name===S.myName?'background:#1a2a1a;':'';
+    var me=s.name===S.myName?'background:#1a2a1a;':'';
     var ct=s.capDays!==null&&s.capDays<=7?'<span class="cap-timer '+(s.capDays<=0?'red':'amber')+'" style="margin-left:4px;">'+(s.capDays<=0?'EXP':s.capDays+'d')+'</span>':'';
-    html+='<tr style="'+meRow+'"><td style="font-weight:700;">'+(i+1)+'</td>';
-    html+='<td style="font-weight:700;">'+s.name+(s.name===S.myName?' &#x1F464;':'')+'</td>';
-    html+='<td style="color:#10b981;font-weight:700;">'+s.total+'</td>';
-    html+='<td>'+s.gw+'</td>';
-    html+='<td style="font-size:12px;">'+s.cap+ct+'</td></tr>';
+    html+='<tr style="'+me+'"><td style="font-weight:700;">'+(i+1)+'</td><td style="font-weight:700;">'+s.name+(s.name===S.myName?' &#x1F464;':'')+'</td><td style="color:#10b981;font-weight:700;">'+s.total+'</td><td>'+s.gw+'</td><td style="font-size:12px;">'+s.cap+ct+'</td></tr>';
   });
   html+='</tbody></table></div>';
-
-  // Charts
   html+='<div class="sec-hdr">Cumulative Points</div><div class="chart-wrap"><canvas id="cumul-chart"></canvas></div>';
   html+='<div class="sec-hdr">Points Per Gameweek</div><div class="chart-wrap"><canvas id="gw-chart"></canvas></div>';
-
-  // Team of the Week
   html+='<div style="display:flex;align-items:center;justify-content:space-between;margin-top:8px;margin-bottom:10px;flex-wrap:wrap;gap:8px;">';
   html+='<div class="sec-hdr" style="margin:0;">&#x1F4C5; Team of the Week</div>';
   html+='<div style="display:flex;align-items:center;gap:8px;">';
   html+='<button onclick="totwGW=Math.max(1,totwGW-1);renderLeagueTab();" style="background:#21262d;border:none;color:#f0f6fc;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:16px;">&#x2039;</button>';
   html+='<span style="color:#f0f6fc;font-weight:700;font-size:14px;">GW'+totwGW+'</span>';
-  html+='<button onclick="totwGW=Math.min(S.currentGW,totwGW+1);renderLeagueTab();" style="background:#21262d;border:none;color:#f0f6fc;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:16px;"'+(totwGW>=S.currentGW?' disabled style="opacity:0.3;"':'')+'>&#x203A;</button>';
+  html+='<button onclick="totwGW=Math.min(S.currentGW,totwGW+1);renderLeagueTab();" style="background:#21262d;border:none;color:#f0f6fc;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:16px;"'+(totwGW>=S.currentGW?' disabled':'')+'>'+'&#x203A;</button>';
   html+='<button onclick="shareTOTW()" style="background:#238636;border:none;color:#fff;border-radius:6px;padding:6px 10px;cursor:pointer;font-size:12px;font-weight:700;">&#x1F4F2; Share</button>';
   html+='</div></div>';
-
   if(Object.keys(S.scores).length===0||!S.scores[totwGW]){
     html+='<div class="warn">No scores for GW'+totwGW+'. Refresh scores first.</div>';
   } else {
     html+=renderXITable(getBestXI(totwGW),false);
   }
-
   html+='</div>';
   el.innerHTML=html;
   setTimeout(function(){drawCumulChart();drawGWChart();},150);
@@ -1159,76 +1139,194 @@ async function doRefreshScores(){
 }
 function shareWhatsApp(){
   var standings=S.draftOrder.map(function(n){return {name:n,total:getPersonTotalPts(n)};}).sort(function(a,b){return b.total-a.total;});
-  var text="⚽ Fantasy Draft — GW"+S.currentGW+"\n\n";
-  text+="📊 League Table\n";
-  text+=standings.map(function(s,i){return (i+1)+". "+s.name+": "+s.total+"pts";}).join("\n");
-  if(S.scores[totwGW]){
-    var xi=getBestXI(totwGW);
-    text+="\n\n📅 Team of the Week (GW"+totwGW+")\n";
-    var gr={GK:[],DEF:[],MID:[],ATT:[]};
-    xi.forEach(function(p){if(gr[p.pos])gr[p.pos].push(p);});
-    ["GK","DEF","MID","ATT"].forEach(function(pos){
-      (gr[pos]||[]).forEach(function(p){ text+=pos+": "+p.name+" ("+p.owner+") "+p.pts+"pts\n"; });
-    });
-  }
-  text+="\n🤖 Draft Advisor App";
+  var text="⚽ Fantasy Draft Leaderboard — GW"+S.currentGW+"\n\n"+standings.map(function(s,i){return (i+1)+". "+s.name+": "+s.total+"pts";}).join("\n")+"\n\n🤖 Draft Advisor App";
   window.open("https://wa.me/?text="+encodeURIComponent(text),"_blank");
 }
-function shareTOTW(){
-  var xi = getBestXI(totwGW);
-  var lines = ["&#x26BD; Team of the Week - GW"+totwGW,""];
-  var grouped = {GK:[],DEF:[],MID:[],ATT:[]};
-  xi.forEach(function(p){ if(grouped[p.pos]) grouped[p.pos].push(p); });
-  ["GK","DEF","MID","ATT"].forEach(function(pos){
-    (grouped[pos]||[]).forEach(function(p){
-      lines.push(pos+": "+p.name+" ("+p.owner+") - "+p.pts+"pts");
-    });
+
+// ── RENDER: SETTINGS ───────────────────────────────────────────────────────────
+function renderSettingsTab(){
+  var el=document.getElementById("tab-settings");
+  var html='<div style="display:flex;flex-direction:column;flex:1;overflow:hidden;"><div style="padding:10px 14px 0;flex-shrink:0;"><input class="inp" id="pool-srch" placeholder="Search players or clubs..." oninput="searchQuery=this.value;renderPoolTab();" value="'+searchQuery+'"></div><div style="padding:14px;overflow-y:auto;flex:1;">';
+  html+='<div class="sec-hdr">Settings</div>';
+  html+='<div class="card">';
+  html+='<label class="lbl" style="margin-top:0;">Anthropic API Key</label>';
+  html+='<input class="inp" id="s-apikey" type="password" value="'+S.apiKey+'" placeholder="sk-ant-api03-...">';
+  html+='<label class="lbl">Default Tab on Open</label>';
+  html+='<select class="inp" id="s-defaulttab">';
+  html+='<option value="myteam"'+(S.defaultTab==="myteam"?" selected":"")+'>My Team</option>';
+  html+='<option value="league"'+(S.defaultTab==="league"?" selected":"")+'>League</option>';
+  html+='<option value="friends"'+(S.defaultTab==="friends"?" selected":"")+'>Friends</option>';
+  html+='</select>';
+  html+='<label class="lbl">Draft Tab</label>';
+  html+='<select class="inp" id="s-hidedraft">';
+  html+='<option value="false"'+(!S.hideDraft?" selected":"")+'>Visible</option>';
+  html+='<option value="true"'+(S.hideDraft?" selected":"")+'>Hidden</option>';
+  html+='</select>';
+  html+='<button class="btn btn-blue" style="margin-top:14px;" onclick="saveSettings()">Save Settings</button>';
+  html+='</div>';
+  html+='<div class="card">';
+  html+='<div style="font-weight:700;margin-bottom:6px;">Data</div>';
+  html+='<div style="color:#8b949e;font-size:12px;margin-bottom:12px;">Players: '+S.playerPool.length+' &middot; GW: '+S.currentGW+' &middot; Last refresh: '+(S.lastRefreshed?new Date(S.lastRefreshed).toLocaleDateString():"Never")+'</div>';
+  html+='<button class="btn btn-gray" style="margin-bottom:8px;" onclick="doRefreshScores()">&#x1F504; Refresh Scores</button>';
+  html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #8b5cf6;color:#8b5cf6;" onclick="confirmAutoFill()">&#x1F3B2; Auto-Fill Test Data</button>';
+  html+='<button class="btn btn-gray" style="margin-bottom:8px;" onclick="openScoreOverride()">&#x270F; Manual Score Override</button>';
+  html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #10b981;color:#10b981;" onclick="exportBackup()">&#x2B07; Export Backup</button>';
+  html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #10b981;color:#10b981;" onclick="importBackup()">&#x2B06; Import Backup</button>';
+  html+='<button class="btn btn-gray" onclick="confirmReset()">&#x26A0; Reset Data</button>';
+  html+='</div>';
+  html+='</div>';
+  el.innerHTML=html;
+}
+
+function saveSettings(){
+  S.apiKey=document.getElementById("s-apikey").value.trim();
+  S.defaultTab=document.getElementById("s-defaulttab").value;
+  S.hideDraft=document.getElementById("s-hidedraft").value==="true";
+  sv("cfg",{apiKey:S.apiKey,myName:S.myName,draftOrder:S.draftOrder,clubMax:S.clubMax,defaultTab:S.defaultTab,hideDraft:S.hideDraft,draftDone:S.draftDone});
+  showToast("Settings saved");
+  renderTopBar();
+}
+function confirmReset(){
+  showModal('<h3>Reset Data</h3><p style="color:#8b949e;font-size:13px;margin-bottom:16px;">All actions are permanent.</p><div class="card" style="margin-bottom:8px;"><div style="font-weight:700;margin-bottom:4px;">Reset Draft Only</div><div style="color:#8b949e;font-size:12px;margin-bottom:8px;">Clears picks and teams. Keeps API key, names and scores.</div><button class="btn btn-gray" style="border:1px solid #f59e0b;color:#f59e0b;" onclick="doResetDraft()">Reset Draft</button></div><div class="card" style="margin-bottom:8px;"><div style="font-weight:700;margin-bottom:4px;">Reset Season Scores</div><div style="color:#8b949e;font-size:12px;margin-bottom:8px;">Clears score data only.</div><button class="btn btn-gray" style="border:1px solid #f59e0b;color:#f59e0b;" onclick="doResetScores()">Reset Scores</button></div><div class="card" style="margin-bottom:8px;"><div style="font-weight:700;margin-bottom:4px;">Full Reset</div><div style="color:#8b949e;font-size:12px;margin-bottom:8px;">Clears everything including API key.</div><button class="btn btn-red" onclick="doResetFull()">Full Reset</button></div><button class="btn btn-gray" style="margin-top:4px;" onclick="closeModal()">Cancel</button>');
+}
+function doResetDraft(){
+  var cfg=ld("cfg",{}),scores=ld("scores",{}),meta=ld("meta",{});
+  Object.keys(localStorage).filter(function(k){return k.startsWith(DB);}).forEach(function(k){localStorage.removeItem(k);});
+  sv("cfg",cfg); sv("scores",scores); sv("meta",meta);
+  closeModal(); showToast("Draft reset."); setTimeout(function(){location.reload();},1200);
+}
+function doResetScores(){
+  localStorage.removeItem(DB+"scores"); localStorage.removeItem(DB+"meta");
+  closeModal(); showToast("Scores cleared."); setTimeout(function(){location.reload();},1200);
+}
+function doResetFull(){
+  Object.keys(localStorage).filter(function(k){return k.startsWith(DB);}).forEach(function(k){localStorage.removeItem(k);});
+  location.reload();
+}
+
+// ── AUTO FILL ──────────────────────────────────────────────────────────────────
+function confirmAutoFill(){
+  showModal('<h3>&#x1F3B2; Auto-Fill Test Data</h3><p style="color:#8b949e;font-size:13px;margin-bottom:16px;">Randomly assigns players to all teams, sets captains, and generates 5 GWs of fake scores.</p><p style="color:#f59e0b;font-size:13px;margin-bottom:16px;">&#x26A0; Overwrites existing draft picks.</p><button class="btn btn-blue" onclick="autoFillDraft()">&#x1F3B2; Fill Test Data</button><button class="btn btn-gray" style="margin-top:8px;" onclick="closeModal()">Cancel</button>');
+}
+function autoFillDraft(){
+  if(S.playerPool.length===0){showToast("Load players first");return;}
+  S.pickedMap={}; S.teams={}; S.pickIdx=0; S.draftDone=false; S.hideDraft=false; S.history=[]; S.advice=null;
+  initTeams();
+  var shuffled=S.playerPool.slice().sort(function(){return Math.random()-0.5;});
+  var pi=0;
+  for(var i=0;i<S.snakeOrder.length;i++){
+    var picker=S.snakeOrder[i],team=S.teams[picker];
+    var needs=[];
+    Object.entries(SLOTS).forEach(function(e){if((team[e[0]]||[]).length<e[1])needs.push(e[0]);});
+    if(needs.length===0) continue;
+    var targetPos=needs[0];
+    var assigned=false,attempts=0;
+    while(pi<shuffled.length*2&&attempts<shuffled.length){
+      var p=shuffled[pi%shuffled.length]; pi++; attempts++;
+      var key=p.name+"|"+p.club;
+      if(S.pickedMap[key]) continue;
+      if(targetPos!=="WC"&&p.position!==targetPos) continue;
+      if(targetPos!=="WC"&&isClubBlocked(picker,p.club)) continue;
+      S.pickedMap[key]=picker;
+      team[targetPos].push(Object.assign({},p,{pickNumber:i+1}));
+      assigned=true; break;
+    }
+    if(!assigned){
+      for(var j=0;j<shuffled.length;j++){
+        var p2=shuffled[j],key2=p2.name+"|"+p2.club;
+        if(S.pickedMap[key2]) continue;
+        if(targetPos!=="WC"&&isClubBlocked(picker,p2.club)) continue;
+        S.pickedMap[key2]=picker;
+        team[targetPos].push(Object.assign({},p2,{pickNumber:i+1}));
+        break;
+      }
+    }
+  }
+  S.pickIdx=S.snakeOrder.length;
+  S.draftOrder.forEach(function(name){
+    var t=S.teams[name]||{},players=[];
+    ["GK","DEF","MID","ATT"].forEach(function(pos){(t[pos]||[]).forEach(function(p){players.push(p);});});
+    if(players.length>=2) S.captains[name]={player:players[1],dateSet:new Date().toISOString()};
   });
-  lines.push(""); lines.push("&#x1F916; Draft Advisor App");
-  window.open("https://wa.me/?text="+encodeURIComponent(lines.join("\n")),"_blank");
+  for(var gw=1;gw<=5;gw++){
+    var gwScores={};
+    Object.keys(S.pickedMap).forEach(function(key){gwScores[key]=Math.floor(Math.random()*12);});
+    S.scores[gw]=gwScores;
+  }
+  S.currentGW=5;
+  S.draftDone=true; S.hideDraft=true;
+  saveAll();
+  renderTopBar(); checkCaptainBanner();
+  document.querySelectorAll(".nav-btn[data-tab='pool']").forEach(function(b){b.style.display="";});
+  showToast("Test data filled — 5 GWs of fake scores generated!");
+  closeModal();
+  showTab("myteam");
 }
 
 
+// ── BACKUP & RESTORE ──────────────────────────────────────────────────────────
 function exportBackup(){
-  var backup={version:1,exportedAt:new Date().toISOString(),myName:S.myName,draftOrder:S.draftOrder,
-    clubMax:S.clubMax,draftDone:S.draftDone,teams:S.teams,pickedMap:S.pickedMap,
-    snakeOrder:S.snakeOrder,pickIdx:S.pickIdx,captains:S.captains,wildcardSubs:S.wildcardSubs,
-    scores:S.scores,currentGW:S.currentGW,lastRefreshed:S.lastRefreshed,
-    playerPool:S.playerPool,clubs:PL_CLUBS};
+  var backup={
+    version:1,
+    exportedAt:new Date().toISOString(),
+    myName:S.myName,
+    draftOrder:S.draftOrder,
+    clubMax:S.clubMax,
+    draftDone:S.draftDone,
+    teams:S.teams,
+    pickedMap:S.pickedMap,
+    snakeOrder:S.snakeOrder,
+    pickIdx:S.pickIdx,
+    captains:S.captains,
+    wildcardSubs:S.wildcardSubs,
+    scores:S.scores,
+    currentGW:S.currentGW,
+    lastRefreshed:S.lastRefreshed,
+    playerPool:S.playerPool,
+    clubs:PL_CLUBS
+  };
   try{
     var json=JSON.stringify(backup,null,2);
-    var uri="data:application/json;charset=utf-8,"+encodeURIComponent(json);
+    var dataUri="data:application/json;charset=utf-8,"+encodeURIComponent(json);
     var a=document.createElement("a");
-    a.href=uri; a.download="draft-advisor-backup-"+new Date().toISOString().slice(0,10)+".json";
-    a.style.display="none"; document.body.appendChild(a); a.click();
+    a.href=dataUri;
+    a.download="draft-advisor-backup-"+new Date().toISOString().slice(0,10)+".json";
+    a.style.display="none";
+    document.body.appendChild(a);
+    a.click();
     setTimeout(function(){document.body.removeChild(a);},100);
     showToast("Backup downloaded!");
   }catch(e){
-    showModal('<h3>Backup Data</h3><p style="color:#8b949e;font-size:12px;margin-bottom:10px;">Copy and save this text.</p><textarea style="width:100%;height:200px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#f0f6fc;font-size:11px;padding:8px;font-family:monospace;" onclick="this.select()">'+JSON.stringify(backup)+'</textarea><button class="btn btn-gray" style="margin-top:8px;" onclick="closeModal()">Done</button>');
+    // Fallback: show JSON in modal for manual copy
+    showModal('<h3>Backup Data</h3><p style="color:#8b949e;font-size:12px;margin-bottom:10px;">Copy this text and save it somewhere safe.</p><textarea style="width:100%;height:200px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#f0f6fc;font-size:11px;padding:8px;font-family:monospace;" onclick="this.select()">'+JSON.stringify(backup)+'</textarea><button class="btn btn-gray" style="margin-top:8px;" onclick="closeModal()">Done</button>');
   }
 }
 
-var pendingBackup=null;
+// Store pending backup in memory to avoid URL size limits
+var pendingBackup = null;
 
 function importBackup(){
   var input=document.createElement("input");
   input.type="file"; input.accept=".json";
   input.onchange=function(e){
-    var file=e.target.files[0]; if(!file) return;
+    var file=e.target.files[0];
+    if(!file) return;
     var reader=new FileReader();
     reader.onload=function(ev){
       try{
         var backup=JSON.parse(ev.target.result);
-        if(!backup.myName) throw new Error("Invalid backup file");
+        if(!backup.myName) throw new Error("Invalid backup file - missing player name");
         pendingBackup=backup;
         var msg='<h3>Restore Backup?</h3>';
-        msg+='<p style="color:#8b949e;font-size:13px;margin-bottom:6px;">From: '+new Date(backup.exportedAt||Date.now()).toLocaleDateString()+'</p>';
-        msg+='<p style="color:#8b949e;font-size:13px;margin-bottom:14px;">For: '+backup.myName+' &middot; '+(backup.draftOrder?backup.draftOrder.length:0)+' players</p>';
+        msg+='<p style="color:#8b949e;font-size:13px;margin-bottom:6px;">Backup from: '+new Date(backup.exportedAt||Date.now()).toLocaleDateString()+'</p>';
+        msg+='<p style="color:#8b949e;font-size:13px;margin-bottom:14px;">For: '+backup.myName+' &middot; '+( backup.draftOrder?backup.draftOrder.length:0)+' players &middot; '+(backup.playerPool?backup.playerPool.length:0)+' in pool</p>';
         msg+='<p style="color:#f59e0b;font-size:13px;margin-bottom:14px;">This will overwrite your current data.</p>';
         msg+='<button class="btn btn-blue" style="margin-bottom:8px;" onclick="doImportBackup()">Restore</button>';
         msg+='<button class="btn btn-gray" onclick="closeModal()">Cancel</button>';
         showModal(msg);
-      }catch(err){ showToast("Invalid backup: "+err.message); }
+      }catch(err){
+        showToast("Invalid backup file: "+err.message);
+      }
     };
     reader.readAsText(file);
   };
@@ -1236,19 +1334,181 @@ function importBackup(){
 }
 
 function doImportBackup(){
-  if(!pendingBackup){ showToast("No backup selected."); return; }
+  if(!pendingBackup){ showToast("No backup data found. Please select a file again."); return; }
   try{
-    var b=pendingBackup;
-    S.myName=b.myName||""; S.draftOrder=b.draftOrder||[]; S.clubMax=b.clubMax||2;
-    S.draftDone=b.draftDone||false; S.teams=b.teams||{}; S.pickedMap=b.pickedMap||{};
-    S.snakeOrder=b.snakeOrder||[]; S.pickIdx=b.pickIdx||0; S.captains=b.captains||{};
-    S.wildcardSubs=b.wildcardSubs||{}; S.scores=b.scores||{}; S.currentGW=b.currentGW||1;
-    S.lastRefreshed=b.lastRefreshed||null; S.playerPool=b.playerPool||[];
-    if(b.clubs&&b.clubs.length>0) PL_CLUBS=b.clubs;
-    saveAll(); pendingBackup=null;
-    closeModal(); showToast("Backup restored!");
+    var backup=pendingBackup;
+    S.myName=backup.myName||"";
+    S.draftOrder=backup.draftOrder||[];
+    S.clubMax=backup.clubMax||2;
+    S.draftDone=backup.draftDone||false;
+    S.teams=backup.teams||{};
+    S.pickedMap=backup.pickedMap||{};
+    S.snakeOrder=backup.snakeOrder||[];
+    S.pickIdx=backup.pickIdx||0;
+    S.captains=backup.captains||{};
+    S.wildcardSubs=backup.wildcardSubs||{};
+    S.scores=backup.scores||{};
+    S.currentGW=backup.currentGW||1;
+    S.lastRefreshed=backup.lastRefreshed||null;
+    S.playerPool=backup.playerPool||[];
+    if(backup.clubs&&backup.clubs.length>0) PL_CLUBS=backup.clubs;
+    saveAll();
+    pendingBackup=null;
+    closeModal();
+    showToast("Backup restored!");
     setTimeout(function(){location.reload();},1000);
-  }catch(e){ showToast("Restore failed: "+e.message); }
+  }catch(e){
+    showToast("Restore failed: "+e.message);
+  }
+}
+
+// ── NAVIGATION ─────────────────────────────────────────────────────────────────
+
+function openScoreOverride(){
+  var players=getAllPlayers();
+  var msg='<h3>&#x270F; Manual Score Override</h3>';
+  msg+='<p style="color:#8b949e;font-size:13px;margin-bottom:10px;">Override a player score for a specific gameweek if Claude returned incorrect data.</p>';
+  msg+='<label class="lbl">Gameweek</label>';
+  msg+='<select class="inp" id="ov-gw" style="margin-bottom:10px;">';
+  for(var g=1;g<=Math.max(S.currentGW,1);g++) msg+='<option value="'+g+'"'+(g===S.currentGW?" selected":"")+'>GW'+g+'</option>';
+  msg+='</select>';
+  msg+='<label class="lbl">Player</label>';
+  msg+='<select class="inp" id="ov-player" style="margin-bottom:10px;">';
+  players.forEach(function(p){ msg+='<option value="'+p.name+'|'+p.club+'">'+p.name+' ('+p.club+')</option>'; });
+  msg+='</select>';
+  msg+='<label class="lbl">Points for this gameweek</label>';
+  msg+='<input class="inp" id="ov-pts" type="number" min="0" max="50" placeholder="e.g. 12" style="margin-bottom:14px;">';
+  msg+='<button class="btn btn-blue" style="margin-bottom:8px;" onclick="doScoreOverride()">Save Override</button>';
+  msg+='<button class="btn btn-gray" onclick="closeModal()">Cancel</button>';
+  showModal(msg);
+}
+function doScoreOverride(){
+  var gw=parseInt(document.getElementById("ov-gw").value);
+  var key=document.getElementById("ov-player").value;
+  var pts=parseInt(document.getElementById("ov-pts").value)||0;
+  if(!S.scores[gw]) S.scores[gw]={};
+  S.scores[gw][key]=pts;
+  sv("scores",S.scores);
+  closeModal();
+  showToast("Score updated: "+key.split("|")[0]+" GW"+gw+" = "+pts+"pts");
+  renderLeagueTab();
+}
+
+function checkSeasonEnd(){
+  if(!S.draftDone||S.currentGW<38) return;
+  var cfg=ld("cfg",{});
+  if(!cfg.seasonComplete){ cfg.seasonComplete=true; sv("cfg",cfg); }
+}
+function renderSeasonSummary(){
+  var standings=S.draftOrder.map(function(n){return {name:n,total:getPersonTotalPts(n)};}).sort(function(a,b){return b.total-a.total;});
+  var winner=standings[0];
+  var msg='<h3>&#x1F3C6; Season Complete!</h3>';
+  msg+='<div style="text-align:center;padding:16px 0;"><div style="font-size:48px;">&#x1F947;</div>';
+  msg+='<div style="font-size:22px;font-weight:700;color:#f59e0b;margin:8px 0;">'+(winner?winner.name:"TBD")+'</div>';
+  msg+='<div style="color:#8b949e;">Season Champion with '+(winner?winner.total:0)+' points</div></div>';
+  msg+='<table class="tbl" style="margin-bottom:14px;"><thead><tr><th>#</th><th>Name</th><th>Total Pts</th></tr></thead><tbody>';
+  standings.forEach(function(s,i){
+    var medal=i===0?"&#x1F947; ":i===1?"&#x1F948; ":i===2?"&#x1F949; ":(i+1)+". ";
+    msg+='<tr'+(i===0?' style="background:#1a2a0a;"':"")+'><td style="font-weight:700;">'+medal+'</td><td style="font-weight:700;">'+s.name+'</td><td style="color:#10b981;font-weight:700;">'+s.total+'</td></tr>';
+  });
+  msg+='</tbody></table>';
+  msg+='<button class="btn btn-green" style="margin-bottom:8px;" onclick="closeModal();shareWhatsApp();">&#x1F4F2; Share Results</button>';
+  msg+='<button class="btn btn-gray" onclick="closeModal()">Close</button>';
+  showModal(msg);
+}
+
+var searchQuery="";
+
+
+
+var totwGW=null;
+
+function getBestXI(gwNum){
+  var slots={GK:1,DEF:4,MID:4,ATT:2},result=[];
+  Object.keys(slots).forEach(function(pos){
+    var count=slots[pos],candidates=[];
+    S.draftOrder.forEach(function(name){
+      var team=S.teams[name]||{};
+      (team[pos]||[]).forEach(function(p){
+        var key=p.name+"|"+p.club;
+        var pts=gwNum===null?getPlayerPts(key,name):((S.scores[gwNum]||{})[key]||0);
+        candidates.push({name:p.name,club:p.club,pos:pos,owner:name,pts:pts,key:key});
+      });
+    });
+    candidates.sort(function(a,b){return b.pts!==a.pts?b.pts-a.pts:a.name.localeCompare(b.name);});
+    result=result.concat(candidates.slice(0,count));
+  });
+  return result;
+}
+
+function renderXITable(xi,isSeason){
+  var html='<div style="overflow-x:auto;margin-bottom:16px;"><table class="tbl"><thead><tr>';
+  html+='<th>Pos</th><th>Player</th><th>Club</th><th>Owner</th><th>'+(isSeason?'Season Pts':'GW Pts')+'</th>';
+  html+='</tr></thead><tbody>';
+  var grouped={GK:[],DEF:[],MID:[],ATT:[]};
+  xi.forEach(function(p){if(grouped[p.pos])grouped[p.pos].push(p);});
+  ["GK","DEF","MID","ATT"].forEach(function(pos){
+    (grouped[pos]||[]).forEach(function(p){
+      html+='<tr><td><span class="badge badge-'+pos+'">'+pos+'</span></td>'+
+        '<td style="font-weight:700;">'+p.name+'</td>'+
+        '<td style="font-size:12px;color:#8b949e;">'+p.club+'</td>'+
+        '<td style="font-size:12px;">'+p.owner+'</td>'+
+        '<td style="color:#10b981;font-weight:700;">'+p.pts+'</td></tr>';
+    });
+  });
+  html+='</tbody></table></div>';
+  return html;
+}
+
+function shareTOTW(){
+  var xi=getBestXI(totwGW);
+  var text="⚽ Team of the Week - GW"+totwGW+"\n\n";
+  var gr={GK:[],DEF:[],MID:[],ATT:[]};
+  xi.forEach(function(p){if(gr[p.pos])gr[p.pos].push(p);});
+  ["GK","DEF","MID","ATT"].forEach(function(pos){
+    (gr[pos]||[]).forEach(function(p){text+=pos+": "+p.name+" ("+p.owner+") "+p.pts+"pts\n";});
+  });
+  text+="\n🤖 Draft Advisor App";
+  window.open("https://wa.me/?text="+encodeURIComponent(text),"_blank");
+}
+
+function shareWhatsApp(){
+  var standings=S.draftOrder.map(function(n){return {name:n,total:getPersonTotalPts(n)};}).sort(function(a,b){return b.total-a.total;});
+  var text="⚽ Fantasy Draft - GW"+S.currentGW+"\n\n📊 League Table\n";
+  text+=standings.map(function(s,i){return (i+1)+". "+s.name+": "+s.total+"pts";}).join("\n");
+  if(totwGW&&S.scores[totwGW]){
+    var xi=getBestXI(totwGW);
+    text+="\n\n📅 Team of the Week (GW"+totwGW+")\n";
+    var gr={GK:[],DEF:[],MID:[],ATT:[]};
+    xi.forEach(function(p){if(gr[p.pos])gr[p.pos].push(p);});
+    ["GK","DEF","MID","ATT"].forEach(function(pos){
+      (gr[pos]||[]).forEach(function(p){text+=pos+": "+p.name+" ("+p.owner+") "+p.pts+"pts\n";});
+    });
+  }
+  text+="\n🤖 Draft Advisor App";
+  window.open("https://wa.me/?text="+encodeURIComponent(text),"_blank");
+}
+
+function renderStatsTab(){
+  var el=document.getElementById("tab-stats");
+  if(!el) return;
+  var standings=S.draftOrder.map(function(name){
+    return {name:name,total:getPersonTotalPts(name),gw:getPersonGWPts(name,S.currentGW),
+      cap:(S.captains[name]&&S.captains[name].player.name)||"None",capDays:capDaysLeft(name)};
+  }).sort(function(a,b){return b.total-a.total;});
+  var html='<div style="padding:14px;overflow-y:auto;flex:1;">';
+  html+='<div class="sec-hdr">&#x1F3C6; Team of the Year</div>';
+  if(Object.keys(S.scores).length===0){
+    html+='<div class="warn">No scores loaded yet.</div>';
+  } else {
+    html+=renderXITable(getBestXI(null),true);
+  }
+  html+=renderStatsSection(standings);
+  html+='<div class="sec-hdr">Points by Position</div><div class="chart-wrap"><canvas id="pos-chart"></canvas></div>';
+  html+='<div class="sec-hdr">Monthly Performance</div><div class="chart-wrap"><canvas id="monthly-chart"></canvas></div>';
+  html+='</div>';
+  el.innerHTML=html;
+  setTimeout(function(){drawPosChart();drawMonthlyChart();},150);
 }
 
 
@@ -1436,31 +1696,12 @@ var poolClubFilter="ALL",poolPosFilter="ALL",poolSort="pts_desc",poolShow="all";
 function renderPoolTab(){
   var el=document.getElementById("tab-pool");
   if(!el) return;
-
-  // Only build the outer shell once - avoids destroying the search input on every keystroke
-  if(!el.querySelector("#pool-srch")){
-    el.innerHTML='<div style="padding:10px 14px 0;flex-shrink:0;">'+
-      '<input class="inp" id="pool-srch" placeholder="Search players or clubs..." '+
-      'oninput="searchQuery=this.value;renderPoolResults();" style="font-size:14px;">'+
-      '</div>'+
-      '<div id="pool-results" style="padding:14px;overflow-y:auto;flex:1;"></div>';
-    // Restore search value if any
-    document.getElementById("pool-srch").value = searchQuery;
-  }
-  renderPoolResults();
-}
-
-function renderPoolResults(){
-  var el=document.getElementById("pool-results");
-  if(!el) return;
-
   var allPlayers=S.playerPool.slice();
-  if(searchQuery&&searchQuery.length>0){
+  if(searchQuery&&searchQuery.length>1){
     var sq=searchQuery.toLowerCase();
     allPlayers=allPlayers.filter(function(p){return p.name.toLowerCase().includes(sq)||p.club.toLowerCase().includes(sq);});
   }
-
-  // Attach draft info and current season points
+  // Attach draft info and current season points to each player
   allPlayers=allPlayers.map(function(p){
     var key=p.name+"|"+p.club;
     var picker=S.pickedMap[key]||null;
@@ -1473,13 +1714,14 @@ function renderPoolResults(){
   var undrafted=allPlayers.filter(function(p){return !p.picker;}).sort(function(a,b){return b.seasonPts-a.seasonPts;});
   var topMiss=undrafted[0]||null;
 
-  // Apply filters
+  // Filters
   var filtered=allPlayers.slice();
   if(poolClubFilter!=="ALL") filtered=filtered.filter(function(p){return p.club===poolClubFilter;});
   if(poolPosFilter!=="ALL") filtered=filtered.filter(function(p){return p.position===poolPosFilter;});
   if(poolShow==="undrafted") filtered=filtered.filter(function(p){return !p.picker;});
   if(poolShow==="drafted") filtered=filtered.filter(function(p){return !!p.picker;});
 
+  // Sort
   filtered.sort(function(a,b){
     if(poolSort==="pts_desc") return b.seasonPts-a.seasonPts;
     if(poolSort==="pts_asc") return a.seasonPts-b.seasonPts;
@@ -1488,55 +1730,68 @@ function renderPoolResults(){
     return 0;
   });
 
-  var html='';
+  var posColors={GK:"#f59e0b",DEF:"#3b82f6",MID:"#10b981",ATT:"#ef4444"};
+  var html='<div style="display:flex;flex-direction:column;flex:1;overflow:hidden;"><div style="padding:10px 14px 0;flex-shrink:0;"><input class="inp" id="pool-srch" placeholder="Search players or clubs..." oninput="searchQuery=this.value;renderPoolTab();" value="'+searchQuery+'"></div><div style="padding:14px;overflow-y:auto;flex:1;">';
 
   // Summary strip
-  html+='<div class="stat-grid" style="margin-bottom:12px;">'+
-    '<div class="stat-card"><div class="sv">'+undrafted.length+'</div><div class="sl">Undrafted</div></div>'+
-    '<div class="stat-card"><div class="sv">'+(topMiss?topMiss.seasonPts:0)+'</div><div class="sl">'+(topMiss?"Best: "+topMiss.name:"Best Undrafted")+'</div></div>'+
-    '</div>';
+  html+='<div class="stat-grid" style="margin-bottom:12px;">'
+    +'<div class="stat-card"><div class="sv">'+undrafted.length+'</div><div class="sl">Undrafted Players</div></div>'
+    +'<div class="stat-card"><div class="sv">'+(topMiss?topMiss.seasonPts:0)+'</div><div class="sl">'+(topMiss?"Best Undrafted ("+topMiss.name+")":"Best Undrafted")+'</div></div>'
+    +'</div>';
 
   // Filter bar
   html+='<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;">';
-  html+='<select onchange="poolClubFilter=this.value;renderPoolResults();" style="flex:1;min-width:110px;padding:8px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#f0f6fc;font-size:13px;font-family:inherit;">';
+
+  // Club dropdown
+  html+='<select onchange="poolClubFilter=this.value;renderPoolTab();" style="flex:1;min-width:120px;padding:8px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#f0f6fc;font-size:13px;font-family:inherit;">';
   html+='<option value="ALL"'+(poolClubFilter==="ALL"?" selected":"")+'>All Clubs</option>';
   PL_CLUBS.forEach(function(c){html+='<option value="'+c+'"'+(poolClubFilter===c?" selected":"")+'>'+c+'</option>';});
   html+='</select>';
-  html+='<select onchange="poolPosFilter=this.value;renderPoolResults();" style="padding:8px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#f0f6fc;font-size:13px;font-family:inherit;">';
+
+  // Position filter
+  html+='<select onchange="poolPosFilter=this.value;renderPoolTab();" style="padding:8px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#f0f6fc;font-size:13px;font-family:inherit;">';
   ["ALL","GK","DEF","MID","ATT"].forEach(function(pos){html+='<option value="'+pos+'"'+(poolPosFilter===pos?" selected":"")+'>'+pos+'</option>';});
   html+='</select>';
-  html+='<select onchange="poolSort=this.value;renderPoolResults();" style="padding:8px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#f0f6fc;font-size:13px;font-family:inherit;">';
-  [["pts_desc","Pts High"],["pts_asc","Pts Low"],["rating","Rating"],["name","A-Z"]].forEach(function(o){html+='<option value="'+o[0]+'"'+(poolSort===o[0]?" selected":"")+'>'+o[1]+'</option>';});
+
+  // Sort
+  html+='<select onchange="poolSort=this.value;renderPoolTab();" style="padding:8px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#f0f6fc;font-size:13px;font-family:inherit;">';
+  [["pts_desc","Pts (High)"],["pts_asc","Pts (Low)"],["rating","Rating"],["name","Name"]].forEach(function(o){html+='<option value="'+o[0]+'"'+(poolSort===o[0]?" selected":"")+'>'+o[1]+'</option>';});
   html+='</select>';
-  html+='<select onchange="poolShow=this.value;renderPoolResults();" style="padding:8px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#f0f6fc;font-size:13px;font-family:inherit;">';
-  [["all","All"],["undrafted","Undrafted"],["drafted","Drafted"]].forEach(function(o){html+='<option value="'+o[0]+'"'+(poolShow===o[0]?" selected":"")+'>'+o[1]+'</option>';});
+
+  // Show filter
+  html+='<select onchange="poolShow=this.value;renderPoolTab();" style="padding:8px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#f0f6fc;font-size:13px;font-family:inherit;">';
+  [["all","All Players"],["undrafted","Undrafted"],["drafted","Drafted"]].forEach(function(o){html+='<option value="'+o[0]+'"'+(poolShow===o[0]?" selected":"")+'>'+o[1]+'</option>';});
   html+='</select>';
+
   html+='</div>';
 
+  // Player count
   html+='<div style="color:#484f58;font-size:12px;margin-bottom:10px;">'+filtered.length+' players</div>';
 
   // Player list
   filtered.forEach(function(p){
     var dim=p.picker?0.5:1;
-    var border=p.picker?"#21262d":"#30363d";
-    var pickerLabel=p.picker?'<span style="font-size:11px;color:#8b949e;margin-left:6px;">'+p.picker+'</span>':'<span style="font-size:11px;color:#10b981;margin-left:6px;">Available</span>';
-    html+='<div style="background:#161b22;border:1px solid '+border+';border-radius:10px;padding:10px 14px;margin-bottom:5px;opacity:'+dim+';">'+
-      '<div style="display:flex;align-items:center;gap:10px;">'+
-      '<span class="badge badge-'+p.position+'">'+p.position+'</span>'+
-      '<div style="flex:1;">'+
-      '<div style="font-size:14px;font-weight:700;color:#f0f6fc;">'+p.name+pickerLabel+'</div>'+
-      '<div style="font-size:12px;color:#8b949e;">'+p.club+' &middot; &pound;'+p.fplPrice+'m &middot; &#x2B50;'+p.rating+'/10</div>'+
-      '</div>'+
-      '<div style="text-align:right;">'+
-      '<div style="color:#10b981;font-size:16px;font-weight:700;">'+p.seasonPts+'</div>'+
-      '<div style="color:#484f58;font-size:10px;">pts</div>'+
-      '</div></div></div>';
+    var borderCol=p.picker?"#21262d":"#30363d";
+    var pickerLabel=p.picker?'<span style="font-size:11px;color:#8b949e;margin-left:6px;">Picked by '+p.picker+'</span>':'<span style="font-size:11px;color:#10b981;margin-left:6px;">Available</span>';
+    html+='<div style="background:#161b22;border:1px solid '+borderCol+';border-radius:10px;padding:10px 14px;margin-bottom:5px;opacity:'+dim+';">'
+      +'<div style="display:flex;align-items:center;gap:10px;">'
+      +'<span class="badge badge-'+p.position+'">'+p.position+'</span>'
+      +'<div style="flex:1;">'
+      +'<div style="font-size:14px;font-weight:700;color:#f0f6fc;">'+p.name+pickerLabel+'</div>'
+      +'<div style="font-size:12px;color:#8b949e;">'+p.club+' &middot; &pound;'+p.fplPrice+'m &middot; &#x2B50;'+p.rating+'/10</div>'
+      +'</div>'
+      +'<div style="text-align:right;">'
+      +'<div style="color:#10b981;font-size:16px;font-weight:700;">'+p.seasonPts+'pts</div>'
+      +'<div style="color:#484f58;font-size:11px;">this season</div>'
+      +'</div></div></div>';
   });
 
   if(filtered.length===0) html+='<div style="padding:30px;text-align:center;color:#484f58;">No players match these filters</div>';
+  html+='</div></div>';
   el.innerHTML=html;
 }
 
+// ── ENHANCED STATS ─────────────────────────────────────────────────────────────
 function renderStatsSection(standings){
   if(Object.keys(S.scores).length===0){
     return '<div class="warn" style="margin-top:10px;">&#x26A0; No scores loaded yet. Use Refresh Scores to fetch the latest FPL data.</div>';
