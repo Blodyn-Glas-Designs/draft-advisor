@@ -2005,7 +2005,11 @@ function renderWelcomeScreen(){
   }
 
   var hasSavedData = S.myName && S.draftOrder.length>0;
-  var hasDraft = hasSavedData && S.playerPool.length>0;
+  // Check for interrupted load FIRST - takes priority over everything
+  var loadProgress = ld("loadProgress", {});
+  var isPartialLoad = loadProgress.clubs && loadProgress.clubs.length > 0 && loadProgress.total > 0 && S.playerPool.length > 0 && loadProgress.clubs.length < loadProgress.total;
+  // Only treat as full draft if pool is complete (no partial load in progress)
+  var hasDraft = hasSavedData && S.playerPool.length>0 && !isPartialLoad;
   var isDraftInProgress = hasDraft && !S.draftDone && S.pickIdx>0;
   var isDraftDone = hasDraft && S.draftDone;
 
@@ -2038,19 +2042,23 @@ function renderWelcomeScreen(){
   } else if(hasDraft){
     html += makeWelcomeBtn('&#x1F3DF; Start Draft','#10b981',function(){showScreen('main');showTab('draft');});
     html += makeWelcomeBtn('&#x2699; Settings','#30363d',function(){showScreen('main');showTab('settings');});
+  } else if(isPartialLoad){
+    // Interrupted load - show resume options prominently
+    var done = loadProgress.clubs.length;
+    var total = loadProgress.total;
+    html += '<div style="background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.3);border-radius:12px;padding:14px;margin-bottom:12px;text-align:center;">';
+    html += '<div style="color:#fbbf24;font-size:14px;font-weight:700;font-family:Rajdhani,system-ui;margin-bottom:4px;">&#x26A0; Player load interrupted</div>';
+    html += '<div style="color:#8b949e;font-size:12px;">'+done+' of '+total+' clubs loaded &mdash; '+S.playerPool.length+' players saved</div>';
+    html += '</div>';
+    html += makeWelcomeBtn('&#x25B6; Resume Loading ('+done+'/'+total+')','#10b981',function(){resumeInterruptedLoad();});
+    html += makeWelcomeBtn('&#x26BD; Start Fresh','#30363d',function(){
+      localStorage.removeItem(DB+"loadProgress");
+      localStorage.removeItem(DB+"pool");
+      localStorage.removeItem(DB+"clubs");
+      showScreen('setup');
+    });
   } else {
-    // Check for interrupted player load
-    var loadProgress = ld("loadProgress", {});
-    var partialPool = ld("pool", []);
-    var partialClubs = ld("clubs", []);
-    if(loadProgress.clubs && loadProgress.clubs.length > 0 && loadProgress.total > 0 && partialPool.length > 0){
-      var done = loadProgress.clubs.length;
-      var total = loadProgress.total;
-      html += makeWelcomeBtn('&#x25B6; Resume Loading ('+done+'/'+total+' clubs)','#10b981',function(){resumeInterruptedLoad();});
-      html += makeWelcomeBtn('&#x26BD; Start Fresh','#30363d',function(){localStorage.removeItem(DB+"loadProgress");showScreen('setup');});
-    } else {
-      html += makeWelcomeBtn('&#x26BD; Set Up New Draft','#10b981',function(){showScreen('setup');});
-    }
+    html += makeWelcomeBtn('&#x26BD; Set Up New Draft','#10b981',function(){showScreen('setup');});
     html += makeWelcomeBtn('&#x2B06; Restore from Backup','#30363d',function(){importBackup();});
   }
 
