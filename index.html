@@ -344,6 +344,8 @@ label.lbl{display:block;color:#8b5cf6;font-size:11px;text-transform:uppercase;le
 </div>
 <script>
 
+
+
 // ── CONSTANTS ─────────────────────────────────────────────────────────────────
 const DB = "da_";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
@@ -504,100 +506,160 @@ async function fetchPLClubs(){
 }
 
 async function loadAllPlayers(){
-  var pool=[];
-  // Test API key
-  try{
-    await callClaude("Reply with the single word: ok","ok",10);
-  }catch(e){
-    document.getElementById("load-title").textContent="API Error";
-    document.getElementById("load-subtitle").textContent="Could not connect to Claude API";
-    document.getElementById("load-errors").innerHTML='<div class="error-msg" style="padding:14px;"><strong>Error:</strong><br><br>'+e.message+'<br><br>Common causes:<br>&#x2022; API key incorrect<br>&#x2022; No billing credit<br>&#x2022; Network issue</div><button class="btn btn-gray" style="margin-top:10px;" onclick="showScreen(\'setup\')">&#x2190; Go Back</button>';
-    return [];
+  var pool = [];
+  var clubCounts = {};
+  var errors = [];
+
+  // Check for partial load from a previous interrupted session
+  var savedPool = ld("pool", []);
+  var savedClubs = ld("clubs", []);
+  var loadProgress = ld("loadProgress", {});
+  // loadProgress = {clubs: [...completed club names], total: N}
+
+  if(savedPool.length > 0 && savedClubs.length > 0 && loadProgress.clubs && loadProgress.clubs.length > 0){
+    // We have a partial load - resume from where we left off
+    pool = savedPool;
+    PL_CLUBS = savedClubs;
+    loadProgress.clubs.forEach(function(c){ clubCounts[c] = pool.filter(function(p){return p.club===c;}).length; });
+    var remaining = PL_CLUBS.filter(function(c){ return !loadProgress.clubs.includes(c); });
+    setLoadUI(loadProgress.clubs.length, PL_CLUBS.length,
+      "Resuming... "+loadProgress.clubs.length+"/"+PL_CLUBS.length+" clubs already loaded",
+      clubCounts, [], pool.length, null);
+    if(remaining.length === 0){
+      // Everything already loaded - just proceed
+      S.playerPool = pool;
+      setLoadUI(100, "Complete! "+pool.length+" players loaded.", clubCounts, [], pool.length, null);
+      return pool;
+    }
+    // Load remaining clubs
+    await loadClubBatches(remaining, pool, clubCounts, errors, loadProgress);
+  } else {
+    // Fresh load
+    // Test API key first
+    try{
+      await callClaude("Reply with the single word: ok", "ok", 10);
+    }catch(e){
+      document.getElementById("load-title").textContent = "API Error";
+      document.getElementById("load-subtitle").textContent = "Could not connect to Claude API";
+      document.getElementById("load-errors").innerHTML =
+        '<div class="error-msg" style="font-size:14px;padding:14px;"><strong>Error:</strong><br><br>'+e.message+
+        '<br><br>Common causes:<br>&#x2022; API key incorrect<br>&#x2022; No billing credit<br>&#x2022; Network issue</div>'+
+        '<button class="btn btn-gray" style="margin-top:10px;" onclick="goToSetup()">&#x2190; Go Back</button>';
+      return [];
+    }
+
+    // Get club list
+    setLoadUI(5, "Finding Premier League clubs for 2026-27 season...", {}, [], 0, null);
+    PL_CLUBS = await fetchPLClubs();
+    sv("clubs", PL_CLUBS);
+    sv("loadProgress", {clubs:[], total:PL_CLUBS.length});
+    setLoadUI(10, "Loading "+PL_CLUBS.length+" clubs in batches...", {}, [], 0, null);
+    await loadClubBatches(PL_CLUBS, pool, clubCounts, errors, {clubs:[], total:PL_CLUBS.length});
   }
 
-  // Get clubs
-  setLoadUI(5,"Finding Premier League clubs for 2026-27 season...",{},null,0,null);
-  PL_CLUBS=await fetchPLClubs();
-  setLoadUI(10,"Loading "+PL_CLUBS.length+" clubs in batches...",{},null,0,null);
+  return S.playerPool;
+}
 
-  var clubCounts={}, errors=[], batchSize=4;
-  var batches=[];
-  for(var i=0;i<PL_CLUBS.length;i+=batchSize) batches.push(PL_CLUBS.slice(i,i+batchSize));
+async function loadClubBatches(clubsToLoad, pool, clubCounts, errors, progress){
+  var batchSize = 4;
+  var batches = [];
+  for(var i=0; i<clubsToLoad.length; i+=batchSize) batches.push(clubsToLoad.slice(i,i+batchSize));
+  var completedClubs = progress.clubs ? progress.clubs.slice() : [];
+  var totalClubs = PL_CLUBS.length;
 
-  for(var b=0;b<batches.length;b++){
-    var batch=batches[b];
-    var pct=Math.round(10+((b/batches.length)*75));
-    setLoadUI(pct,"Loading batch "+(b+1)+"/"+batches.length+": "+batch.join(", "),clubCounts,errors,pool.length,null);
+  for(var b=0; b<batches.length; b++){
+    var batch = batches[b];
+    var doneCount = completedClubs.length + b*batchSize;
+    var pct = Math.round(10 + ((doneCount/totalClubs)*80));
+    setLoadUI(doneCount, totalClubs,
+      "Batch "+(b+1)+"/"+batches.length+": "+batch.join(", "),
+      clubCounts, errors, pool.length, null);
 
-    var sys="You are a Premier League fantasy football expert. Return a JSON object where keys are club names and values are arrays of players. Include ALL first-team players for EACH of these clubs for the 2026-27 Premier League season including summer 2025 transfers. Each player object must have: name (string), position (GK/DEF/MID/ATT), fplPrice (number in pounds), lastSeasonPts (integer), rating (1-10 integer). Aim for 20-25 players per club. Return raw JSON object only, starting with {.";
-    var userMsg="Return squads for these Premier League clubs: "+batch.join(", ");
-
+    var sys = "Premier League fantasy football expert. Return a JSON object where keys are club names and values are arrays of players. Include ALL first-team players for EACH club for the 2026-27 Premier League season including summer 2025 transfers. Each player: {name:string, position:'GK'|'DEF'|'MID'|'ATT', fplPrice:number, lastSeasonPts:number, rating:number}. 20-25 players per club. Return raw JSON object only starting with {.";
     try{
-      var raw=await callClaude(sys,userMsg,6000);
-      var parsed=extractJSON(raw);
-      if(parsed&&typeof parsed==="object"&&!Array.isArray(parsed)){
+      var raw = await callClaude(sys, "Return squads for: "+batch.join(", "), 6000);
+      var parsed = extractJSON(raw);
+      if(parsed && typeof parsed==="object" && !Array.isArray(parsed)){
         batch.forEach(function(club){
-          var players=parsed[club]||parsed[club.toLowerCase()]||null;
+          var players = parsed[club] || parsed[club.toLowerCase()] || null;
           if(!players){
-            // Try partial match
             Object.keys(parsed).forEach(function(k){
               if(k.toLowerCase().includes(club.toLowerCase().split(" ")[0])) players=parsed[k];
             });
           }
-          if(Array.isArray(players)&&players.length>=3){
-            var normed=players.map(function(p){return normalise(p,club);});
-            clubCounts[club]=normed.length;
-            pool=pool.concat(normed);
+          if(Array.isArray(players) && players.length>=3){
+            var normed = players.map(function(p){ return normalise(p,club); });
+            clubCounts[club] = normed.length;
+            pool = pool.concat(normed);
+            completedClubs.push(club);
           } else {
-            clubCounts[club]=0;
-            errors.push(club+": not found in batch response");
+            clubCounts[club] = 0;
+            errors.push(club+": not found in batch");
           }
         });
       } else {
-        batch.forEach(function(club){clubCounts[club]=0;errors.push(club+": batch parse failed");});
+        batch.forEach(function(club){ clubCounts[club]=0; errors.push(club+": parse failed"); });
       }
     }catch(e){
-      batch.forEach(function(club){clubCounts[club]=0;errors.push(club+": "+e.message);});
+      batch.forEach(function(club){ clubCounts[club]=0; errors.push(club+": "+e.message); });
     }
-    setLoadUI(pct+5,"Batch "+(b+1)+" done",clubCounts,errors,pool.length,null);
+
+    // Save progress after every batch so interruption loses at most 1 batch
+    var seen = new Set();
+    var deduped = pool.filter(function(p){
+      var k=(p.name+"|"+p.club).toLowerCase();
+      if(seen.has(k)) return false;
+      seen.add(k); return true;
+    });
+    S.playerPool = deduped;
+    sv("pool", deduped);
+    sv("loadProgress", {clubs:completedClubs.slice(), total:totalClubs});
+    setLoadUI(completedClubs.length, totalClubs, "Saved batch "+(b+1), clubCounts, errors, deduped.length, null);
   }
 
   // Retry individual failed clubs
-  var failed=PL_CLUBS.filter(function(c){return (clubCounts[c]||0)===0;});
-  if(failed.length>0){
-    setLoadUI(88,"Retrying "+failed.length+" failed clubs...",clubCounts,errors,pool.length,null);
-    for(var fi=0;fi<failed.length;fi++){
-      var club=failed[fi];
-      var sys2="Return ALL first-team players for "+club+" in the 2026-27 Premier League season as a JSON array. Each player: name, position (GK/DEF/MID/ATT), fplPrice, lastSeasonPts, rating. About 20-25 players. Raw JSON array starting with [.";
+  var failed = PL_CLUBS.filter(function(c){ return (clubCounts[c]||0)===0; });
+  if(failed.length > 0){
+    setLoadUI(completedClubs.length, totalClubs, "Retrying "+failed.length+" failed clubs...", clubCounts, errors, pool.length, null);
+    for(var fi=0; fi<failed.length; fi++){
+      var club = failed[fi];
+      var sys2 = "Return ALL first-team players for "+club+" in the 2026-27 PL season as a JSON array. Each player: name, position (GK/DEF/MID/ATT), fplPrice, lastSeasonPts, rating. About 20-25 players. Raw JSON array starting with [.";
       try{
-        var raw2=await callClaude(sys2,club+" squad.",2000);
-        var players2=extractJSON(raw2);
-        if(Array.isArray(players2)&&players2.length>=3){
-          var normed2=players2.map(function(p){return normalise(p,club);});
-          pool=pool.concat(normed2);
-          clubCounts[club]=normed2.length;
-          errors=errors.filter(function(e){return !e.startsWith(club);});
+        var raw2 = await callClaude(sys2, club+" squad.", 2000);
+        var players2 = extractJSON(raw2);
+        if(Array.isArray(players2) && players2.length>=3){
+          var normed2 = players2.map(function(p){ return normalise(p,club); });
+          pool = pool.concat(normed2);
+          clubCounts[club] = normed2.length;
+          completedClubs.push(club);
+          errors = errors.filter(function(e){ return !e.startsWith(club); });
+          sv("pool", pool); sv("loadProgress", {clubs:completedClubs.slice(), total:totalClubs});
         }
-      }catch(e2){console.warn("Retry failed for "+club+":",e2.message);}
-      setLoadUI(88,"Retried: "+club,clubCounts,errors,pool.length,null);
+      }catch(e2){ console.warn("Retry failed for "+club); }
+      setLoadUI(completedClubs.length, totalClubs, "Retried: "+club, clubCounts, errors, pool.length, null);
     }
   }
 
-  // Dedupe and sort
-  var seen=new Set();
-  pool=pool.filter(function(p){
+  // Dedupe and finalise
+  var seen2 = new Set();
+  pool = pool.filter(function(p){
     var k=(p.name+"|"+p.club).toLowerCase();
-    if(seen.has(k)) return false;
-    seen.add(k); return true;
-  }).sort(function(a,b){return b.rating-a.rating;});
+    if(seen2.has(k)) return false;
+    seen2.add(k); return true;
+  }).sort(function(a,b){ return b.rating-a.rating; });
 
-  S.playerPool=pool;
-  sv("pool",pool); sv("clubs",PL_CLUBS);
+  S.playerPool = pool;
+  sv("pool", pool);
+  sv("clubs", PL_CLUBS);
 
-  var stillFailed=PL_CLUBS.filter(function(c){return (clubCounts[c]||0)===0;});
-  setLoadUI(100,"Complete! "+pool.length+" players loaded.",clubCounts,errors,pool.length,stillFailed.length>0?stillFailed:null);
-  return pool;
+  // Clear progress marker - load is complete
+  localStorage.removeItem(DB+"loadProgress");
+
+  var stillFailed = PL_CLUBS.filter(function(c){ return (clubCounts[c]||0)===0; });
+  setLoadUI(100, "Complete! "+pool.length+" players loaded.", clubCounts, errors, pool.length,
+    stillFailed.length > 0 ? stillFailed : null);
 }
+
 
 async function retryClubs(clubs){
   document.getElementById("load-errors").innerHTML="<div class='warn'>Retrying...</div>";
@@ -797,6 +859,7 @@ function undoPick(){
 }
 
 // ── ADVICE ─────────────────────────────────────────────────────────────────────
+function withTimeout(promise,ms,label){var t=new Promise(function(_,reject){setTimeout(function(){reject(new Error((label||"Call")+" timed out after "+(ms/1000)+"s"));},ms);});return Promise.race([promise,t]);}
 async function generateAdvice(){
   S.adviceLoading=true; S.advice=null;
   renderAdviceTab();
@@ -829,7 +892,7 @@ async function generateAdvice(){
       "{injury: string or null, startingRisk: 'low'|'medium'|'high', fixtureRating: 1-10 (10=easiest), setPiece: boolean, keyNews: string (one sentence of most important news), recommendation: 'strong'|'consider'|'avoid'}. "+
       "Raw JSON only starting with {.";
 
-    var newsRaw = await callClaude(searchSys, "Search for latest Premier League news and injury updates for these players: "+topCandidates+". Return as JSON.", 3000);
+    var newsRaw = await withTimeout(callClaude(searchSys, "Search for latest Premier League news and injury updates for these players: "+topCandidates+". Return as JSON.", 3000), 30000, "News");
     var playerNews = {};
     try{ playerNews = extractJSON(newsRaw); }catch(e){ console.warn("News parse failed:", e.message); }
 
@@ -839,7 +902,7 @@ async function generateAdvice(){
       "Return a brief JSON: {injuries: [list of notable injured players], managerChanges: [list of manager changes and impact], transferNews: [key signings affecting fantasy value]}. "+
       "Raw JSON only starting with {.";
 
-    var contextRaw = await callClaude(contextSys, "Search for current PL injuries, manager changes and transfer news for fantasy football. Return JSON.", 1500);
+    var contextRaw = await withTimeout(callClaude(contextSys, "Search for current PL injuries, manager changes and transfer news for fantasy football. Return JSON.", 1500), 30000, "Context");
     var leagueContext = {};
     try{ leagueContext = extractJSON(contextRaw); }catch(e){ console.warn("Context parse failed:", e.message); }
 
@@ -855,7 +918,7 @@ async function generateAdvice(){
       "{age:number,ageRisk:'low'|'medium'|'high',contractRisk:'low'|'medium'|'high',"+
       "formTrend:'rising'|'stable'|'declining'|'unknown',"+
       "keyDependency:string_or_null,declineFlag:boolean,declineReason:string_or_null}.";
-    var declineRaw = await callClaude(declineSys, "Search decline risk for: "+top5names+". Return JSON.", 2000);
+    var declineRaw = await withTimeout(callClaude(declineSys, "Search decline risk for: "+top5names+". Return JSON.", 2000), 30000, "Decline");
     var declineRisk = {};
     try{ declineRisk = extractJSON(declineRaw); }catch(e){ console.warn("Decline parse failed:", e.message); }
 
@@ -900,7 +963,7 @@ async function generateAdvice(){
       "Return JSON only: {pick:{name,club,position,fplPrice,lastSeasonPts,rating},reason:'2-3 sentences covering stats AND current context',scarcity:'position scarcity warning or empty',riskFlag:'injury or rotation concern or empty',declineWarning:'decline risk warning if age/form/contract flags present - be specific eg Salah 33 declining form lost Trent or empty',fixtureNote:'fixture difficulty note or empty',nextTarget:'brief next turn target'}"
     ];
     var sys = sysLines.join(" ");
-    var rec = await callClaude(sys, "Give me my best draft pick recommendation based on current form, injuries and news.", 600);
+    var rec = await withTimeout(callClaude(sys, "Give me my best draft pick recommendation based on current form, injuries and news.", 600), 30000, "Pick");
     S.advice = extractJSON(rec);
 
   }catch(e){
@@ -1792,6 +1855,42 @@ function renderStatsTab(){
 
 
 
+
+function resumeInterruptedLoad(){
+  // Restore setup state from saved config
+  var cfg = ld("cfg", {});
+  if(!cfg.myName || !cfg.draftOrder || cfg.draftOrder.length < 2){
+    showToast("Setup data missing - please start fresh");
+    showScreen("setup");
+    return;
+  }
+  S.apiKey = cfg.apiKey||"";
+  S.myName = cfg.myName||"";
+  S.draftOrder = cfg.draftOrder||[];
+  S.clubMax = cfg.clubMax||2;
+  S.snakeOrder = buildSnake(S.draftOrder, TOTAL_PICKS);
+  initTeams();
+
+  showScreen("loading");
+  document.getElementById("load-title").textContent = "Resuming Player Load…";
+  document.getElementById("load-subtitle").textContent = "Picking up where we left off…";
+  document.getElementById("load-bar").style.width = "0%";
+  document.getElementById("load-pct").textContent = "0%";
+  document.getElementById("load-clubs").innerHTML = "";
+  document.getElementById("load-errors").innerHTML = "";
+  document.getElementById("load-total").textContent = "";
+
+  setTimeout(function(){
+    loadAllPlayers().then(function(pool){
+      if(pool && pool.length > 0) proceedToApp();
+    }).catch(function(e){
+      document.getElementById("load-errors").innerHTML =
+        '<div class="error-msg">'+e.message+'</div><button class="btn btn-gray" style="margin-top:10px;" onclick="goToSetup()">Go Back</button>';
+    });
+  }, 100);
+}
+
+
 function showTab(tabId){
   document.querySelectorAll(".tab-content").forEach(function(el){el.classList.remove("active");});
   document.querySelectorAll(".nav-btn").forEach(function(b){b.classList.remove("active");});
@@ -1807,6 +1906,7 @@ function showTab(tabId){
   else if(tabId==="pool") renderPoolTab();
   else if(tabId==="stats") renderStatsTab();
 }
+function goToSetup(){ showScreen("setup"); }
 function showScreen(id){
   document.querySelectorAll(".screen").forEach(function(s){s.classList.remove("active");});
   var el=document.getElementById(id+"-screen");
@@ -1862,7 +1962,7 @@ async function handleSetupClick(){
       proceedToApp();
     }).catch(function(e){
       document.getElementById("load-title").textContent="Error";
-      document.getElementById("load-errors").innerHTML='<div class="error-msg">'+e.message+'</div><button class="btn btn-gray" style="margin-top:10px;" onclick="showScreen(\'setup\')">Go Back</button>';
+      document.getElementById("load-errors").innerHTML='<div class="error-msg">'+e.message+'</div><button class="btn btn-gray" style="margin-top:10px;" onclick="goToSetup()">Go Back</button>';
     });
   },100);
 }
@@ -1939,7 +2039,18 @@ function renderWelcomeScreen(){
     html += makeWelcomeBtn('&#x1F3DF; Start Draft','#10b981',function(){showScreen('main');showTab('draft');});
     html += makeWelcomeBtn('&#x2699; Settings','#30363d',function(){showScreen('main');showTab('settings');});
   } else {
-    html += makeWelcomeBtn('&#x26BD; Set Up New Draft','#10b981',function(){showScreen('setup');});
+    // Check for interrupted player load
+    var loadProgress = ld("loadProgress", {});
+    var partialPool = ld("pool", []);
+    var partialClubs = ld("clubs", []);
+    if(loadProgress.clubs && loadProgress.clubs.length > 0 && loadProgress.total > 0 && partialPool.length > 0){
+      var done = loadProgress.clubs.length;
+      var total = loadProgress.total;
+      html += makeWelcomeBtn('&#x25B6; Resume Loading ('+done+'/'+total+' clubs)','#10b981',function(){resumeInterruptedLoad();});
+      html += makeWelcomeBtn('&#x26BD; Start Fresh','#30363d',function(){localStorage.removeItem(DB+"loadProgress");showScreen('setup');});
+    } else {
+      html += makeWelcomeBtn('&#x26BD; Set Up New Draft','#10b981',function(){showScreen('setup');});
+    }
     html += makeWelcomeBtn('&#x2B06; Restore from Backup','#30363d',function(){importBackup();});
   }
 
@@ -1963,10 +2074,12 @@ var welcomeNeonColors = [
 ];
 
 function makeWelcomeBtn(label, color, fn){
-  var id = 'wb'+Object.keys(welcomeBtnFns).length;
+  var idx = Object.keys(welcomeBtnFns).length;
+  var id = 'wb'+idx;
   welcomeBtnFns[id] = fn;
-  var txtColor = (color==='#30363d'||color==='#21262d') ? '#f0f6fc' : '#fff';
-  return '<button onclick="welcomeBtnFns[\'' + id + '\']();" style="width:100%;padding:16px;background:'+color+';color:'+txtColor+';border:none;border-radius:12px;font-size:16px;font-weight:700;cursor:pointer;font-family:inherit;letter-spacing:0.2px;">'+label+'</button>';
+  var nc = welcomeNeonColors[idx % welcomeNeonColors.length];
+  var style = ['width:100%','padding:12px 8px','background:'+nc.bg,'color:'+nc.text,'border:1px solid '+nc.border,'border-radius:10px','font-size:18px','font-family:Bangers,cursive','letter-spacing:2px','cursor:pointer','line-height:1.2','text-shadow:0 0 8px '+nc.glow+',0 0 16px '+nc.glow,'box-shadow:0 0 10px '+nc.glow+',inset 0 0 10px rgba(255,255,255,0.03)'].join(';');
+  return '<button onclick="welcomeBtnFns[\'' + id + '\']();" style="'+style+'">'+label+'</button>';
 }
 
 // ── BOOT ───────────────────────────────────────────────────────────────────────
@@ -1983,6 +2096,9 @@ document.addEventListener("DOMContentLoaded",function(){
 
 // ── POOL TAB ───────────────────────────────────────────────────────────────────
 var poolClubFilter="ALL",poolPosFilter="ALL",poolSort="pts_desc",poolShow="all";
+var posFilter="ALL";
+var tappedPlayer=null;
+var cumulChart=null; var gwChart=null; var posChart=null; var monthlyChart=null;
 
 function renderPoolTab(){
   var el=document.getElementById("tab-pool");
@@ -2213,6 +2329,7 @@ function drawGWChart(){ drawGWChartToGW(S.currentGW); }
 function drawPosChart(){
   var ctx=document.getElementById("pos-chart");
   if(!ctx) return;
+  if(posChart) posChart.destroy();
   var ex=Chart.getChart(ctx); if(ex) ex.destroy();
   var positions=["GK","DEF","MID","ATT"];
   var datasets=S.draftOrder.map(function(name,i){
@@ -2256,6 +2373,8 @@ function drawMonthlyChart(){
   });
   new Chart(ctx,{type:"bar",data:{labels:labels,datasets:datasets},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:"#8b949e",font:{size:11}}}},scales:{x:{ticks:{color:"#484f58"}},y:{ticks:{color:"#484f58"},grid:{color:"#21262d"}}}}});
 }
+
+
 
 
 </script>
