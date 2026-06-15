@@ -21,6 +21,7 @@
 
 
 
+
 // ── CONSTANTS ─────────────────────────────────────────────────────────────────
 const DB = "da_";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
@@ -48,6 +49,19 @@ let S = {
   scores:{}, lastRefreshed:null, currentGW:1, history:[],
   advice:null, adviceLoading:false, defaultTab:"myteam"
 };
+
+// Neon button colours - declared early as used by renderWelcomeScreen on boot
+var welcomeBtnFns={};
+var welcomeNeonColors = [
+  {bg:'rgba(16,185,129,0.15)',  border:'#10b981', text:'#10b981',  glow:'rgba(16,185,129,0.5)'},
+  {bg:'rgba(236,72,153,0.15)',  border:'#ec4899', text:'#ec4899',  glow:'rgba(236,72,153,0.5)'},
+  {bg:'rgba(139,92,246,0.15)',  border:'#8b5cf6', text:'#a78bfa',  glow:'rgba(139,92,246,0.5)'},
+  {bg:'rgba(59,130,246,0.15)',  border:'#3b82f6', text:'#60a5fa',  glow:'rgba(59,130,246,0.5)'},
+  {bg:'rgba(245,158,11,0.15)',  border:'#f59e0b', text:'#fbbf24',  glow:'rgba(245,158,11,0.5)'},
+  {bg:'rgba(239,68,68,0.15)',   border:'#ef4444', text:'#f87171',  glow:'rgba(239,68,68,0.5)'},
+];
+
+
 
 // ── PERSISTENCE ────────────────────────────────────────────────────────────────
 function sv(k,v){try{localStorage.setItem(DB+k,JSON.stringify(v));}catch(e){}}
@@ -1873,16 +1887,7 @@ function renderWelcomeScreen(){
   btns.innerHTML = html;
 }
 
-var welcomeBtnFns={};
 // Neon button colours for welcome screen - Arcane palette
-var welcomeNeonColors = [
-  {bg:'rgba(16,185,129,0.15)',  border:'#10b981', text:'#10b981',  glow:'rgba(16,185,129,0.5)'},
-  {bg:'rgba(236,72,153,0.15)',  border:'#ec4899', text:'#ec4899',  glow:'rgba(236,72,153,0.5)'},
-  {bg:'rgba(139,92,246,0.15)',  border:'#8b5cf6', text:'#a78bfa',  glow:'rgba(139,92,246,0.5)'},
-  {bg:'rgba(59,130,246,0.15)',  border:'#3b82f6', text:'#60a5fa',  glow:'rgba(59,130,246,0.5)'},
-  {bg:'rgba(245,158,11,0.15)',  border:'#f59e0b', text:'#fbbf24',  glow:'rgba(245,158,11,0.5)'},
-  {bg:'rgba(239,68,68,0.15)',   border:'#ef4444', text:'#f87171',  glow:'rgba(239,68,68,0.5)'},
-];
 
 function makeWelcomeBtn(label, color, fn){
   var idx = Object.keys(welcomeBtnFns).length;
@@ -2184,6 +2189,7 @@ function drawMonthlyChart(){
   });
   new Chart(ctx,{type:"bar",data:{labels:labels,datasets:datasets},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:"#8b949e",font:{size:11}}}},scales:{x:{ticks:{color:"#484f58"}},y:{ticks:{color:"#484f58"},grid:{color:"#21262d"}}}}});
 }
+
 
 
 
