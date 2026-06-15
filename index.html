@@ -2285,6 +2285,18 @@ label.lbl{display:block;color:#8b5cf6;font-size:11px;text-transform:uppercase;le
 
 </head>
 <body>
+<div id="err-display" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:#0d1117;color:#ef4444;padding:20px;z-index:9999;font-family:monospace;font-size:13px;overflow:auto;white-space:pre-wrap;"></div>
+<script>
+window.onerror=function(msg,src,line,col,err){
+  var el=document.getElementById('err-display');
+  if(el){el.style.display='block';el.textContent='ERROR:\n'+msg+'\n\nFile: '+src+'\nLine: '+line+', Col: '+col+'\n\nStack:\n'+(err&&err.stack||'none');}
+  return true;
+};
+window.addEventListener('unhandledrejection',function(e){
+  var el=document.getElementById('err-display');
+  if(el){el.style.display='block';el.textContent=(el.textContent||'')+'\n\nUNHANDLED PROMISE:\n'+(e.reason&&e.reason.stack||e.reason||'unknown');}
+});
+</script>
 <div id="app">
   <div id="setup-screen" class="screen">
     <div style="flex:1;overflow-y:auto;display:flex;align-items:center;justify-content:center;padding:20px;background:linear-gradient(160deg,#080c12 0%,#0a0e1a 50%,#080c12 100%);">
