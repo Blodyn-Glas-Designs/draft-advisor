@@ -96,14 +96,6 @@ label.lbl{display:block;color:#8b5cf6;font-size:11px;text-transform:uppercase;le
 }
 </style>
 
-  // Register service worker for PWA
-  if('serviceWorker' in navigator){
-    window.addEventListener('load', function(){
-      navigator.serviceWorker.register('/draft-advisor/sw.js')
-        .then(function(reg){ console.log('SW registered:', reg.scope); })
-        .catch(function(err){ console.warn('SW registration failed:', err); });
-    });
-  }
 </head>
 <body>
 <div id="app">
@@ -2395,6 +2387,15 @@ function drawMonthlyChart(){
 
 
 
+
+// ── SERVICE WORKER ────────────────────────────────────────────────────────────
+if('serviceWorker' in navigator){
+  window.addEventListener('load', function(){
+    navigator.serviceWorker.register('/draft-advisor/sw.js')
+      .then(function(){ console.log('SW registered'); })
+      .catch(function(e){ console.log('SW skip:', e.message); });
+  });
+}
 </script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
@@ -2478,14 +2479,6 @@ label.lbl{display:block;color:#8b5cf6;font-size:11px;text-transform:uppercase;le
 }
 </style>
 
-  // Register service worker for PWA
-  if('serviceWorker' in navigator){
-    window.addEventListener('load', function(){
-      navigator.serviceWorker.register('/draft-advisor/sw.js')
-        .then(function(reg){ console.log('SW registered:', reg.scope); })
-        .catch(function(err){ console.warn('SW registration failed:', err); });
-    });
-  }
 </head>
 <body>
 <div id="app">
