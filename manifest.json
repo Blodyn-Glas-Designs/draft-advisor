@@ -1,16 +1,24 @@
 {
   "name": "Draft Advisor",
   "short_name": "Draft",
+  "description": "Premier League Fantasy Snake Draft Advisor",
   "start_url": "/draft-advisor/",
   "display": "standalone",
-  "background_color": "#0d1117",
-  "theme_color": "#0d1117",
   "orientation": "portrait",
+  "background_color": "#080c12",
+  "theme_color": "#10b981",
   "icons": [
     {
-      "src": "icon.png",
+      "src": "/draft-advisor/icon-192.png",
       "sizes": "192x192",
-      "type": "image/png"
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/draft-advisor/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
     }
   ]
 }
