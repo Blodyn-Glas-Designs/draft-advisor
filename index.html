@@ -358,6 +358,8 @@ label.lbl{display:block;color:#8b5cf6;font-size:11px;text-transform:uppercase;le
 
 
 
+
+
 // ── CONSTANTS ─────────────────────────────────────────────────────────────────
 const DB = "da_";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
@@ -986,19 +988,52 @@ async function generateAdvice(){
     var sys=sysLines.join(" ");
     var rec=await withTimeout(callClaude(sys,"Give me two draft pick recommendations: one stats-led Safe Pick and one Strategic Pick.",800),30000,"Recommendation");
     var parsed=extractJSON(rec);
-    if(parsed){
-      parsed.excluded=parsed.excluded||excluded;
-      S.advice=parsed;
+    console.log("Advice raw response:", rec);
+    console.log("Advice parsed:", parsed);
+
+    // Defensive normalisation - handle variations in response shape
+    function normalisePick(pickObj, fallbackPlayer){
+      if(!pickObj) return fallbackPlayer ? {name:fallbackPlayer.name,club:fallbackPlayer.club,position:fallbackPlayer.position,fplPrice:fallbackPlayer.fplPrice,lastSeasonPts:fallbackPlayer.lastSeasonPts,rating:fallbackPlayer.rating} : null;
+      // Sometimes Claude nests it differently or uses different key names
+      var name = pickObj.name || pickObj.playerName || pickObj.player;
+      if(!name) return fallbackPlayer ? {name:fallbackPlayer.name,club:fallbackPlayer.club,position:fallbackPlayer.position,fplPrice:fallbackPlayer.fplPrice,lastSeasonPts:fallbackPlayer.lastSeasonPts,rating:fallbackPlayer.rating} : null;
+      // Try to find the full player record from our pool to fill any gaps
+      var fullMatch = avail.find(function(p){return p.name===name;});
+      return {
+        name: name,
+        club: pickObj.club || (fullMatch?fullMatch.club:"Unknown"),
+        position: pickObj.position || (fullMatch?fullMatch.position:"MID"),
+        fplPrice: pickObj.fplPrice!=null ? pickObj.fplPrice : (fullMatch?fullMatch.fplPrice:0),
+        lastSeasonPts: pickObj.lastSeasonPts!=null ? pickObj.lastSeasonPts : (fullMatch?fullMatch.lastSeasonPts:0),
+        rating: pickObj.rating!=null ? pickObj.rating : (fullMatch?fullMatch.rating:5)
+      };
+    }
+
+    if(parsed && typeof parsed==="object"){
+      S.advice = {
+        safePick: normalisePick(parsed.safePick, avail[0]),
+        safeReason: parsed.safeReason || parsed.safe_reason || "Highest points available for your needed position.",
+        safeWarning: parsed.safeWarning || parsed.safe_warning || "",
+        strategicPick: normalisePick(parsed.strategicPick, avail[1]),
+        strategicReason: parsed.strategicReason || parsed.strategic_reason || "Good value pick considering draft position.",
+        strategicWarning: parsed.strategicWarning || parsed.strategic_warning || "",
+        scarcity: parsed.scarcity || "",
+        nextTarget: parsed.nextTarget || parsed.next_target || "",
+        excluded: parsed.excluded || excluded || []
+      };
+    } else {
+      throw new Error("Could not parse recommendation JSON");
     }
 
   }catch(e){
     console.error("Advice failed:",e.message);
+    var p0=avail[0], p1=avail[1]||avail[0];
     S.advice={
-      safePick:avail[0]||null,
-      safeReason:"Could not generate recommendation. Pick the highest rated available player.",
+      safePick: p0 ? {name:p0.name,club:p0.club,position:p0.position,fplPrice:p0.fplPrice,lastSeasonPts:p0.lastSeasonPts,rating:p0.rating} : null,
+      safeReason:"AI recommendation failed ("+e.message+"). Showing highest-rated available player instead.",
       safeWarning:"",
-      strategicPick:avail[1]||null,
-      strategicReason:"Consider your next turn position and position scarcity.",
+      strategicPick: p1 ? {name:p1.name,club:p1.club,position:p1.position,fplPrice:p1.fplPrice,lastSeasonPts:p1.lastSeasonPts,rating:p1.rating} : null,
+      strategicReason:"Second-highest rated available player as a backup option.",
       strategicWarning:"",
       scarcity:"",nextTarget:"",excluded:[]
     };
@@ -2525,6 +2560,8 @@ function drawMonthlyChart(){
   });
   new Chart(ctx,{type:"bar",data:{labels:labels,datasets:datasets},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:"#8b949e",font:{size:11}}}},scales:{x:{ticks:{color:"#484f58"}},y:{ticks:{color:"#484f58"},grid:{color:"#21262d"}}}}});
 }
+
+
 
 
 
