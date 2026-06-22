@@ -360,6 +360,10 @@ label.lbl{display:block;color:#8b5cf6;font-size:11px;text-transform:uppercase;le
 
 
 
+
+
+
+
 // ── CONSTANTS ─────────────────────────────────────────────────────────────────
 const DB = "da_";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
@@ -918,6 +922,11 @@ async function generateAdvice(){
     // Build excluded list and filtered available pool
     var excluded=[];
     var filteredAvail=avail.filter(function(p){
+      // Hard sanity check: club must be in our official current PL clubs list
+      if(PL_CLUBS.length>0 && !PL_CLUBS.includes(p.club)){
+        excluded.push({name:p.name,club:p.club,reason:"Not at a current Premier League club (data may be outdated)"});
+        return false;
+      }
       var f=hardFilters[p.name]||{};
       if(f.injuryStatus==="confirmed-out"){
         excluded.push({name:p.name,club:p.club,reason:"Injury: "+(f.injuryDetail||"serious injury")+(f.estimatedReturn?" (return: "+f.estimatedReturn+")":"")});
@@ -966,7 +975,17 @@ async function generateAdvice(){
       };
     });
 
-    // Step 4: Generate TWO recommendations
+    // Step 4: Determine Safe Pick deterministically (don't trust AI to rank by points)
+    // Find the best available player for the MOST NEEDED position, by lastSeasonPts
+    var neededPositions = Object.keys(slotsLeft).filter(function(pos){ return pos!=="WC" && slotsLeft[pos]>0; });
+    var safePickCandidates = filteredAvail.filter(function(p){
+      return neededPositions.includes(p.position) && !blockedClubs.includes(p.club);
+    }).sort(function(a,b){ return b.lastSeasonPts - a.lastSeasonPts; });
+    var deterministicSafePick = safePickCandidates[0] || filteredAvail[0] || null;
+    // Second best (different player) becomes a candidate the strategic pick should differ from
+    var secondBestSafe = safePickCandidates[1] || null;
+
+    // Step 5: Generate TWO recommendations
     var sysLines=[
       "You are an elite Premier League fantasy draft strategist. Today: "+new Date().toDateString()+".",
       "MY TEAM: "+JSON.stringify(myTeam),
@@ -978,11 +997,12 @@ async function generateAdvice(){
       "NEXT 20 PICKS: "+S.snakeOrder.slice(S.pickIdx,S.pickIdx+20).join(", "),
       "TOP 40 AVAILABLE (already filtered - excluded list is separate): "+JSON.stringify(enriched),
       "NOTE: Players with confirmed serious injuries or confirmed PL exits have ALREADY been removed from the available list.",
+      "DETERMINISTIC SAFE PICK (already calculated - you MUST use this exact player as safePick): "+JSON.stringify(deterministicSafePick),
       "CRITICAL RULES:",
-      "1. SAFE PICK must be the highest lastPts player available for the most needed position. If a player has 200+ lastPts and is fit, they MUST be the Safe Pick unless another player has significantly more points. Do NOT let decline flags or news override a dominant stats advantage for the Safe Pick.",
-      "2. STRATEGIC PICK considers snake position, scarcity, blocking rivals, fixture runs, and long-term value. Can differ from Safe Pick.",
-      "3. Minor injury (injuryStatus=minor) = include with warning. Only confirmed-out players are excluded.",
-      "4. ageRisk or declineFlag should appear as warnings in Safe Pick but should NEVER cause you to skip a 200+ point player for Safe Pick.",
+      "1. SAFE PICK is FIXED - you must return safePick as exactly the player named in DETERMINISTIC SAFE PICK above. Do not substitute a different player. Only add safeWarning text if there is a genuine injury/decline concern - but the pick itself does not change.",
+      "2. STRATEGIC PICK must be a DIFFERENT player than the Safe Pick. It MUST explicitly reason about: who picks before your next turn (from NEXT 20 PICKS) and what positions they likely need, scarcity at this position, fixture runs, and differential value. State in strategicReason specifically what rival behaviour or scarcity factor drove this choice (e.g. \"3 GK-needing teams pick before your next turn\").",
+      "3. Minor injury (injuryStatus=minor) = include with warning. Only confirmed-out players are excluded (already filtered).",
+      "4. If the deterministic Safe Pick has a decline flag or minor injury, mention it in safeWarning, but DO NOT change the pick itself.",
       "Return JSON only: {safePick:{name,club,position,fplPrice,lastSeasonPts,rating},safeReason:'2-3 sentences stats-focused',safeWarning:'decline or minor injury warning or empty',strategicPick:{name,club,position,fplPrice,lastSeasonPts,rating},strategicReason:'2-3 sentences on WHY this is smart strategically',strategicWarning:'any risk to be aware of or empty',scarcity:'position scarcity warning or empty',nextTarget:'what to aim for next turn',excluded:"+JSON.stringify(excluded)+"}"
     ];
     var sys=sysLines.join(" ");
@@ -1009,13 +1029,25 @@ async function generateAdvice(){
       };
     }
 
+    // Always force safePick to the deterministic calculation - never trust AI here
+    var forcedSafePick = deterministicSafePick ? {
+      name:deterministicSafePick.name, club:deterministicSafePick.club, position:deterministicSafePick.position,
+      fplPrice:deterministicSafePick.fplPrice, lastSeasonPts:deterministicSafePick.lastSeasonPts, rating:deterministicSafePick.rating
+    } : null;
+
     if(parsed && typeof parsed==="object"){
+      var stratPick = normalisePick(parsed.strategicPick, secondBestSafe||filteredAvail[1]);
+      // Ensure strategic pick is genuinely different from safe pick
+      if(stratPick && forcedSafePick && stratPick.name===forcedSafePick.name){
+        var altCandidate = secondBestSafe || filteredAvail.find(function(p){return p.name!==forcedSafePick.name;});
+        if(altCandidate) stratPick = {name:altCandidate.name,club:altCandidate.club,position:altCandidate.position,fplPrice:altCandidate.fplPrice,lastSeasonPts:altCandidate.lastSeasonPts,rating:altCandidate.rating};
+      }
       S.advice = {
-        safePick: normalisePick(parsed.safePick, avail[0]),
-        safeReason: parsed.safeReason || parsed.safe_reason || "Highest points available for your needed position.",
+        safePick: forcedSafePick,
+        safeReason: parsed.safeReason || parsed.safe_reason || (forcedSafePick?(forcedSafePick.name+" scored "+forcedSafePick.lastSeasonPts+" points last season - the strongest stats available for your needed position."):""),
         safeWarning: parsed.safeWarning || parsed.safe_warning || "",
-        strategicPick: normalisePick(parsed.strategicPick, avail[1]),
-        strategicReason: parsed.strategicReason || parsed.strategic_reason || "Good value pick considering draft position.",
+        strategicPick: stratPick,
+        strategicReason: parsed.strategicReason || parsed.strategic_reason || "Good differential value considering draft position and scarcity.",
         strategicWarning: parsed.strategicWarning || parsed.strategic_warning || "",
         scarcity: parsed.scarcity || "",
         nextTarget: parsed.nextTarget || parsed.next_target || "",
@@ -1027,13 +1059,14 @@ async function generateAdvice(){
 
   }catch(e){
     console.error("Advice failed:",e.message);
-    var p0=avail[0], p1=avail[1]||avail[0];
+    var fallbackSafe = (typeof deterministicSafePick !== "undefined" && deterministicSafePick) ? deterministicSafePick : avail[0];
+    var fallbackStrat = (typeof secondBestSafe !== "undefined" && secondBestSafe) ? secondBestSafe : (avail[1]||avail[0]);
     S.advice={
-      safePick: p0 ? {name:p0.name,club:p0.club,position:p0.position,fplPrice:p0.fplPrice,lastSeasonPts:p0.lastSeasonPts,rating:p0.rating} : null,
-      safeReason:"AI recommendation failed ("+e.message+"). Showing highest-rated available player instead.",
+      safePick: fallbackSafe ? {name:fallbackSafe.name,club:fallbackSafe.club,position:fallbackSafe.position,fplPrice:fallbackSafe.fplPrice,lastSeasonPts:fallbackSafe.lastSeasonPts,rating:fallbackSafe.rating} : null,
+      safeReason:"Highest points available for your needed position (AI enrichment unavailable: "+e.message+").",
       safeWarning:"",
-      strategicPick: p1 ? {name:p1.name,club:p1.club,position:p1.position,fplPrice:p1.fplPrice,lastSeasonPts:p1.lastSeasonPts,rating:p1.rating} : null,
-      strategicReason:"Second-highest rated available player as a backup option.",
+      strategicPick: fallbackStrat ? {name:fallbackStrat.name,club:fallbackStrat.club,position:fallbackStrat.position,fplPrice:fallbackStrat.fplPrice,lastSeasonPts:fallbackStrat.lastSeasonPts,rating:fallbackStrat.rating} : null,
+      strategicReason:"Next best available option as a backup.",
       strategicWarning:"",
       scarcity:"",nextTarget:"",excluded:[]
     };
@@ -1377,6 +1410,12 @@ function renderAdviceTab(){
   if(!S.advice){el.innerHTML='<div style="padding:40px;text-align:center;color:#8b949e;">Generating recommendation...</div>';return;}
 
   var html='<div style="padding:14px;overflow-y:auto;flex:1;">';
+
+  // Explainer note
+  html+='<div style="background:rgba(139,92,246,0.06);border:1px solid rgba(139,92,246,0.2);border-radius:8px;padding:8px 12px;margin-bottom:12px;font-size:11px;color:#8b949e;font-family:Rajdhani,system-ui;line-height:1.5;">';
+  html+='<strong style="color:#10b981;">Safe Pick</strong> = pure stats (last season points). ';
+  html+='<strong style="color:#f472b6;">Strategic Pick</strong> = also weighs snake position, rival needs, fixtures &amp; differential value.';
+  html+='</div>';
 
   // Excluded players warning
   var excl=S.advice.excluded||[];
@@ -2560,6 +2599,10 @@ function drawMonthlyChart(){
   });
   new Chart(ctx,{type:"bar",data:{labels:labels,datasets:datasets},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:"#8b949e",font:{size:11}}}},scales:{x:{ticks:{color:"#484f58"}},y:{ticks:{color:"#484f58"},grid:{color:"#21262d"}}}}});
 }
+
+
+
+
 
 
 
