@@ -411,6 +411,8 @@ label.lbl{display:block;color:#8b5cf6;font-size:11px;text-transform:uppercase;le
 
 
 
+
+
 // ── CONSTANTS ─────────────────────────────────────────────────────────────────
 const DB = "da_";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
@@ -436,7 +438,8 @@ let S = {
   playerPool:[], pickedMap:{}, teams:{}, snakeOrder:[], pickIdx:0,
   draftDone:false, hideDraft:false, captains:{}, wildcardSubs:{},
   scores:{}, lastRefreshed:null, currentGW:1, history:[],
-  advice:null, adviceLoading:false, defaultTab:"myteam"
+  advice:null, adviceLoading:false, defaultTab:"myteam",
+  lastBackup:null
 };
 
 // Neon button colours - declared early as used by renderWelcomeScreen on boot
@@ -472,7 +475,7 @@ function loadAll(){
   var sn=ld("snake",{}); S.snakeOrder=sn.snakeOrder||[]; S.pickIdx=sn.pickIdx||0;
   S.captains=ld("captains",{}); S.wildcardSubs=ld("wildcards",{});
   S.scores=ld("scores",{}); var m=ld("meta",{});
-  S.lastRefreshed=m.lastRefreshed||null; S.currentGW=m.currentGW||1;
+  S.lastRefreshed=m.lastRefreshed||null; S.currentGW=m.currentGW||1; S.lastBackup=m.lastBackup||null;
   var savedClubs=ld("clubs",[]);
   if(savedClubs.length>0) PL_CLUBS=savedClubs;
 }
@@ -1756,7 +1759,7 @@ async function doRefreshScores(){
     if(needed.length===0){
       upd("All up to date! GW"+cgw,"#10b981");
       S.lastRefreshed=new Date().toISOString();
-      sv("meta",{lastRefreshed:S.lastRefreshed,currentGW:S.currentGW});
+      sv("meta",{lastRefreshed:S.lastRefreshed,currentGW:S.currentGW,lastBackup:S.lastBackup});
       setTimeout(closeModal,1500); renderLeagueTab(); renderSettingsTab(); return;
     }
     for(var ni=0;ni<needed.length;ni++){
@@ -1960,6 +1963,8 @@ function exportBackup(){
     document.body.appendChild(a);
     a.click();
     setTimeout(function(){document.body.removeChild(a);},100);
+    S.lastBackup=new Date().toISOString();
+    sv("meta",{lastRefreshed:S.lastRefreshed,currentGW:S.currentGW,lastBackup:S.lastBackup});
     showToast("Backup downloaded!");
   }catch(e){
     // Fallback: show JSON in modal for manual copy
@@ -2387,6 +2392,122 @@ function exitBrowseMode(){
 }
 
 
+
+function checkBackupPrompt(){
+  // Only show if there's meaningful data to back up
+  if(!S.myName || S.draftOrder.length < 2) return;
+
+  // Always show during active draft; otherwise show if >24hrs since last backup
+  var isDraftActive = !S.draftDone && S.pickIdx > 0;
+  var lastBackupTime = S.lastBackup ? new Date(S.lastBackup).getTime() : 0;
+  var hoursSince = (Date.now() - lastBackupTime) / (1000 * 60 * 60);
+  var shouldShow = isDraftActive || hoursSince > 24 || !S.lastBackup;
+
+  if(!shouldShow) return;
+
+  // Auto-save a secondary localStorage backup silently
+  try{
+    var backup = buildBackupObject();
+    localStorage.setItem(DB+'autoBackup', JSON.stringify(backup));
+    localStorage.setItem(DB+'autoBackupTime', new Date().toISOString());
+  }catch(e){ console.warn('Auto-backup to localStorage failed:', e.message); }
+
+  // Show the dismissible prompt on welcome screen
+  var footer = document.getElementById('welcome-footer');
+  if(!footer) return;
+
+  var lastBackupStr = S.lastBackup
+    ? 'Last backup: ' + new Date(S.lastBackup).toLocaleDateString()
+    : 'No backup yet';
+
+  footer.innerHTML =
+    '<div style="background:rgba(236,72,153,0.1);border:1px solid rgba(236,72,153,0.3);border-radius:10px;padding:10px 12px;margin:0 0 8px;text-align:left;">' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;">' +
+    '<div style="color:#f472b6;font-size:12px;font-weight:700;font-family:Rajdhani,system-ui;letter-spacing:1px;">&#x1F4BE; BACKUP YOUR DATA</div>' +
+    '<div style="color:#484f58;font-size:10px;">' + lastBackupStr + '</div>' +
+    '</div>' +
+    '<div style="color:#8b949e;font-size:11px;margin-bottom:8px;">Protects your draft against accidental data loss.</div>' +
+    '<div style="display:flex;gap:8px;">' +
+    '<button onclick="doWelcomeBackup()" style="flex:2;padding:8px;background:rgba(236,72,153,0.15);border:1px solid #ec4899;color:#f472b6;border-radius:8px;cursor:pointer;font-family:Bangers,cursive;font-size:14px;letter-spacing:1px;text-shadow:0 0 6px rgba(236,72,153,0.5);">&#x2B07; Download Backup</button>' +
+    '<button onclick="dismissBackupPrompt()" style="flex:1;padding:8px;background:rgba(139,92,246,0.08);border:1px solid rgba(139,92,246,0.3);color:#a78bfa;border-radius:8px;cursor:pointer;font-family:Bangers,cursive;font-size:14px;letter-spacing:1px;">Dismiss</button>' +
+    '</div></div>';
+}
+
+function buildBackupObject(){
+  return {
+    version:1, exportedAt:new Date().toISOString(),
+    myName:S.myName, draftOrder:S.draftOrder, clubMax:S.clubMax,
+    draftDone:S.draftDone, teams:S.teams, pickedMap:S.pickedMap,
+    snakeOrder:S.snakeOrder, pickIdx:S.pickIdx,
+    captains:S.captains, wildcardSubs:S.wildcardSubs,
+    scores:S.scores, currentGW:S.currentGW, lastRefreshed:S.lastRefreshed,
+    playerPool:S.playerPool, clubs:PL_CLUBS
+  };
+}
+
+function doWelcomeBackup(){
+  try{
+    var backup = buildBackupObject();
+    var json = JSON.stringify(backup, null, 2);
+    var uri = "data:application/json;charset=utf-8," + encodeURIComponent(json);
+    var a = document.createElement("a");
+    a.href = uri;
+    a.download = "draft-advisor-backup-" + new Date().toISOString().slice(0,10) + ".json";
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function(){ document.body.removeChild(a); }, 100);
+    // Record backup time
+    S.lastBackup = new Date().toISOString();
+    sv("meta", {lastRefreshed:S.lastRefreshed, currentGW:S.currentGW, lastBackup:S.lastBackup});
+    // Update prompt to show success
+    var footer = document.getElementById('welcome-footer');
+    if(footer){
+      footer.innerHTML = '<div style="color:#10b981;font-size:12px;text-align:center;padding:6px;">&#x2705; Backup downloaded! Keep the file safe.</div>';
+      setTimeout(function(){
+        if(footer) footer.innerHTML = '<div style="color:#484f58;font-size:11px;">Last backup: ' + new Date(S.lastBackup).toLocaleDateString() + '</div>';
+      }, 3000);
+    }
+  }catch(e){
+    showToast("Backup failed - try Export Backup in Settings");
+  }
+}
+
+function dismissBackupPrompt(){
+  var footer = document.getElementById('welcome-footer');
+  if(footer){
+    var hoursSince = S.lastBackup
+      ? Math.round((Date.now() - new Date(S.lastBackup).getTime()) / (1000*60*60))
+      : null;
+    footer.innerHTML = hoursSince && hoursSince < 24
+      ? '<div style="color:#484f58;font-size:11px;">Last backup: ' + new Date(S.lastBackup).toLocaleDateString() + '</div>'
+      : '<div style="color:#484f58;font-size:11px;">Reminder dismissed &mdash; back up soon via Settings &rsaquo; Export Backup</div>';
+  }
+}
+
+function restoreAutoBackup(){
+  // Restore from the silent localStorage auto-backup
+  try{
+    var raw = localStorage.getItem(DB+'autoBackup');
+    if(!raw) return showToast("No auto-backup found");
+    var backup = JSON.parse(raw);
+    var time = localStorage.getItem(DB+'autoBackupTime');
+    showModal('<h3>&#x1F4BE; Restore Auto-Backup?</h3>'+
+      '<p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Saved: '+(time?new Date(time).toLocaleString():'unknown')+'</p>'+
+      '<p style="color:#fbbf24;font-size:12px;margin-bottom:14px;">&#x26A0; This will overwrite current data.</p>'+
+      '<button class="btn btn-green" style="margin-bottom:8px;" onclick="doRestoreAutoBackup()">Restore</button>'+
+      '<button class="btn btn-gray" onclick="closeModal()">Cancel</button>');
+    window._pendingAutoBackup = backup;
+  }catch(e){ showToast("Auto-backup restore failed: "+e.message); }
+}
+
+function doRestoreAutoBackup(){
+  if(!window._pendingAutoBackup) return;
+  pendingBackup = window._pendingAutoBackup;
+  doImportBackup();
+}
+
+
 function showTab(tabId){
   document.querySelectorAll(".tab-content").forEach(function(el){el.classList.remove("active");});
   document.querySelectorAll(".nav-btn").forEach(function(b){b.classList.remove("active");});
@@ -2534,6 +2655,8 @@ function renderWelcomeScreen(){
     if(S.lastRefreshed) footer += ' • Last refresh: '+new Date(S.lastRefreshed).toLocaleDateString();
   }
   document.getElementById('welcome-footer').textContent = footer;
+  // Show backup prompt after a short delay so welcome screen renders first
+  setTimeout(checkBackupPrompt, 300);
 
   var btns = document.getElementById('welcome-buttons');
   var html = '';
@@ -2891,6 +3014,8 @@ function drawMonthlyChart(){
   });
   new Chart(ctx,{type:"bar",data:{labels:labels,datasets:datasets},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:"#8b949e",font:{size:11}}}},scales:{x:{ticks:{color:"#484f58"}},y:{ticks:{color:"#484f58"},grid:{color:"#21262d"}}}}});
 }
+
+
 
 
 
