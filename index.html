@@ -401,6 +401,11 @@ label.lbl{display:block;color:#8b5cf6;font-size:11px;text-transform:uppercase;le
 
 
 
+
+
+
+
+
 // ── CONSTANTS ─────────────────────────────────────────────────────────────────
 const DB = "da_";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
@@ -767,6 +772,12 @@ async function retryClubs(clubs){
 
 function proceedToApp(){
   showScreen("main");
+  // Ensure topbar has the right structure (may have been overwritten by browse mode)
+  var topbar = document.getElementById("topbar");
+  if(topbar && !document.getElementById("topbar-title")){
+    topbar.innerHTML = '<h1 id="topbar-title"></h1><span id="topbar-info" style="color:#8b949e;font-size:12px;margin-left:8px;"></span>'+
+      '<button id="undo-btn" class="btn btn-gray" style="display:none;width:auto;padding:7px 12px;font-size:13px;margin-left:auto;" onclick="undoPick()">&#x21A9; UNDO</button>';
+  }
   renderTopBar();
   checkAdviceBanner();
   checkCaptainBanner();
@@ -944,6 +955,15 @@ function undoPick(){
 function withTimeout(promise,ms,label){var t=new Promise(function(_,reject){setTimeout(function(){reject(new Error((label||"Call")+" timed out after "+(ms/1000)+"s"));},ms);});return Promise.race([promise,t]);}
 async function generateAdvice(){
   S.adviceLoading=true; S.advice=null;
+  // Restore API key if missing
+  if(!S.apiKey){ var cfg=ld("cfg",{}); S.apiKey=cfg.apiKey||""; }
+  if(!S.apiKey){
+    S.adviceLoading=false;
+    S.advice={safePick:available()[0]||null,safeReason:"API key not set. Go to Settings to add your Anthropic API key.",safeWarning:"",
+      strategicPick:available()[1]||null,strategicReason:"Please configure your API key in Settings.",strategicWarning:"",
+      scarcity:"",nextTarget:"",excluded:[]};
+    renderAdviceTab(); return;
+  }
   renderAdviceTab();
 
   var avail=available();
@@ -2170,28 +2190,32 @@ async function runBacktest(){
 
 
 
-function selectBrowseClub(el){ renderBrowseClubs(getBrowseEl(), el.getAttribute("data-club")); }
+function selectBrowseClub(el){ renderBrowseClubs(document.getElementById("browse-body")||getBrowseEl(), el.getAttribute("data-club")); }
 function getBrowseEl(){ return document.getElementById("tab-draft")||document.getElementById("tab-pool"); }
 function browseLoadedPlayers(){
-  showScreen("main");
-
-  // Hide all nav tabs - browse mode uses its own UI
-  document.querySelectorAll(".nav-btn").forEach(function(b){ b.style.display="none"; });
-
-  // Custom topbar
-  var topbar = document.getElementById("topbar");
-  if(topbar){
-    topbar.innerHTML =
-      '<button class="btn btn-gray" style="width:auto;padding:8px 14px;font-size:13px;margin-right:10px;" onclick="exitBrowseMode()">&#x2190; Back</button>'+
-      '<h1 style="flex:1;font-family:Rajdhani,system-ui;letter-spacing:1px;">&#x1F50D; Browse Players</h1>'+
-      '<div style="color:#8b949e;font-size:12px;">'+S.playerPool.length+' players</div>';
+  // Use a fullscreen overlay instead of corrupting the main app screens
+  var overlay = document.getElementById("browse-overlay");
+  if(!overlay){
+    overlay = document.createElement("div");
+    overlay.id = "browse-overlay";
+    overlay.style.cssText = "position:fixed;inset:0;background:#080c12;z-index:200;display:flex;flex-direction:column;";
+    // Header
+    var hdr = document.createElement("div");
+    hdr.style.cssText = "background:rgba(8,12,18,0.97);border-bottom:1px solid rgba(16,185,129,0.2);padding:12px 14px;display:flex;align-items:center;gap:10px;flex-shrink:0;";
+    hdr.innerHTML = '<button class="btn btn-gray" style="width:auto;padding:8px 14px;font-size:13px;" onclick="exitBrowseMode()">&#x2190; Back</button>'+
+      '<h1 style="flex:1;font-family:Rajdhani,system-ui;letter-spacing:1px;font-size:16px;">&#x1F50D; Browse Players</h1>'+
+      '<div style="color:#8b949e;font-size:12px;">'+S.playerPool.length+' loaded</div>';
+    // Content area
+    var body = document.createElement("div");
+    body.id = "browse-body";
+    body.style.cssText = "flex:1;overflow-y:auto;display:flex;flex-direction:column;";
+    overlay.appendChild(hdr);
+    overlay.appendChild(body);
+    document.body.appendChild(overlay);
+  } else {
+    overlay.style.display = "flex";
   }
-
-  // Render browse view in a tab-content div
-  var el = document.getElementById("tab-draft");
-  if(!el){ el = document.getElementById("tab-pool"); }
-  el.style.display = "flex";
-  renderBrowseClubs(el, null);
+  renderBrowseClubs(document.getElementById("browse-body"), null);
 }
 
 function renderBrowseClubs(el, selectedClubName){
@@ -2203,7 +2227,7 @@ function renderBrowseClubs(el, selectedClubName){
       .sort(function(a,b){ return b.lastSeasonPts-a.lastSeasonPts; });
 
     html += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">';
-    html += '<button onclick="renderBrowseClubs(getBrowseEl(),null)" '+
+    html += '<button onclick="exitBrowseClub()" '+
       'style="background:rgba(139,92,246,0.1);border:1px solid rgba(139,92,246,0.3);color:#a78bfa;border-radius:8px;padding:6px 12px;cursor:pointer;font-family:Bangers,cursive;letter-spacing:1px;font-size:14px;">&#x2190; All Clubs</button>';
     html += '<div style="font-size:16px;font-weight:700;font-family:Bangers,cursive;letter-spacing:1px;color:#f0f6fc;">'+selectedClubName+'</div>';
     html += '<div style="color:#8b949e;font-size:12px;">'+players.length+' players</div>';
@@ -2262,11 +2286,10 @@ function renderBrowseClubs(el, selectedClubName){
   el.innerHTML = html;
 }
 
+function exitBrowseClub(){ renderBrowseClubs(document.getElementById("browse-body"), null); }
 function exitBrowseMode(){
-  // Restore nav visibility and go back to welcome
-  document.querySelectorAll(".nav-btn").forEach(function(b){
-    b.style.display = "";
-  });
+  var overlay = document.getElementById("browse-overlay");
+  if(overlay) overlay.style.display = "none";
   renderWelcomeScreen();
   showScreen("welcome");
 }
@@ -2359,6 +2382,8 @@ function handleDraftSetupClick(){
   if(draftOrder.length<2){showToast("Enter at least 2 names");return;}
   if(!draftOrder.includes(myName)){showToast("Your name must be in the draft order");return;}
   S.myName=myName; S.draftOrder=draftOrder; S.clubMax=clubMax;
+  // Restore API key from the player load step if not already in S
+  if(!S.apiKey){ var cfg=ld("cfg",{}); S.apiKey=cfg.apiKey||""; }
   S.snakeOrder=buildSnake(draftOrder,TOTAL_PICKS);
   initTeams(); saveAll();
   proceedToApp();
@@ -2774,6 +2799,11 @@ function drawMonthlyChart(){
   });
   new Chart(ctx,{type:"bar",data:{labels:labels,datasets:datasets},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:"#8b949e",font:{size:11}}}},scales:{x:{ticks:{color:"#484f58"}},y:{ticks:{color:"#484f58"},grid:{color:"#21262d"}}}}});
 }
+
+
+
+
+
 
 
 
