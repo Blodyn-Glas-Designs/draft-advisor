@@ -397,6 +397,10 @@ label.lbl{display:block;color:#8b5cf6;font-size:11px;text-transform:uppercase;le
 
 
 
+
+
+
+
 // ── CONSTANTS ─────────────────────────────────────────────────────────────────
 const DB = "da_";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
@@ -2166,29 +2170,96 @@ async function runBacktest(){
 
 
 
+function selectBrowseClub(el){ renderBrowseClubs(getBrowseEl(), el.getAttribute("data-club")); }
+function getBrowseEl(){ return document.getElementById("tab-draft")||document.getElementById("tab-pool"); }
 function browseLoadedPlayers(){
-  // Show the main screen with only the Pool tab visible
-  // Temporarily set draftDone=true so pool tab shows, restore after
-  var wasDraftDone = S.draftDone;
-  S.draftDone = true;
   showScreen("main");
 
-  // Hide all nav tabs except Pool and Settings
-  document.querySelectorAll(".nav-btn").forEach(function(b){
-    var tab = b.getAttribute("data-tab");
-    b.style.display = (tab==="pool"||tab==="settings") ? "" : "none";
-  });
+  // Hide all nav tabs - browse mode uses its own UI
+  document.querySelectorAll(".nav-btn").forEach(function(b){ b.style.display="none"; });
 
-  // Add a prominent "Back to Welcome" bar at the top
+  // Custom topbar
   var topbar = document.getElementById("topbar");
   if(topbar){
-    topbar.innerHTML = '<button class="btn btn-gray" style="width:auto;padding:8px 14px;font-size:13px;margin-right:10px;" onclick="exitBrowseMode()">&#x2190; Back</button>' +
-      '<h1 style="flex:1;">&#x1F50D; Browse Players</h1>' +
-      '<div style="color:#8b949e;font-size:12px;">'+S.playerPool.length+' players &bull; '+PL_CLUBS.length+' clubs</div>';
+    topbar.innerHTML =
+      '<button class="btn btn-gray" style="width:auto;padding:8px 14px;font-size:13px;margin-right:10px;" onclick="exitBrowseMode()">&#x2190; Back</button>'+
+      '<h1 style="flex:1;font-family:Rajdhani,system-ui;letter-spacing:1px;">&#x1F50D; Browse Players</h1>'+
+      '<div style="color:#8b949e;font-size:12px;">'+S.playerPool.length+' players</div>';
   }
 
-  S.draftDone = wasDraftDone;
-  showTab("pool");
+  // Render browse view in a tab-content div
+  var el = document.getElementById("tab-draft");
+  if(!el){ el = document.getElementById("tab-pool"); }
+  el.style.display = "flex";
+  renderBrowseClubs(el, null);
+}
+
+function renderBrowseClubs(el, selectedClubName){
+  var html = '<div style="padding:14px;overflow-y:auto;flex:1;">';
+
+  if(selectedClubName){
+    // Show players for selected club
+    var players = S.playerPool.filter(function(p){ return p.club===selectedClubName; })
+      .sort(function(a,b){ return b.lastSeasonPts-a.lastSeasonPts; });
+
+    html += '<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;">';
+    html += '<button onclick="renderBrowseClubs(getBrowseEl(),null)" '+
+      'style="background:rgba(139,92,246,0.1);border:1px solid rgba(139,92,246,0.3);color:#a78bfa;border-radius:8px;padding:6px 12px;cursor:pointer;font-family:Bangers,cursive;letter-spacing:1px;font-size:14px;">&#x2190; All Clubs</button>';
+    html += '<div style="font-size:16px;font-weight:700;font-family:Bangers,cursive;letter-spacing:1px;color:#f0f6fc;">'+selectedClubName+'</div>';
+    html += '<div style="color:#8b949e;font-size:12px;">'+players.length+' players</div>';
+    html += '</div>';
+
+    // Position groups
+    ['GK','DEF','MID','ATT'].forEach(function(pos){
+      var posPlayers = players.filter(function(p){ return p.position===pos; });
+      if(posPlayers.length===0) return;
+      html += '<div class="sec-hdr">'+pos+'</div>';
+      posPlayers.forEach(function(p){
+        html += '<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 12px;'+
+          'background:rgba(8,12,18,0.6);border:1px solid rgba(139,92,246,0.15);border-radius:8px;margin-bottom:6px;">';
+        html += '<div>';
+        html += '<div style="font-weight:700;font-family:Rajdhani,system-ui;font-size:14px;">'+p.name+'</div>';
+        html += '<div style="color:#8b949e;font-size:12px;">&pound;'+p.fplPrice+'m &bull; Rating: '+p.rating+'/10</div>';
+        html += '</div>';
+        html += '<div style="text-align:right;">';
+        html += '<div style="color:#10b981;font-weight:700;font-family:Bangers,cursive;font-size:18px;letter-spacing:1px;">'+p.lastSeasonPts+'</div>';
+        html += '<div style="color:#484f58;font-size:10px;">pts last season</div>';
+        html += '</div>';
+        html += '</div>';
+      });
+    });
+
+  } else {
+    // Show club grid
+    html += '<div style="color:#8b949e;font-size:12px;margin-bottom:12px;">'+PL_CLUBS.length+' clubs loaded. Tap a club to see players.</div>';
+    html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">';
+    PL_CLUBS.forEach(function(club){
+      var count = S.playerPool.filter(function(p){ return p.club===club; }).length;
+      var ok = count >= 15;
+      var borderCol = ok ? 'rgba(16,185,129,0.3)' : 'rgba(239,68,68,0.4)';
+      var countCol = ok ? '#10b981' : '#ef4444';
+      html += '<div onclick="selectBrowseClub(this)" data-club="'+club+'" '+
+        'style="background:rgba(8,12,18,0.7);border:1px solid '+borderCol+';border-radius:10px;padding:12px;cursor:pointer;text-align:center;">';
+      html += '<div style="font-size:11px;font-weight:700;font-family:Rajdhani,system-ui;color:#f0f6fc;margin-bottom:4px;">'+club+'</div>';
+      html += '<div style="font-size:22px;font-weight:700;font-family:Bangers,cursive;color:'+countCol+';">'+count+'</div>';
+      html += '<div style="font-size:10px;color:#484f58;">players</div>';
+      html += '</div>';
+    });
+    html += '</div>';
+
+    // Summary
+    var clubsOk = PL_CLUBS.filter(function(c){ return S.playerPool.filter(function(p){return p.club===c;}).length>=15; }).length;
+    var clubsLow = PL_CLUBS.length - clubsOk;
+    html += '<div style="margin-top:14px;padding:10px 12px;border-radius:8px;font-size:13px;font-family:Rajdhani,system-ui;';
+    if(clubsLow===0){
+      html += 'background:rgba(16,185,129,0.08);border:1px solid rgba(16,185,129,0.3);color:#10b981;">&#x2705; All clubs have 15+ players. Ready for draft day!</div>';
+    } else {
+      html += 'background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.3);color:#f87171;">&#x26A0; '+clubsLow+' club(s) have fewer than 15 players (shown in red). Consider reloading.</div>';
+    }
+  }
+
+  html += '</div>';
+  el.innerHTML = html;
 }
 
 function exitBrowseMode(){
@@ -2703,6 +2774,10 @@ function drawMonthlyChart(){
   });
   new Chart(ctx,{type:"bar",data:{labels:labels,datasets:datasets},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:"#8b949e",font:{size:11}}}},scales:{x:{ticks:{color:"#484f58"}},y:{ticks:{color:"#484f58"},grid:{color:"#21262d"}}}}});
 }
+
+
+
+
 
 
 
