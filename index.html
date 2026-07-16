@@ -389,6 +389,14 @@ label.lbl{display:block;color:#8b5cf6;font-size:11px;text-transform:uppercase;le
 
 
 
+
+
+
+
+
+
+
+
 // ── CONSTANTS ─────────────────────────────────────────────────────────────────
 const DB = "da_";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
@@ -617,7 +625,7 @@ async function loadAllPlayers(){
 }
 
 async function loadClubBatches(clubsToLoad, pool, clubCounts, errors, progress){
-  var batchSize = 4;
+  var batchSize = 2; // Reduced to 2 clubs per batch for more reliable responses
   var batches = [];
   for(var i=0; i<clubsToLoad.length; i+=batchSize) batches.push(clubsToLoad.slice(i,i+batchSize));
   var completedClubs = progress.clubs ? progress.clubs.slice() : [];
@@ -625,42 +633,78 @@ async function loadClubBatches(clubsToLoad, pool, clubCounts, errors, progress){
 
   for(var b=0; b<batches.length; b++){
     var batch = batches[b];
-    var doneCount = completedClubs.length + b*batchSize;
-    var pct = Math.round(10 + ((doneCount/totalClubs)*80));
+    var doneCount = completedClubs.length;
     setLoadUI(doneCount, totalClubs,
-      "Batch "+(b+1)+"/"+batches.length+": "+batch.join(", "),
+      "Loading: "+batch.join(", ")+" (batch "+(b+1)+"/"+batches.length+")",
       clubCounts, errors, pool.length, null);
 
-    var sys = "Premier League fantasy football expert. Return a JSON object where keys are club names and values are arrays of players. Include ALL first-team players for EACH club for the 2026-27 Premier League season including summer 2025 transfers. Each player: {name:string, position:'GK'|'DEF'|'MID'|'ATT', fplPrice:number, lastSeasonPts:number, rating:number}. 20-25 players per club. Return raw JSON object only starting with {.";
-    try{
-      var raw = await callClaude(sys, "Return squads for: "+batch.join(", "), 6000);
-      var parsed = extractJSON(raw);
-      if(parsed && typeof parsed==="object" && !Array.isArray(parsed)){
-        batch.forEach(function(club){
-          var players = parsed[club] || parsed[club.toLowerCase()] || null;
-          if(!players){
-            Object.keys(parsed).forEach(function(k){
-              if(k.toLowerCase().includes(club.toLowerCase().split(" ")[0])) players=parsed[k];
-            });
-          }
-          if(Array.isArray(players) && players.length>=3){
-            var normed = players.map(function(p){ return normalise(p,club); });
-            clubCounts[club] = normed.length;
-            pool = pool.concat(normed);
-            completedClubs.push(club);
-          } else {
-            clubCounts[club] = 0;
-            errors.push(club+": not found in batch");
-          }
-        });
-      } else {
-        batch.forEach(function(club){ clubCounts[club]=0; errors.push(club+": parse failed"); });
+    // Try up to 3 times per batch
+    var batchSuccess = false;
+    for(var attempt=0; attempt<3 && !batchSuccess; attempt++){
+      if(attempt>0) setLoadUI(doneCount, totalClubs, "Retrying: "+batch.join(", ")+" (attempt "+(attempt+1)+")", clubCounts, errors, pool.length, null);
+      try{
+        var sys = "Premier League fantasy football expert. Return a JSON object where keys are EXACTLY these club names and values are arrays of players. Club names: "+batch.join(", ")+". Include ALL first-team players for the 2026-27 Premier League season. Each player object must have: name (string), position (exactly one of: GK, DEF, MID, ATT), fplPrice (number), lastSeasonPts (number), rating (number 1-10). Return 20-25 players per club. IMPORTANT: Return ONLY a raw JSON object starting with { with no markdown, no explanation.";
+        var raw = await callClaude(sys, "Return full squads for these clubs: "+batch.join(", "), 4000);
+        var parsed = extractJSON(raw);
+        if(parsed && typeof parsed==="object" && !Array.isArray(parsed)){
+          var batchGotAll = true;
+          batch.forEach(function(club){
+            // Try multiple key matching strategies
+            var players = null;
+            var clubLower = club.toLowerCase();
+            var clubFirst = clubLower.split(" ")[0];
+            // Exact match first
+            if(parsed[club]) players = parsed[club];
+            // Case insensitive
+            if(!players) Object.keys(parsed).forEach(function(k){ if(k.toLowerCase()===clubLower) players=parsed[k]; });
+            // Partial match on first word
+            if(!players) Object.keys(parsed).forEach(function(k){ if(k.toLowerCase().includes(clubFirst)&&clubFirst.length>3) players=parsed[k]; });
+
+            if(Array.isArray(players) && players.length>=15){
+              var normed = players.map(function(p){ return normalise(p,club); });
+              clubCounts[club] = normed.length;
+              pool = pool.concat(normed);
+              if(!completedClubs.includes(club)) completedClubs.push(club);
+            } else {
+              clubCounts[club] = 0;
+              batchGotAll = false;
+              if(!errors.includes(club+": missing")) errors.push(club+": missing");
+            }
+          });
+          if(batchGotAll) batchSuccess = true;
+        }
+      }catch(e){
+        console.warn("Batch attempt "+(attempt+1)+" failed:", e.message);
       }
-    }catch(e){
-      batch.forEach(function(club){ clubCounts[club]=0; errors.push(club+": "+e.message); });
+      if(!batchSuccess && attempt<2) await new Promise(function(r){setTimeout(r,1000);});
     }
 
-    // Save progress after every batch so interruption loses at most 1 batch
+    // For any still-failed clubs in this batch, try individually
+    var stillMissing = batch.filter(function(c){ return (clubCounts[c]||0)<15; });
+    for(var si=0; si<stillMissing.length; si++){
+      var club = stillMissing[si];
+      setLoadUI(completedClubs.length, totalClubs, "Individual retry: "+club, clubCounts, errors, pool.length, null);
+      for(var att2=0; att2<2; att2++){
+        try{
+          var sys2 = "Return ALL "+club+" first-team players for the 2026-27 Premier League season as a JSON array. Each player: {name, position (GK/DEF/MID/ATT), fplPrice, lastSeasonPts, rating}. Return 20-25 players. Raw JSON array starting with [, no markdown.";
+          var raw2 = await callClaude(sys2, club+" full squad for 2026-27.", 3000);
+          var players2 = extractJSON(raw2);
+          if(Array.isArray(players2) && players2.length>=15){
+            var normed2 = players2.map(function(p){ return normalise(p,club); });
+            // Remove any partial entries for this club
+            pool = pool.filter(function(p){ return p.club!==club; });
+            pool = pool.concat(normed2);
+            clubCounts[club] = normed2.length;
+            if(!completedClubs.includes(club)) completedClubs.push(club);
+            errors = errors.filter(function(e){ return !e.startsWith(club); });
+            break;
+          }
+        }catch(e2){ console.warn("Individual retry failed for "+club+": "+e2.message); }
+        if(att2<1) await new Promise(function(r){setTimeout(r,1000);});
+      }
+    }
+
+    // Save progress after every batch
     var seen = new Set();
     var deduped = pool.filter(function(p){
       var k=(p.name+"|"+p.club).toLowerCase();
@@ -668,35 +712,15 @@ async function loadClubBatches(clubsToLoad, pool, clubCounts, errors, progress){
       seen.add(k); return true;
     });
     S.playerPool = deduped;
+    pool = deduped;
     sv("pool", deduped);
     sv("loadProgress", {clubs:completedClubs.slice(), total:totalClubs});
-    setLoadUI(completedClubs.length, totalClubs, "Saved batch "+(b+1), clubCounts, errors, deduped.length, null);
+    setLoadUI(completedClubs.length, totalClubs,
+      "Saved — "+completedClubs.length+"/"+totalClubs+" clubs done",
+      clubCounts, errors, deduped.length, null);
   }
 
-  // Retry individual failed clubs
-  var failed = PL_CLUBS.filter(function(c){ return (clubCounts[c]||0)===0; });
-  if(failed.length > 0){
-    setLoadUI(completedClubs.length, totalClubs, "Retrying "+failed.length+" failed clubs...", clubCounts, errors, pool.length, null);
-    for(var fi=0; fi<failed.length; fi++){
-      var club = failed[fi];
-      var sys2 = "Return ALL first-team players for "+club+" in the 2026-27 PL season as a JSON array. Each player: name, position (GK/DEF/MID/ATT), fplPrice, lastSeasonPts, rating. About 20-25 players. Raw JSON array starting with [.";
-      try{
-        var raw2 = await callClaude(sys2, club+" squad.", 2000);
-        var players2 = extractJSON(raw2);
-        if(Array.isArray(players2) && players2.length>=3){
-          var normed2 = players2.map(function(p){ return normalise(p,club); });
-          pool = pool.concat(normed2);
-          clubCounts[club] = normed2.length;
-          completedClubs.push(club);
-          errors = errors.filter(function(e){ return !e.startsWith(club); });
-          sv("pool", pool); sv("loadProgress", {clubs:completedClubs.slice(), total:totalClubs});
-        }
-      }catch(e2){ console.warn("Retry failed for "+club); }
-      setLoadUI(completedClubs.length, totalClubs, "Retried: "+club, clubCounts, errors, pool.length, null);
-    }
-  }
-
-  // Dedupe and finalise
+  // Final dedupe and sort
   var seen2 = new Set();
   pool = pool.filter(function(p){
     var k=(p.name+"|"+p.club).toLowerCase();
@@ -707,11 +731,9 @@ async function loadClubBatches(clubsToLoad, pool, clubCounts, errors, progress){
   S.playerPool = pool;
   sv("pool", pool);
   sv("clubs", PL_CLUBS);
-
-  // Clear progress marker - load is complete
   localStorage.removeItem(DB+"loadProgress");
 
-  var stillFailed = PL_CLUBS.filter(function(c){ return (clubCounts[c]||0)===0; });
+  var stillFailed = PL_CLUBS.filter(function(c){ return (clubCounts[c]||0)<15; });
   setLoadUI(100, "Complete! "+pool.length+" players loaded.", clubCounts, errors, pool.length,
     stillFailed.length > 0 ? stillFailed : null);
 }
@@ -726,7 +748,7 @@ async function retryClubs(clubs){
     try{
       var raw=await callClaude(sys,club+" squad.",2000);
       var players=extractJSON(raw);
-      if(Array.isArray(players)&&players.length>=3){
+      if(Array.isArray(players)&&players.length>=15){
         pool=pool.filter(function(p){return p.club!==club;});
         pool=pool.concat(players.map(function(p){return normalise(p,club);}));
       }
@@ -2143,6 +2165,42 @@ async function runBacktest(){
 
 
 
+
+function browseLoadedPlayers(){
+  // Show the main screen with only the Pool tab visible
+  // Temporarily set draftDone=true so pool tab shows, restore after
+  var wasDraftDone = S.draftDone;
+  S.draftDone = true;
+  showScreen("main");
+
+  // Hide all nav tabs except Pool and Settings
+  document.querySelectorAll(".nav-btn").forEach(function(b){
+    var tab = b.getAttribute("data-tab");
+    b.style.display = (tab==="pool"||tab==="settings") ? "" : "none";
+  });
+
+  // Add a prominent "Back to Welcome" bar at the top
+  var topbar = document.getElementById("topbar");
+  if(topbar){
+    topbar.innerHTML = '<button class="btn btn-gray" style="width:auto;padding:8px 14px;font-size:13px;margin-right:10px;" onclick="exitBrowseMode()">&#x2190; Back</button>' +
+      '<h1 style="flex:1;">&#x1F50D; Browse Players</h1>' +
+      '<div style="color:#8b949e;font-size:12px;">'+S.playerPool.length+' players &bull; '+PL_CLUBS.length+' clubs</div>';
+  }
+
+  S.draftDone = wasDraftDone;
+  showTab("pool");
+}
+
+function exitBrowseMode(){
+  // Restore nav visibility and go back to welcome
+  document.querySelectorAll(".nav-btn").forEach(function(b){
+    b.style.display = "";
+  });
+  renderWelcomeScreen();
+  showScreen("welcome");
+}
+
+
 function showTab(tabId){
   document.querySelectorAll(".tab-content").forEach(function(el){el.classList.remove("active");});
   document.querySelectorAll(".nav-btn").forEach(function(b){b.classList.remove("active");});
@@ -2326,6 +2384,7 @@ function renderWelcomeScreen(){
   } else if(S.playerPool.length > 0){
     // Players loaded but no draft set up yet
     html += makeWelcomeBtn('&#x1F3AF; Set Up Draft','#10b981',function(){showDraftSetup();});
+    html += makeWelcomeBtn('&#x1F50D; Browse Players','#10b981',function(){browseLoadedPlayers();});
     html += makeWelcomeBtn('&#x2B07; Reload Players','#30363d',function(){showScreen('setup');});
     html += makeWelcomeBtn('&#x2B06; Restore Backup','#30363d',function(){importBackup();});
   } else {
@@ -2644,6 +2703,14 @@ function drawMonthlyChart(){
   });
   new Chart(ctx,{type:"bar",data:{labels:labels,datasets:datasets},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:"#8b949e",font:{size:11}}}},scales:{x:{ticks:{color:"#484f58"}},y:{ticks:{color:"#484f58"},grid:{color:"#21262d"}}}}});
 }
+
+
+
+
+
+
+
+
 
 
 
