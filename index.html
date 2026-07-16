@@ -102,28 +102,49 @@ label.lbl{display:block;color:#8b5cf6;font-size:11px;text-transform:uppercase;le
 </head>
 <body>
 <div id="app">
+  <!-- STEP 1: Load Players screen -->
   <div id="setup-screen" class="screen">
     <div style="flex:1;overflow-y:auto;display:flex;align-items:center;justify-content:center;padding:20px;background:linear-gradient(160deg,#080c12 0%,#0a0e1a 50%,#080c12 100%);">
       <div style="background:rgba(10,14,22,0.95);border:1px solid rgba(139,92,246,0.25);border-radius:16px;padding:28px;width:100%;max-width:440px;box-shadow:0 0 40px rgba(139,92,246,0.1);">
         <div style="text-align:center;margin-bottom:24px;">
           <div style="font-size:48px;">&#x26BD;</div>
-          <h1 style="font-size:24px;margin:8px 0 4px;">Draft Advisor</h1>
-          <p style="color:#8b949e;font-size:13px;margin:0;">Premier League Fantasy &bull; Snake Draft</p>
+          <h1 style="font-size:24px;margin:8px 0 4px;font-family:Rajdhani,system-ui;letter-spacing:2px;">LOAD PLAYERS</h1>
+          <p style="color:#8b949e;font-size:13px;margin:0;">Step 1 of 2 &mdash; Do this the night before draft day</p>
         </div>
         <label class="lbl">Anthropic API Key</label>
         <input class="inp" id="setup-apikey" type="password" placeholder="sk-ant-api03-...">
         <div id="debug-out" style="margin-top:8px;padding:10px;background:#1c2128;border-radius:8px;color:#10b981;font-size:12px;font-family:monospace;display:none;"></div>
+        <div style="background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.2);border-radius:10px;padding:12px;margin-top:16px;margin-bottom:16px;">
+          <div style="color:#10b981;font-size:12px;font-family:Rajdhani,system-ui;font-weight:700;letter-spacing:1px;margin-bottom:6px;">WHAT THIS DOES</div>
+          <div style="color:#8b949e;font-size:12px;line-height:1.6;">Downloads all Premier League squads (~500 players) and saves them to your device. Takes 2-3 minutes. Once done you can verify the data and return on draft day to set up your draft.</div>
+        </div>
+        <button class="btn btn-green" style="margin-top:4px;font-size:16px;padding:16px;" onclick="handleSetupClick()">&#x2B07; Download Players &rarr;</button>
+        <button class="btn btn-gray" style="margin-top:8px;font-size:14px;" onclick="showScreen('welcome')">&#x2190; Back</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- STEP 2: Draft Setup screen -->
+  <div id="draft-setup-screen" class="screen">
+    <div style="flex:1;overflow-y:auto;display:flex;align-items:center;justify-content:center;padding:20px;background:linear-gradient(160deg,#080c12 0%,#0a0e1a 50%,#080c12 100%);">
+      <div style="background:rgba(10,14,22,0.95);border:1px solid rgba(236,72,153,0.25);border-radius:16px;padding:28px;width:100%;max-width:440px;box-shadow:0 0 40px rgba(236,72,153,0.08);">
+        <div style="text-align:center;margin-bottom:24px;">
+          <div style="font-size:48px;">&#x1F3AF;</div>
+          <h1 style="font-size:24px;margin:8px 0 4px;font-family:Rajdhani,system-ui;letter-spacing:2px;">SET UP DRAFT</h1>
+          <p style="color:#8b949e;font-size:13px;margin:0;">Step 2 of 2 &mdash; Do this on draft day</p>
+        </div>
+        <div id="draft-setup-pool-info" style="background:rgba(16,185,129,0.06);border:1px solid rgba(16,185,129,0.2);border-radius:8px;padding:8px 12px;margin-bottom:16px;color:#10b981;font-size:12px;font-family:Rajdhani,system-ui;"></div>
         <label class="lbl">Your Name</label>
-        <input class="inp" id="setup-myname" placeholder="e.g. Alex">
+        <input class="inp" id="dsetup-myname" placeholder="e.g. James">
         <label class="lbl">Draft Order &mdash; one name per line, first pick at top</label>
-        <textarea class="inp" id="setup-order" rows="7" style="resize:vertical;font-family:monospace;font-size:13px;" placeholder="Alex&#10;Tom&#10;Sarah&#10;James&#10;Lucy&#10;Mike"></textarea>
+        <textarea class="inp" id="dsetup-order" rows="7" style="resize:vertical;font-family:monospace;font-size:13px;" placeholder="James&#10;Tom&#10;Sarah&#10;Alex&#10;Lucy&#10;Mike"></textarea>
         <label class="lbl">Max players per club</label>
-        <select class="inp" id="setup-clubmax">
+        <select class="inp" id="dsetup-clubmax">
           <option value="2">2 players max per club</option>
           <option value="3">3 players max per club</option>
         </select>
-        <button class="btn btn-blue" style="margin-top:16px;font-size:16px;padding:16px;" onclick="handleSetupClick()">Load Players &amp; Start Draft &rarr;</button>
-        <p style="color:#484f58;font-size:12px;text-align:center;margin-top:10px;">Season scoring uses the free FPL API &mdash; no extra cost.</p>
+        <button class="btn btn-green" style="margin-top:16px;font-size:16px;padding:16px;" onclick="handleDraftSetupClick()">&#x26BD; Start Draft &rarr;</button>
+        <button class="btn btn-gray" style="margin-top:8px;" onclick="showScreen('welcome')">&#x2190; Back</button>
       </div>
     </div>
   </div>
@@ -350,6 +371,10 @@ label.lbl{display:block;color:#8b5cf6;font-size:11px;text-transform:uppercase;le
 
 
 <script>
+
+
+
+
 
 
 
@@ -2030,7 +2055,7 @@ function resumeInterruptedLoad(){
 
   setTimeout(function(){
     loadAllPlayers().then(function(pool){
-      if(pool && pool.length > 0) proceedToApp();
+      if(pool && pool.length > 0){ showToast('Players loaded! Ready for draft day.'); renderWelcomeScreen(); showScreen('welcome'); }
     }).catch(function(e){
       document.getElementById("load-errors").innerHTML =
         '<div class="error-msg">'+e.message+'</div><button class="btn btn-gray" style="margin-top:10px;" onclick="goToSetup()">Go Back</button>';
@@ -2160,42 +2185,56 @@ function showToast(msg){
 // ── SETUP ──────────────────────────────────────────────────────────────────────
 async function handleSetupClick(){
   var apiKey=document.getElementById("setup-apikey").value.trim();
-  var myName=document.getElementById("setup-myname").value.trim();
-  var orderRaw=document.getElementById("setup-order").value.trim().split("\n").map(function(l){return l.trim();}).filter(Boolean);
-  var clubMax=parseInt(document.getElementById("setup-clubmax").value)||2;
-
-  if(!apiKey){showToast("Please enter your API key");return;}
-  if(!myName){showToast("Please enter your name");return;}
-  if(orderRaw.length<2){showToast("Enter at least 2 names");return;}
-  if(!orderRaw.includes(myName)){showToast("Your name must be in the draft order");return;}
-
-  S.apiKey=apiKey; S.myName=myName; S.draftOrder=orderRaw; S.clubMax=clubMax;
-  S.snakeOrder=buildSnake(orderRaw,TOTAL_PICKS);
-  S.pickedMap={}; S.teams={}; S.pickIdx=0; S.draftDone=false; S.hideDraft=false; S.history=[]; S.playerPool=[];
-  initTeams(); saveAll();
-
+  if(!apiKey){showToast("Enter your API key");return;}
+  S.apiKey=apiKey;
+  var cfg=ld("cfg",{}); cfg.apiKey=apiKey; sv("cfg",cfg);
   showScreen("loading");
-  document.getElementById("load-title").textContent="Loading Player Pool\u2026";
-  document.getElementById("load-subtitle").textContent="Starting\u2026";
+  document.getElementById("load-title").textContent="Downloading Players…";
+  document.getElementById("load-subtitle").textContent="Fetching all Premier League squads…";
   document.getElementById("load-bar").style.width="0%";
   document.getElementById("load-pct").textContent="0%";
   document.getElementById("load-clubs").innerHTML="";
   document.getElementById("load-errors").innerHTML="";
   document.getElementById("load-total").textContent="";
-
   setTimeout(function(){
     loadAllPlayers().then(function(pool){
-      if(pool.length===0&&document.getElementById("load-errors").innerHTML!=="") return;
-      proceedToApp();
+      if(pool&&pool.length>0){
+        showToast("Players loaded! Set up your draft when ready.");
+        renderWelcomeScreen();
+        showScreen("welcome");
+      }
     }).catch(function(e){
-      document.getElementById("load-title").textContent="Error";
       document.getElementById("load-errors").innerHTML='<div class="error-msg">'+e.message+'</div><button class="btn btn-gray" style="margin-top:10px;" onclick="goToSetup()">Go Back</button>';
     });
   },100);
 }
 
+function showDraftSetup(){
+  var info=document.getElementById("draft-setup-pool-info");
+  if(info) info.textContent="✅ "+S.playerPool.length+" players loaded from "+PL_CLUBS.length+" clubs — ready to draft!";
+  var nameEl=document.getElementById("dsetup-myname");
+  if(nameEl&&S.myName) nameEl.value=S.myName;
+  var orderEl=document.getElementById("dsetup-order");
+  if(orderEl&&S.draftOrder.length>0) orderEl.value=S.draftOrder.join("\n");
+  var clubEl=document.getElementById("dsetup-clubmax");
+  if(clubEl) clubEl.value=S.clubMax||2;
+  showScreen("draft-setup");
+}
 
-// ── WELCOME SCREEN ─────────────────────────────────────────────────────────────
+function handleDraftSetupClick(){
+  var myName=document.getElementById("dsetup-myname").value.trim();
+  var orderRaw=document.getElementById("dsetup-order").value.trim();
+  var clubMax=parseInt(document.getElementById("dsetup-clubmax").value)||2;
+  if(!myName){showToast("Enter your name");return;}
+  var draftOrder=orderRaw.split("\n").map(function(s){return s.trim();}).filter(Boolean);
+  if(draftOrder.length<2){showToast("Enter at least 2 names");return;}
+  if(!draftOrder.includes(myName)){showToast("Your name must be in the draft order");return;}
+  S.myName=myName; S.draftOrder=draftOrder; S.clubMax=clubMax;
+  S.snakeOrder=buildSnake(draftOrder,TOTAL_PICKS);
+  initTeams(); saveAll();
+  proceedToApp();
+}
+
 
 function confirmNewDraft(){
   var msg='<h3>Start New Draft?</h3>';
@@ -2284,9 +2323,15 @@ function renderWelcomeScreen(){
       localStorage.removeItem(DB+"clubs");
       showScreen('setup');
     });
+  } else if(S.playerPool.length > 0){
+    // Players loaded but no draft set up yet
+    html += makeWelcomeBtn('&#x1F3AF; Set Up Draft','#10b981',function(){showDraftSetup();});
+    html += makeWelcomeBtn('&#x2B07; Reload Players','#30363d',function(){showScreen('setup');});
+    html += makeWelcomeBtn('&#x2B06; Restore Backup','#30363d',function(){importBackup();});
   } else {
-    html += makeWelcomeBtn('&#x26BD; Set Up New Draft','#10b981',function(){showScreen('setup');});
-    html += makeWelcomeBtn('&#x2B06; Restore from Backup','#30363d',function(){importBackup();});
+    // Completely fresh - no players loaded yet
+    html += makeWelcomeBtn('&#x2B07; Download Players','#10b981',function(){showScreen('setup');});
+    html += makeWelcomeBtn('&#x2B06; Restore Backup','#30363d',function(){importBackup();});
   }
 
   // Always show settings access
@@ -2311,7 +2356,7 @@ function makeWelcomeBtn(label, color, fn){
 // ── BOOT ───────────────────────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded",function(){
   loadAll();
-  if(S.apiKey) document.getElementById("setup-apikey").value=S.apiKey;
+  if(S.apiKey){ var ak=document.getElementById("setup-apikey"); if(ak) ak.value=S.apiKey; }
   // Tab visibility
   document.querySelectorAll(".nav-btn[data-tab='pool']").forEach(function(b){b.style.display=S.draftDone?"":"none";});
   document.querySelectorAll(".nav-btn[data-tab='stats']").forEach(function(b){b.style.display=S.draftDone?"":"none";});
@@ -2599,6 +2644,10 @@ function drawMonthlyChart(){
   });
   new Chart(ctx,{type:"bar",data:{labels:labels,datasets:datasets},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:"#8b949e",font:{size:11}}}},scales:{x:{ticks:{color:"#484f58"}},y:{ticks:{color:"#484f58"},grid:{color:"#21262d"}}}}});
 }
+
+
+
+
 
 
 
