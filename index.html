@@ -406,6 +406,11 @@ label.lbl{display:block;color:#8b5cf6;font-size:11px;text-transform:uppercase;le
 
 
 
+
+
+
+
+
 // ── CONSTANTS ─────────────────────────────────────────────────────────────────
 const DB = "da_";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
@@ -1302,31 +1307,68 @@ function endDraft(){
 }
 
 // ── RENDER: MY TEAM ────────────────────────────────────────────────────────────
+function getPlayerGWPts(key, ownerName, gw){
+  var cap=S.captains[ownerName];
+  var isCap=cap&&(cap.player.name+"|"+cap.player.club)===key;
+  var sub=(S.wildcardSubs[ownerName]||[]).find(function(s){return (s.outPlayer.name+"|"+s.outPlayer.club)===key;});
+  if(sub&&gw>=sub.gameweek) return 0;
+  var pts=(S.scores[gw]||{})[key]||0;
+  return isCap?pts*2:pts;
+}
 function renderMyTeamTab(){
   var el=document.getElementById("tab-myteam");
+  if(teamViewGW===null) teamViewGW=S.currentGW;
+  var vGW=teamViewGW;
   var team=S.teams[S.myName]||{};
-  var totalPts=getPersonTotalPts(S.myName);
+  var totalPts=getPersonTotalPts(S.myName,vGW);
+  var gwPts=getPersonGWPts(S.myName,vGW);
   var cap=S.captains[S.myName];
-  var html='<div style="padding:14px;overflow-y:auto;flex:1;"><div class="stat-grid"><div class="stat-card"><div class="sv">'+totalPts+'</div><div class="sl">Total Points</div></div><div class="stat-card"><div class="sv">'+getPersonGWPts(S.myName,S.currentGW)+'</div><div class="sl">GW'+S.currentGW+' Points</div></div></div>';
-  if(cap){
-    html+='<div class="card" style="border-color:#f59e0b;"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><span style="font-size:13px;color:#8b949e;">Captain:</span><strong>'+cap.player.name+'</strong><span class="cap-badge">C</span>'+capTimerHtml(S.myName)+'<button class="btn btn-gray" style="width:auto;padding:5px 10px;font-size:12px;margin-left:auto;" onclick="openCaptainModal(\''+S.myName.replace(/'/g,"\\'")+'\')" >Change</button></div></div>';
-  } else if(S.draftDone){
-    html+='<div class="warn">&#x26A0;&#xFE0F; No captain nominated!<button class="btn btn-blue" style="margin-top:8px;" onclick="openCaptainModal(\''+S.myName.replace(/'/g,"\\'")+'\')">Nominate Captain</button></div>';
+
+  var html='<div style="padding:14px;overflow-y:auto;flex:1;">';
+
+  // GW Selector
+  if(S.draftDone){
+    html+='<div style="display:flex;align-items:center;justify-content:space-between;background:rgba(15,20,30,0.9);border:1px solid rgba(139,92,246,0.2);border-radius:10px;padding:8px 12px;margin-bottom:12px;">';
+    html+='<button onclick="teamViewGW=Math.max(1,teamViewGW-1);renderMyTeamTab();" style="background:#21262d;border:none;color:#f0f6fc;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:16px;font-weight:700;'+(vGW<=1?'opacity:0.3;':'')+'"'+(vGW<=1?' disabled':'')+'>&#x2039;</button>';
+    html+='<div style="text-align:center;"><div style="color:#f0f6fc;font-weight:700;font-size:15px;font-family:Bangers,cursive;letter-spacing:1px;">GW'+vGW+'</div>';
+    html+='<div style="color:#8b949e;font-size:10px;">'+(vGW===S.currentGW?'Current':'GW '+vGW+' of '+S.currentGW)+'</div></div>';
+    html+='<button onclick="teamViewGW=Math.min(S.currentGW,teamViewGW+1);renderMyTeamTab();" style="background:#21262d;border:none;color:#f0f6fc;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:16px;font-weight:700;'+(vGW>=S.currentGW?'opacity:0.3;':'')+'"'+(vGW>=S.currentGW?' disabled':'')+'>&#x203A;</button>';
+    html+='</div>';
   }
-  html+='<div class="sec-hdr">My Squad</div>';
+
+  // Stats row
+  html+='<div class="stat-grid"><div class="stat-card"><div class="sv">'+totalPts+'<span style="font-size:13px;color:#484f58;font-weight:400;font-family:Rajdhani,system-ui;margin-left:6px;">+'+gwPts+'</span></div><div class="sl">Pts to GW'+vGW+' &bull; GW'+vGW+'</div></div></div>';
+
+  if(cap){
+    html+='<div class="card" style="border-color:#ec4899;padding:8px 12px;margin-bottom:8px;"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><span style="font-size:12px;color:#8b949e;">Captain:</span><strong style="font-size:13px;">'+cap.player.name+'</strong><span class="cap-badge">C</span>'+capTimerHtml(S.myName)+'<button class="btn btn-gray" style="width:auto;padding:4px 8px;font-size:11px;margin-left:auto;" onclick="openMyCaptainModal()">Change</button></div></div>';
+  } else if(S.draftDone){
+    html+='<div class="warn">&#x26A0;&#xFE0F; No captain!<button class="btn btn-blue" style="margin-top:6px;padding:6px;" onclick="openMyCaptainModal()">Nominate</button></div>';
+  }
+
+  html+='<div class="sec-hdr">Squad</div>';
   Object.entries(SLOTS).forEach(function(entry){
     var pos=entry[0],needed=entry[1];
-    html+='<div style="margin-bottom:14px;"><div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;"><span class="badge badge-'+pos+'">'+pos+'</span><span style="color:#484f58;font-size:12px;">'+(team[pos]||[]).length+"/"+needed+"</span></div>";
+    html+='<div style="margin-bottom:12px;"><div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;"><span class="badge badge-'+pos+'">'+pos+'</span><span style="color:#484f58;font-size:11px;">'+(team[pos]||[]).length+"/"+needed+"</span></div>";
     for(var i=0;i<needed;i++){
       var p=(team[pos]||[])[i];
       if(p){
         var key=p.name+"|"+p.club;
         var isCap=cap&&(cap.player.name+"|"+cap.player.club)===key;
-        var pts=getPlayerPts(key,S.myName);
+        var cumPts=getPlayerPts(key,S.myName,vGW);
+        var gwScore=getPlayerGWPts(key,S.myName,vGW);
         var subbed=(S.wildcardSubs[S.myName]||[]).find(function(s){return (s.outPlayer.name+"|"+s.outPlayer.club)===key;});
-        html+='<div class="roster-slot filled"'+(subbed?' style="opacity:0.4;"':"")+"><div style='display:flex;align-items:center;justify-content:space-between;'><div><div style='font-size:14px;font-weight:700;'>"+p.name+(isCap?'<span class="cap-badge">C &times;2</span>':"")+' <span style="font-size:10px;color:#484f58;font-weight:normal;">'+(p.pickNumber?"#"+p.pickNumber:"")+"</span></div><div style='font-size:12px;color:#8b949e;'>"+p.club+(subbed?" &middot; <span style='color:#ef4444;'>Subbed out</span>":"")+"</div></div><div style='text-align:right;'><div style='color:#10b981;font-size:14px;font-weight:700;'>"+pts+"pts</div><div style='color:#484f58;font-size:11px;'>&pound;"+p.fplPrice+"m</div></div></div></div>";
+        html+='<div class="roster-slot filled"'+(subbed?' style="opacity:0.4;"':"")+
+          '><div style="display:flex;align-items:center;justify-content:space-between;">'+
+          '<div style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+
+          p.name+(isCap?'<span class="cap-badge">C&times;2</span>':"")+
+          ' <span style="font-size:10px;color:#484f58;font-weight:normal;">'+(p.pickNumber?"#"+p.pickNumber:"")+'</span></div>'+
+          '<div style="font-size:11px;color:#8b949e;">'+p.club+(subbed?" &middot; <span style='color:#ef4444;'>Subbed</span>":"")+' &middot; &pound;'+p.fplPrice+'m</div></div>'+
+          '<div style="text-align:right;flex-shrink:0;padding-left:8px;">'+
+          '<span style="color:#10b981;font-size:14px;font-weight:700;font-family:Bangers,cursive;letter-spacing:0.5px;">'+cumPts+'</span>'+
+          '<span style="color:#484f58;font-size:11px;margin-left:4px;">+'+gwScore+'</span>'+
+          '</div></div></div>';
       } else {
-        html+='<div class="roster-slot"><div style="color:#484f58;font-size:13px;">Empty slot</div></div>';
+        html+='<div class="roster-slot"><div style="color:#484f58;font-size:12px;">Empty slot</div></div>';
       }
     }
     if(pos==="WC"&&S.draftDone){
@@ -1334,9 +1376,9 @@ function renderMyTeamTab(){
         var key=p.name+"|"+p.club;
         var subIn=(S.wildcardSubs[S.myName]||[]).find(function(s){return (s.inPlayer.name+"|"+s.inPlayer.club)===key;});
         if(!subIn&&!p.isNonPL){
-          html+='<button class="btn btn-gray" style="margin-top:4px;font-size:12px;padding:8px;" onclick="openSubModal(\''+S.myName.replace(/'/g,"\\'")+'\','+i+')">Sub in '+p.name+"</button>";
+          html+='<button class="btn btn-gray" style="margin-top:4px;font-size:12px;padding:7px;" onclick="openMySubModal('+i+')">Sub in '+p.name+'</button>';
         } else if(p.isNonPL&&!subIn){
-          html+='<button class="btn btn-gray" style="margin-top:4px;font-size:12px;padding:8px;border-color:#f59e0b;" onclick="resolveWildcard(\''+S.myName.replace(/'/g,"\\'")+'\','+i+')">&#x26A0; Resolve '+p.name+" (Non-PL)</button>";
+          html+='<button class="btn btn-gray" style="margin-top:4px;font-size:12px;padding:7px;border-color:#f59e0b;" onclick="resolveMyWildcard('+i+')">&#x26A0; Resolve '+p.name+' (Non-PL)</button>';
         }
       });
     }
@@ -1346,8 +1388,10 @@ function renderMyTeamTab(){
   el.innerHTML=html;
 }
 
+
 // ── RENDER: FRIENDS ────────────────────────────────────────────────────────────
 var viewingFriend=null;
+var teamViewGW=null;
 function renderFriendsTab(){
   var el=document.getElementById("tab-friends");
   if(viewingFriend){renderFriendDetail(el,viewingFriend);return;}
@@ -1364,43 +1408,91 @@ function renderFriendsTab(){
 }
 
 function renderFriendDetail(el,name){
+  if(teamViewGW===null) teamViewGW=S.currentGW;
+  var vGW=teamViewGW;
   var team=S.teams[name]||{};
-  var totalPts=getPersonTotalPts(name);
+  var totalPts=getPersonTotalPts(name,vGW);
+  var gwPts=getPersonGWPts(name,vGW);
   var cap=S.captains[name];
-  var html='<div style="padding:14px;overflow-y:auto;flex:1;"><div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;"><button class="btn btn-gray" style="width:auto;padding:7px 12px;font-size:13px;" onclick="viewingFriend=null;renderFriendsTab();">&#x2190; Friends</button><div style="flex:1;font-weight:700;font-size:15px;">'+name+'</div></div><div class="stat-grid"><div class="stat-card"><div class="sv">'+totalPts+'</div><div class="sl">Total Points</div></div><div class="stat-card"><div class="sv">'+getPersonGWPts(name,S.currentGW)+'</div><div class="sl">GW'+S.currentGW+' Points</div></div></div>';
-  if(cap){
-    html+='<div class="card" style="border-color:#f59e0b;margin-bottom:10px;"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><span style="font-size:13px;color:#8b949e;">Captain:</span><strong>'+cap.player.name+'</strong><span class="cap-badge">C</span>'+capTimerHtml(name)+'<button class="btn btn-gray" style="width:auto;padding:5px 10px;font-size:12px;margin-left:auto;" onclick="openCaptainModal(\''+name.replace(/'/g,"\\'")+'\')" >Change</button></div></div>';
-  } else if(S.draftDone){
-    html+='<div class="warn">No captain.<button class="btn btn-blue" style="margin-top:8px;" onclick="openCaptainModal(\''+name.replace(/'/g,"\\'")+'\')">Nominate</button></div>';
+  var safeName=name; // used in closures
+
+  var html='<div style="padding:14px;overflow-y:auto;flex:1;">';
+  html+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">'+
+    '<button class="btn btn-gray" style="width:auto;padding:7px 12px;font-size:13px;" onclick="viewingFriend=null;renderFriendsTab();">&#x2190; Friends</button>'+
+    '<div style="flex:1;font-weight:700;font-size:15px;font-family:Rajdhani,system-ui;">'+name+'</div></div>';
+
+  if(S.draftDone){
+    html+='<div style="display:flex;align-items:center;justify-content:space-between;background:rgba(15,20,30,0.9);border:1px solid rgba(139,92,246,0.2);border-radius:10px;padding:8px 12px;margin-bottom:12px;" id="fd-gw-sel">';
+    html+='<button onclick="friendGWBack()" style="background:#21262d;border:none;color:#f0f6fc;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:16px;font-weight:700;'+(vGW<=1?'opacity:0.3;':'')+'"'+(vGW<=1?' disabled':'')+'>&#x2039;</button>';
+    html+='<div style="text-align:center;"><div style="color:#f0f6fc;font-weight:700;font-size:15px;font-family:Bangers,cursive;letter-spacing:1px;">GW'+vGW+'</div>'+
+      '<div style="color:#8b949e;font-size:10px;">'+(vGW===S.currentGW?'Current':'GW '+vGW+' of '+S.currentGW)+'</div></div>';
+    html+='<button onclick="friendGWFwd()" style="background:#21262d;border:none;color:#f0f6fc;border-radius:6px;padding:5px 12px;cursor:pointer;font-size:16px;font-weight:700;'+(vGW>=S.currentGW?'opacity:0.3;':'')+'"'+(vGW>=S.currentGW?' disabled':'')+'>&#x203A;</button>';
+    html+='</div>';
   }
+
+  html+='<div class="stat-grid"><div class="stat-card"><div class="sv">'+totalPts+
+    '<span style="font-size:13px;color:#484f58;font-weight:400;font-family:Rajdhani,system-ui;margin-left:6px;">+'+gwPts+'</span></div>'+
+    '<div class="sl">Pts to GW'+vGW+' &bull; GW'+vGW+'</div></div></div>';
+
+  if(cap){
+    html+='<div class="card" style="border-color:#ec4899;padding:8px 12px;margin-bottom:8px;">'+
+      '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">'+
+      '<span style="font-size:12px;color:#8b949e;">Captain:</span>'+
+      '<strong style="font-size:13px;">'+cap.player.name+'</strong>'+
+      '<span class="cap-badge">C</span>'+capTimerHtml(name)+'</div></div>';
+  }
+
   Object.entries(SLOTS).forEach(function(entry){
     var pos=entry[0],needed=entry[1];
-    html+='<div style="margin-bottom:12px;"><div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;"><span class="badge badge-'+pos+'">'+pos+'</span><span style="color:#484f58;font-size:12px;">'+(team[pos]||[]).length+"/"+needed+"</span></div>";
+    html+='<div style="margin-bottom:12px;"><div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">'+
+      '<span class="badge badge-'+pos+'">'+pos+'</span>'+
+      '<span style="color:#484f58;font-size:11px;">'+(team[pos]||[]).length+"/"+needed+"</span></div>";
     for(var i=0;i<needed;i++){
       var p=(team[pos]||[])[i];
       if(p){
         var key=p.name+"|"+p.club;
         var isCap=cap&&(cap.player.name+"|"+cap.player.club)===key;
-        var pts=getPlayerPts(key,name);
+        var cumPts=getPlayerPts(key,name,vGW);
+        var gwScore=getPlayerGWPts(key,name,vGW);
         var subbed=(S.wildcardSubs[name]||[]).find(function(s){return (s.outPlayer.name+"|"+s.outPlayer.club)===key;});
-        html+='<div class="roster-slot filled"'+(subbed?' style="opacity:0.4;"':"")+"><div style='display:flex;align-items:center;justify-content:space-between;'><div><div style='font-size:14px;font-weight:700;'>"+p.name+(isCap?'<span class="cap-badge">C &times;2</span>':"")+' <span style="font-size:10px;color:#484f58;font-weight:normal;">'+(p.pickNumber?"#"+p.pickNumber:"")+"</span></div><div style='font-size:12px;color:#8b949e;'>"+p.club+(subbed?" &middot; <span style='color:#ef4444;'>Subbed out</span>":"")+"</div></div><div style='text-align:right;'><div style='color:#10b981;font-size:14px;font-weight:700;'>"+pts+"pts</div></div></div></div>";
+        html+='<div class="roster-slot filled"'+(subbed?' style="opacity:0.4;"':"")+'>'+
+          '<div style="display:flex;align-items:center;justify-content:space-between;">'+
+          '<div style="flex:1;min-width:0;">'+
+          '<div style="font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+
+          p.name+(isCap?'<span class="cap-badge">C&times;2</span>':"")+
+          ' <span style="font-size:10px;color:#484f58;font-weight:normal;">'+(p.pickNumber?"#"+p.pickNumber:"")+'</span></div>'+
+          '<div style="font-size:11px;color:#8b949e;">'+p.club+(subbed?" &middot; <span style='color:#ef4444;'>Subbed</span>":"")+'</div></div>'+
+          '<div style="text-align:right;flex-shrink:0;padding-left:8px;">'+
+          '<span style="color:#10b981;font-size:14px;font-weight:700;font-family:Bangers,cursive;letter-spacing:0.5px;">'+cumPts+'</span>'+
+          '<span style="color:#484f58;font-size:11px;margin-left:4px;">+'+gwScore+'</span>'+
+          '</div></div></div>';
       } else {
-        html+='<div class="roster-slot"><div style="color:#484f58;font-size:13px;">Empty</div></div>';
+        html+='<div class="roster-slot"><div style="color:#484f58;font-size:12px;">Empty</div></div>';
       }
-    }
-    if(pos==="WC"&&S.draftDone){
-      (team[pos]||[]).forEach(function(p,i){
-        var subIn=(S.wildcardSubs[name]||[]).find(function(s){return (s.inPlayer.name+"|"+s.inPlayer.club)===(p.name+"|"+p.club);});
-        if(!subIn&&!p.isNonPL) html+='<button class="btn btn-gray" style="margin-top:4px;font-size:12px;padding:8px;" onclick="openSubModal(\''+name.replace(/'/g,"\\'")+'\','+i+')">Sub in '+p.name+"</button>";
-      });
     }
     html+="</div>";
   });
   html+="</div>";
   el.innerHTML=html;
+  // Store friend name for GW nav
+  el.dataset.friendName=name;
+}
+
+function friendGWBack(){
+  teamViewGW=Math.max(1,teamViewGW-1);
+  var el=document.getElementById("tab-friends");
+  if(el&&el.dataset.friendName) renderFriendDetail(el,el.dataset.friendName);
+}
+function friendGWFwd(){
+  teamViewGW=Math.min(S.currentGW,teamViewGW+1);
+  var el=document.getElementById("tab-friends");
+  if(el&&el.dataset.friendName) renderFriendDetail(el,el.dataset.friendName);
 }
 
 // ── CAPTAIN MODAL ──────────────────────────────────────────────────────────────
+function openMySubModal(i){ openSubModal(S.myName, i); }
+function resolveMyWildcard(i){ resolveWildcard(S.myName, i); }
+function openMyCaptainModal(){ openCaptainModal(S.myName); }
 function openCaptainModal(personName){
   var team=S.teams[personName]||{};
   var existing=S.captains[personName];
@@ -2799,6 +2891,11 @@ function drawMonthlyChart(){
   });
   new Chart(ctx,{type:"bar",data:{labels:labels,datasets:datasets},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:"#8b949e",font:{size:11}}}},scales:{x:{ticks:{color:"#484f58"}},y:{ticks:{color:"#484f58"},grid:{color:"#21262d"}}}}});
 }
+
+
+
+
+
 
 
 
