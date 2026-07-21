@@ -642,25 +642,30 @@ async function fetchPLClubs(){
 async function fetchWithFallback(url){
   var attempts = [
     {label:"AllOrigins", fn:function(){ return fetch("https://api.allorigins.win/raw?url="+encodeURIComponent(url),{headers:{"Accept":"application/json"}}); }},
+    {label:"AllOrigins retry", fn:function(){ return fetch("https://api.allorigins.win/raw?url="+encodeURIComponent(url)+"&_cb="+Date.now(),{headers:{"Accept":"application/json"}}); }},
     {label:"Corsfix", fn:function(){ return fetch("https://proxy.corsfix.com/?"+url,{headers:{"Accept":"application/json"}}); }},
     {label:"direct", fn:function(){ return fetch(url,{headers:{"Accept":"application/json"}}); }}
   ];
-  var lastErr;
+  // Collect every attempt's failure reason (not just the last one) so it can be shown
+  // in the app's own UI - console.warn alone is invisible on mobile, where most of this
+  // app's actual usage happens.
+  var failures = [];
   for(var i=0;i<attempts.length;i++){
     try{
       setLoadUI(6,"Fetching official FPL data via "+attempts[i].label+"...",{},[],0,null);
+      if(i===1) await new Promise(function(r){ setTimeout(r,800); }); // brief pause before retrying AllOrigins, in case it was a transient blip
       var r = await attempts[i].fn();
       if(!r.ok) throw new Error("HTTP "+r.status);
       var text = await r.text();
       var data = JSON.parse(text);
       if(data && Array.isArray(data.elements) && Array.isArray(data.teams)) return data;
-      throw new Error("Unexpected response shape from "+attempts[i].label);
+      throw new Error("unexpected response shape");
     }catch(e){
-      lastErr = e;
+      failures.push(attempts[i].label+": "+e.message);
       console.warn("fetchWithFallback: "+attempts[i].label+" failed - "+e.message);
     }
   }
-  throw new Error("All FPL data sources failed ("+(lastErr?lastErr.message:"unknown error")+")");
+  throw new Error(failures.join(" | "));
 }
 
 async function fetchSingleClubSquad(club, season){
@@ -856,8 +861,9 @@ async function loadAllPlayers(){
       throw new Error("FPL API returned too few players ("+(fplPool?fplPool.length:0)+")");
     }catch(fplErr){
       console.warn("FPL API load failed, falling back to AI-search loading:", fplErr.message);
-      setLoadUI(8, "Official FPL data unavailable ("+fplErr.message+") \u2014 falling back to AI search...", {}, [fplErr.message], 0, null);
-      await new Promise(function(r){ setTimeout(r,1200); });
+      setLoadUI(8, "Official FPL data unavailable \u2014 continuing with backup method in a few seconds...",
+        {}, ["Why it failed: "+fplErr.message], 0, null);
+      await new Promise(function(r){ setTimeout(r,3500); });
     }
 
     // Fallback: legacy Claude-search approach
