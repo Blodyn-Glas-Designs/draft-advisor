@@ -640,10 +640,14 @@ async function fetchPLClubs(){
 // The FPL API blocks direct browser calls with a hard CORS policy, so requests
 // are routed through a chain of CORS proxies, tried in order until one works.
 async function fetchWithFallback(url){
+  // Corsfix is tried first: it's a real commercial CORS-proxy service (now registered
+  // for this domain at app.corsfix.com), which has proven more reliable than AllOrigins
+  // for a payload this size (~2-4MB) - AllOrigins was consistently failing with a
+  // missing-CORS-header signature on the FPL bootstrap-static response. AllOrigins is
+  // kept as a fallback in case Corsfix's trial period lapses or its quota is hit.
   var attempts = [
-    {label:"AllOrigins", fn:function(){ return fetch("https://api.allorigins.win/raw?url="+encodeURIComponent(url),{headers:{"Accept":"application/json"}}); }},
-    {label:"AllOrigins retry", fn:function(){ return fetch("https://api.allorigins.win/raw?url="+encodeURIComponent(url)+"&_cb="+Date.now(),{headers:{"Accept":"application/json"}}); }},
     {label:"Corsfix", fn:function(){ return fetch("https://proxy.corsfix.com/?"+url,{headers:{"Accept":"application/json"}}); }},
+    {label:"AllOrigins", fn:function(){ return fetch("https://api.allorigins.win/raw?url="+encodeURIComponent(url),{headers:{"Accept":"application/json"}}); }},
     {label:"direct", fn:function(){ return fetch(url,{headers:{"Accept":"application/json"}}); }}
   ];
   // Collect every attempt's failure reason (not just the last one) so it can be shown
@@ -653,7 +657,6 @@ async function fetchWithFallback(url){
   for(var i=0;i<attempts.length;i++){
     try{
       setLoadUI(6,"Fetching official FPL data via "+attempts[i].label+"...",{},[],0,null);
-      if(i===1) await new Promise(function(r){ setTimeout(r,800); }); // brief pause before retrying AllOrigins, in case it was a transient blip
       var r = await attempts[i].fn();
       if(!r.ok) throw new Error("HTTP "+r.status);
       var text = await r.text();
