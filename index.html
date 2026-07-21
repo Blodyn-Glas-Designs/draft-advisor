@@ -591,6 +591,10 @@ async function callClaudeWithSearch(system,userMsg,maxTokens,maxSearches){
 
 // ── PLAYER LOADING ─────────────────────────────────────────────────────────────
 function setLoadUI(pct,subtitle,clubCounts,errors,total,failed){
+  // Restore normal vertical centering (askClubListConfirmation/askClubCorrections
+  // switch this off while showing long scrollable checklists - see comment there).
+  var loadWrap = document.querySelector("#loading-screen > div");
+  if(loadWrap) loadWrap.style.alignItems = "center";
   document.getElementById("load-bar").style.width=pct+"%";
   document.getElementById("load-pct").textContent=pct+"%";
   document.getElementById("load-subtitle").textContent=subtitle;
@@ -692,6 +696,13 @@ async function fetchSingleClubSquad(club, season){
 // screens/CSS needed). Resolves {ok:true} if confirmed, {ok:false} if not.
 function askClubListConfirmation(clubs){
   return new Promise(function(resolve){
+    // Flexbox centers this screen's content vertically by default, which on most mobile
+    // browsers makes any overflow above the fold unreachable by scrolling (content that's
+    // taller than the screen gets clipped at the top with no way to scroll up to it).
+    // Switching to flex-start here keeps everything scrollable; setLoadUI() (above)
+    // restores centering once we're back to short status messages.
+    var loadWrap = document.querySelector("#loading-screen > div");
+    if(loadWrap) loadWrap.style.alignItems = "flex-start";
     document.getElementById("load-title").textContent = "Confirm Premier League Clubs";
     document.getElementById("load-subtitle").textContent = "Pulled from the official FPL API. This can lag behind real promotion/relegation results for weeks during the close season \u2014 please confirm these 20 clubs are correct.";
     document.getElementById("load-bar").style.width = "100%";
@@ -715,6 +726,10 @@ function askClubListConfirmation(clubs){
 // {relegated:[...], promoted:[...]}.
 function askClubCorrections(clubs){
   return new Promise(function(resolve){
+    // Same overflow/scroll fix as askClubListConfirmation above - this screen's checklist
+    // is much longer (20 + 24 clubs), so it needs this even more.
+    var loadWrap = document.querySelector("#loading-screen > div");
+    if(loadWrap) loadWrap.style.alignItems = "flex-start";
     document.getElementById("load-title").textContent = "Fix the Club List";
     document.getElementById("load-subtitle").textContent = "Tick clubs that were relegated, then tick (or type) clubs that were promoted.";
     document.getElementById("load-bar").style.width = "100%";
