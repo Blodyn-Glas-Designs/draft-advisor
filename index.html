@@ -430,6 +430,16 @@ const CLUB_COLORS = {
   "Sheffield United":"#EE2737","Middlesbrough":"#E31B23","Coventry City":"#84B0D8",
   "Norwich City":"#00A650","Derby County":"#1D2C5E","Preston North End":"#FFFFFF"
 };
+// Maps the short club names returned by the official FPL API (bootstrap-static "teams" array)
+// to the canonical full names used everywhere else in this app (CLUB_COLORS keys, club-limit logic, etc).
+const FPL_TEAM_NAME_MAP = {
+  "Arsenal":"Arsenal","Aston Villa":"Aston Villa","Bournemouth":"Bournemouth","Brentford":"Brentford",
+  "Brighton":"Brighton","Burnley":"Burnley","Chelsea":"Chelsea","Crystal Palace":"Crystal Palace",
+  "Everton":"Everton","Fulham":"Fulham","Leeds":"Leeds United","Liverpool":"Liverpool",
+  "Man City":"Manchester City","Man Utd":"Manchester United","Newcastle":"Newcastle United",
+  "Nott'm Forest":"Nottingham Forest","Sunderland":"Sunderland","Spurs":"Tottenham Hotspur",
+  "West Ham":"West Ham United","Wolves":"Wolverhampton Wanderers"
+};
 let PL_CLUBS = [];
 
 // ── STATE ──────────────────────────────────────────────────────────────────────
@@ -586,6 +596,97 @@ async function fetchPLClubs(){
   }
 }
 
+// ── FPL OFFICIAL API LOADING (primary player-loading mechanism) ────────────────
+// Fetches the full player pool directly from the official FPL bootstrap-static
+// endpoint instead of asking Claude to recall squads from memory. This is the
+// fix for the stale/wrong-club/missing-transfer data quality problems that the
+// old Claude-search loader (fetchPLClubs/loadClubBatches below) suffered from.
+// The FPL API blocks direct browser calls with a hard CORS policy, so requests
+// are routed through a chain of CORS proxies, tried in order until one works.
+async function fetchWithFallback(url){
+  var attempts = [
+    {label:"AllOrigins", fn:function(){ return fetch("https://api.allorigins.win/raw?url="+encodeURIComponent(url),{headers:{"Accept":"application/json"}}); }},
+    {label:"Corsfix", fn:function(){ return fetch("https://proxy.corsfix.com/?"+url,{headers:{"Accept":"application/json"}}); }},
+    {label:"direct", fn:function(){ return fetch(url,{headers:{"Accept":"application/json"}}); }}
+  ];
+  var lastErr;
+  for(var i=0;i<attempts.length;i++){
+    try{
+      setLoadUI(6,"Fetching official FPL data via "+attempts[i].label+"...",{},[],0,null);
+      var r = await attempts[i].fn();
+      if(!r.ok) throw new Error("HTTP "+r.status);
+      var text = await r.text();
+      var data = JSON.parse(text);
+      if(data && Array.isArray(data.elements) && Array.isArray(data.teams)) return data;
+      throw new Error("Unexpected response shape from "+attempts[i].label);
+    }catch(e){
+      lastErr = e;
+      console.warn("fetchWithFallback: "+attempts[i].label+" failed - "+e.message);
+    }
+  }
+  throw new Error("All FPL data sources failed ("+(lastErr?lastErr.message:"unknown error")+")");
+}
+
+async function loadFromFPLApi(){
+  setLoadUI(5,"Connecting to official FPL data source...",{},[],0,null);
+  var data = await fetchWithFallback("https://fantasy.premierleague.com/api/bootstrap-static/");
+
+  var teamNameById = {};
+  data.teams.forEach(function(t){
+    teamNameById[t.id] = FPL_TEAM_NAME_MAP[t.name] || t.name;
+  });
+  PL_CLUBS = data.teams.map(function(t){ return teamNameById[t.id]; });
+
+  var posMap = {1:"GK",2:"DEF",3:"MID",4:"ATT"};
+  var pool = [];
+  data.elements.forEach(function(el){
+    var pos = posMap[el.element_type];
+    if(!pos) return; // skip non-player element types (e.g. FPL's "Manager" pseudo-position)
+    if(el.status==="u") return; // "unavailable" = no longer registered at the club (departed/transferred out)
+    var club = teamNameById[el.team];
+    if(!club) return;
+    pool.push({
+      name:((el.web_name||"")+"").trim(),
+      club:club,
+      position:pos,
+      fplPrice: Math.round((el.now_cost/10)*10)/10,
+      lastSeasonPts: el.total_points||0,
+      rating: 5,
+      fplId: el.id
+    });
+  });
+
+  if(pool.length===0) throw new Error("FPL API returned no usable players");
+
+  // Derive a 1-10 "rating" per player, scaled relative to other players in the same
+  // position using real points data (replaces the old AI-guessed 1-10 rating).
+  ["GK","DEF","MID","ATT"].forEach(function(pos){
+    var group = pool.filter(function(p){ return p.position===pos; });
+    if(group.length===0) return;
+    var pts = group.map(function(p){ return p.lastSeasonPts; });
+    var min = Math.min.apply(null,pts), max = Math.max.apply(null,pts);
+    group.forEach(function(p){
+      p.rating = max>min ? Math.round((1 + 9*(p.lastSeasonPts-min)/(max-min))*10)/10 : 5;
+    });
+  });
+
+  pool.sort(function(a,b){ return b.rating-a.rating; });
+
+  var clubCounts = {};
+  PL_CLUBS.forEach(function(c){ clubCounts[c] = pool.filter(function(p){return p.club===c;}).length; });
+
+  S.playerPool = pool;
+  sv("pool", pool);
+  sv("clubs", PL_CLUBS);
+  localStorage.removeItem(DB+"loadProgress");
+
+  var thin = PL_CLUBS.filter(function(c){ return (clubCounts[c]||0) < 12; });
+  setLoadUI(100, "Complete! "+pool.length+" players loaded from the official FPL API.", clubCounts, [], pool.length,
+    thin.length>0 ? thin : null);
+
+  return pool;
+}
+
 async function loadAllPlayers(){
   var pool = [];
   var clubCounts = {};
@@ -615,7 +716,20 @@ async function loadAllPlayers(){
     // Load remaining clubs
     await loadClubBatches(remaining, pool, clubCounts, errors, loadProgress);
   } else {
-    // Fresh load
+    // Fresh load — try the official FPL API first (primary mechanism as of the
+    // July 2026 rebuild). Falls back to the legacy Claude-search approach below
+    // if the FPL API and all its CORS proxies are unreachable.
+    try{
+      var fplPool = await loadFromFPLApi();
+      if(fplPool && fplPool.length > 100) return fplPool;
+      throw new Error("FPL API returned too few players ("+(fplPool?fplPool.length:0)+")");
+    }catch(fplErr){
+      console.warn("FPL API load failed, falling back to AI-search loading:", fplErr.message);
+      setLoadUI(8, "Official FPL data unavailable ("+fplErr.message+") \u2014 falling back to AI search...", {}, [fplErr.message], 0, null);
+      await new Promise(function(r){ setTimeout(r,1200); });
+    }
+
+    // Fallback: legacy Claude-search approach
     // Test API key first
     try{
       await callClaude("Reply with the single word: ok", "ok", 10);
