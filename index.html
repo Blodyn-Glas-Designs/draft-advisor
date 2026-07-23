@@ -1168,9 +1168,7 @@ async function generateAdvice(){
   });
 
   try{
-    // Step 1: Hard filter — real FPL status handles injuries/suspensions directly.
-    // Claude is only asked about things the FPL API doesn't cover: transfer rumours
-    // and fitness concerns not yet reflected in official status.
+    // Real FPL status handles injuries/suspensions directly - instant, no Claude call.
     var excluded=[];
     var realExcludedNames={};
     avail.slice(0,15).forEach(function(p){
@@ -1180,14 +1178,36 @@ async function generateAdvice(){
         realExcludedNames[p.name]=true;
       }
     });
+
+    // The three enrichment calls (transfer check, news/context, decline risk) are
+    // independent of each other - they were previously run one after another,
+    // which is why advice generation took 60-90s+ (three sequential round-trips
+    // before the final recommendation call). Firing them together roughly halves
+    // total wait time. They're built from the top of `avail` directly (pre-filter)
+    // rather than waiting on filteredAvail, since the rare transfer-exit case
+    // doesn't change who's worth asking about.
     var needsClaudeCheck=avail.slice(0,15).filter(function(p){return !realExcludedNames[p.name];});
     var top15ForFilter=needsClaudeCheck.map(function(p){return p.name+" ("+p.club+")";}).join(", ");
+    var top10=avail.slice(0,10).map(function(p){return p.name+" ("+p.club+")";}).join(", ");
+    var top5=avail.slice(0,5).map(function(p){return p.name+" ("+p.club+")";}).join(", ");
+
+    var filterSys="You are a Premier League transfer analyst. Today: "+new Date().toDateString()+". Official injury/suspension status is already handled from real FPL data - only report: confirmed or highly likely transfers OUT of the Premier League (to Saudi Arabia, MLS, Serie A, Ligue 1 etc), and any fitness concern not yet reflected in official status. Return JSON only: {playerName: {transferRisk:'none'|'possible-pl-exit'|'confirmed-pl-exit', transferDetail:string_or_null, additionalConcern:string_or_null}}. Raw JSON starting with {.";
+    var newsSys="Premier League fantasy football analyst. Today: "+new Date().toDateString()+". For each player get: starting likelihood, rotation risk, fixture difficulty for first 8 GWs, set piece roles, any relevant pre-season news. Return JSON: {playerName:{startingRisk:'low'|'medium'|'high',fixtureRating:1-10,setPiece:true/false,news:string_or_null}}. Raw JSON starting with {.";
+    var declineSys="Premier League fantasy risk analyst. Today: "+new Date().toDateString()+". For each player assess: age (flag 30+), contract year, pre-season 2026 form trend, key teammate dependencies, regression risk. Return JSON: {playerName:{age:number,ageRisk:'low'|'medium'|'high',formTrend:'rising'|'stable'|'declining'|'unknown',declineFlag:boolean,declineReason:string_or_null}}. Raw JSON starting with {.";
+
+    var filterPromise = top15ForFilter ? withTimeout(callClaude(filterSys,"Check transfer status for: "+top15ForFilter,2000),30000,"Filter") : Promise.resolve("{}");
+    var newsPromise = withTimeout(callClaude(newsSys,"Get news and context for: "+top10,2000),30000,"News");
+    var declinePromise = withTimeout(callClaude(declineSys,"Assess decline risk for: "+top5,2000),30000,"Decline");
+
+    var results = await Promise.all([filterPromise, newsPromise, declinePromise]);
+    var filterRaw=results[0], newsRaw=results[1], declineRaw=results[2];
+
     var hardFilters={};
-    if(top15ForFilter){
-      var filterSys="You are a Premier League transfer analyst. Today: "+new Date().toDateString()+". Official injury/suspension status is already handled from real FPL data - only report: confirmed or highly likely transfers OUT of the Premier League (to Saudi Arabia, MLS, Serie A, Ligue 1 etc), and any fitness concern not yet reflected in official status. Return JSON only: {playerName: {transferRisk:'none'|'possible-pl-exit'|'confirmed-pl-exit', transferDetail:string_or_null, additionalConcern:string_or_null}}. Raw JSON starting with {.";
-      var filterRaw=await withTimeout(callClaude(filterSys,"Check transfer status for: "+top15ForFilter,2000),30000,"Filter");
-      try{ hardFilters=extractJSON(filterRaw)||{}; }catch(e){ console.warn("Filter parse failed"); }
-    }
+    try{ hardFilters=extractJSON(filterRaw)||{}; }catch(e){ console.warn("Filter parse failed"); }
+    var playerNews={};
+    try{ playerNews=extractJSON(newsRaw)||{}; }catch(e){ console.warn("News parse failed"); }
+    var declineRisk={};
+    try{ declineRisk=extractJSON(declineRaw)||{}; }catch(e){ console.warn("Decline parse failed"); }
 
     // Build filtered available pool
     var filteredAvail=avail.filter(function(p){
@@ -1204,20 +1224,6 @@ async function generateAdvice(){
       }
       return true;
     });
-
-    // Step 2: News context for top candidates
-    var top10=filteredAvail.slice(0,10).map(function(p){return p.name+" ("+p.club+")";}).join(", ");
-    var newsSys="Premier League fantasy football analyst. Today: "+new Date().toDateString()+". For each player get: starting likelihood, rotation risk, fixture difficulty for first 8 GWs, set piece roles, any relevant pre-season news. Return JSON: {playerName:{startingRisk:'low'|'medium'|'high',fixtureRating:1-10,setPiece:true/false,news:string_or_null}}. Raw JSON starting with {.";
-    var newsRaw=await withTimeout(callClaude(newsSys,"Get news and context for: "+top10,2000),30000,"News");
-    var playerNews={};
-    try{ playerNews=extractJSON(newsRaw)||{}; }catch(e){ console.warn("News parse failed"); }
-
-    // Step 3: Decline risk for top 5
-    var top5=filteredAvail.slice(0,5).map(function(p){return p.name+" ("+p.club+")";}).join(", ");
-    var declineSys="Premier League fantasy risk analyst. Today: "+new Date().toDateString()+". For each player assess: age (flag 30+), contract year, pre-season 2026 form trend, key teammate dependencies, regression risk. Return JSON: {playerName:{age:number,ageRisk:'low'|'medium'|'high',formTrend:'rising'|'stable'|'declining'|'unknown',declineFlag:boolean,declineReason:string_or_null}}. Raw JSON starting with {.";
-    var declineRaw=await withTimeout(callClaude(declineSys,"Assess decline risk for: "+top5,2000),30000,"Decline");
-    var declineRisk={};
-    try{ declineRisk=extractJSON(declineRaw)||{}; }catch(e){ console.warn("Decline parse failed"); }
 
     // Build enriched player data
     var enriched=filteredAvail.slice(0,40).map(function(p){
