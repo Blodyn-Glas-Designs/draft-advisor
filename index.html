@@ -533,7 +533,13 @@ function normalise(p,club){
     fplPrice:parseFloat(p.fplPrice||p.price||p.cost||0)||0,
     lastSeasonPts:parseInt(p.lastSeasonPts||p.points||p.pts||0)||0,
     rating:parseFloat(p.rating||p.score||5)||5,
-    fplId:p.fplId||p.id||null
+    fplId:p.fplId||p.id||null,
+    // No real FPL availability data for players loaded via the legacy AI-search
+    // path - mark unknown so the advice engine falls back to Claude's judgment
+    // for these specific players instead of assuming they're fit.
+    fplStatus: p.fplStatus || "unknown",
+    chanceNextRound: (p.chanceNextRound===null||p.chanceNextRound===undefined) ? null : p.chanceNextRound,
+    fplNews: p.fplNews || ""
   };
 }
 
@@ -652,7 +658,13 @@ async function loadFromFPLApi(){
       fplPrice: Math.round((el.now_cost/10)*10)/10,
       lastSeasonPts: el.total_points||0,
       rating: 5,
-      fplId: el.id
+      fplId: el.id,
+      // Real FPL-maintained availability data (Jul 2026) - replaces asking Claude
+      // to search its own knowledge for injury/suspension status.
+      // status: 'a'=available, 'd'=doubtful, 'i'=injured, 's'=suspended, 'n'=not available (e.g. on loan out)
+      fplStatus: el.status || "a",
+      chanceNextRound: (el.chance_of_playing_next_round===null||el.chance_of_playing_next_round===undefined) ? 100 : el.chance_of_playing_next_round,
+      fplNews: el.news || ""
     });
   });
 
@@ -1129,26 +1141,63 @@ async function generateAdvice(){
   });
   var top15=avail.slice(0,15).map(function(p){return p.name+" ("+p.club+", "+p.position+", "+p.lastSeasonPts+"pts)";}).join(", ");
 
-  try{
-    // Step 1: Hard filter check — injuries and transfers
-    var filterSys="You are a Premier League injury and transfer analyst. Today: "+new Date().toDateString()+". For each player search for: confirmed serious injuries (ACL, cruciate, broken bones, 8+ weeks out) AND confirmed or highly likely transfers OUT of the Premier League (to Saudi Arabia, MLS, Serie A, Ligue 1 etc). Return JSON only: {playerName: {injuryStatus:'fit'|'minor'|'major'|'confirmed-out', injuryDetail:string_or_null, estimatedReturn:string_or_null, transferRisk:'none'|'possible-pl-exit'|'confirmed-pl-exit', transferDetail:string_or_null}}. Raw JSON starting with {.";
-    var filterRaw=await withTimeout(callClaude(filterSys,"Check injuries and transfer status for: "+top15,2000),30000,"Filter");
-    var hardFilters={};
-    try{ hardFilters=extractJSON(filterRaw)||{}; }catch(e){ console.warn("Filter parse failed"); }
+  // Real FPL-maintained availability (status/chance-of-playing/news) - authoritative,
+  // replaces asking Claude to search its own knowledge for injuries/suspensions.
+  function realAvailability(p){
+    var statusMap={a:'fit',d:'doubtful',i:'injured',s:'suspended',n:'unavailable',unknown:'unknown'};
+    return {
+      status: statusMap[p.fplStatus] || 'unknown',
+      chance: (p.chanceNextRound===undefined) ? null : p.chanceNextRound,
+      news: p.fplNews || ''
+    };
+  }
 
-    // Build excluded list and filtered available pool
+  // Structured rival-needs data: who picks before my next turn, and what positions
+  // they still need, computed from their actual drafted teams (not guessed by Claude).
+  var pickersBeforeNextTurn = nextTurn>=0 ? upcoming.slice(0,nextTurn) : upcoming.slice();
+  var rivalNeeds = pickersBeforeNextTurn.map(function(name){
+    var t=S.teams[name]||{};
+    var needs=Object.keys(SLOTS).filter(function(pos){
+      return pos!=="WC" && (SLOTS[pos]-(t[pos]||[]).length)>0;
+    });
+    return {name:name,needs:needs};
+  });
+  var positionPressure={};
+  ["GK","DEF","MID","ATT"].forEach(function(pos){
+    positionPressure[pos]=rivalNeeds.filter(function(r){return r.needs.includes(pos);}).length;
+  });
+
+  try{
+    // Step 1: Hard filter — real FPL status handles injuries/suspensions directly.
+    // Claude is only asked about things the FPL API doesn't cover: transfer rumours
+    // and fitness concerns not yet reflected in official status.
     var excluded=[];
+    var realExcludedNames={};
+    avail.slice(0,15).forEach(function(p){
+      var av=realAvailability(p);
+      if((av.status==="injured"||av.status==="suspended") && av.chance===0){
+        excluded.push({name:p.name,club:p.club,reason:(av.status==="injured"?"Injury":"Suspended")+(av.news?": "+av.news:"")+" (FPL: 0% chance of playing)"});
+        realExcludedNames[p.name]=true;
+      }
+    });
+    var needsClaudeCheck=avail.slice(0,15).filter(function(p){return !realExcludedNames[p.name];});
+    var top15ForFilter=needsClaudeCheck.map(function(p){return p.name+" ("+p.club+")";}).join(", ");
+    var hardFilters={};
+    if(top15ForFilter){
+      var filterSys="You are a Premier League transfer analyst. Today: "+new Date().toDateString()+". Official injury/suspension status is already handled from real FPL data - only report: confirmed or highly likely transfers OUT of the Premier League (to Saudi Arabia, MLS, Serie A, Ligue 1 etc), and any fitness concern not yet reflected in official status. Return JSON only: {playerName: {transferRisk:'none'|'possible-pl-exit'|'confirmed-pl-exit', transferDetail:string_or_null, additionalConcern:string_or_null}}. Raw JSON starting with {.";
+      var filterRaw=await withTimeout(callClaude(filterSys,"Check transfer status for: "+top15ForFilter,2000),30000,"Filter");
+      try{ hardFilters=extractJSON(filterRaw)||{}; }catch(e){ console.warn("Filter parse failed"); }
+    }
+
+    // Build filtered available pool
     var filteredAvail=avail.filter(function(p){
+      if(realExcludedNames[p.name]) return false;
       // Hard sanity check: club must be in our official current PL clubs list
       if(PL_CLUBS.length>0 && !PL_CLUBS.includes(p.club)){
         excluded.push({name:p.name,club:p.club,reason:"Not at a current Premier League club (data may be outdated)"});
         return false;
       }
       var f=hardFilters[p.name]||{};
-      if(f.injuryStatus==="confirmed-out"){
-        excluded.push({name:p.name,club:p.club,reason:"Injury: "+(f.injuryDetail||"serious injury")+(f.estimatedReturn?" (return: "+f.estimatedReturn+")":"")});
-        return false;
-      }
       if(f.transferRisk==="confirmed-pl-exit"){
         excluded.push({name:p.name,club:p.club,reason:"Transfer: "+(f.transferDetail||"leaving Premier League")});
         return false;
@@ -1175,6 +1224,7 @@ async function generateAdvice(){
       var n=playerNews[p.name]||{};
       var d=declineRisk[p.name]||{};
       var f=hardFilters[p.name]||{};
+      var av=realAvailability(p);
       return {
         name:p.name,club:p.club,pos:p.position,
         price:p.fplPrice,lastPts:p.lastSeasonPts,rating:p.rating,
@@ -1187,8 +1237,10 @@ async function generateAdvice(){
         formTrend:d.formTrend||null,
         declineFlag:d.declineFlag||false,
         declineReason:d.declineReason||null,
-        injuryStatus:f.injuryStatus||"fit",
-        injuryDetail:f.injuryDetail||null
+        // Authoritative from official FPL data, not a Claude guess
+        injuryStatus:av.status,
+        injuryChance:av.chance,
+        injuryNews:av.news||f.additionalConcern||null
       };
     });
 
@@ -1211,16 +1263,17 @@ async function generateAdvice(){
       "TOP GKs AVAILABLE (rated 7+): "+topGKs,
       "CLUBS AT MY LIMIT: "+blockedClubs.join(","),
       "MAX PER CLUB: "+S.clubMax,
-      "NEXT 20 PICKS: "+S.snakeOrder.slice(S.pickIdx,S.pickIdx+20).join(", "),
+      "PICKERS BEFORE YOUR NEXT TURN, WITH THEIR ACTUAL REMAINING POSITION NEEDS (computed from real drafted squads, not a guess): "+JSON.stringify(rivalNeeds),
+      "HOW MANY OF THOSE PICKERS STILL NEED EACH POSITION: "+JSON.stringify(positionPressure),
       "TOP 40 AVAILABLE (already filtered - excluded list is separate): "+JSON.stringify(enriched),
-      "NOTE: Players with confirmed serious injuries or confirmed PL exits have ALREADY been removed from the available list.",
+      "NOTE: Players with confirmed serious injuries or confirmed PL exits have ALREADY been removed from the available list. injuryStatus/injuryChance/injuryNews on each player come from official FPL data, not a guess.",
       "DETERMINISTIC SAFE PICK (already calculated - you MUST use this exact player as safePick): "+JSON.stringify(deterministicSafePick),
       "CRITICAL RULES:",
       "1. SAFE PICK is FIXED - you must return safePick as exactly the player named in DETERMINISTIC SAFE PICK above. Do not substitute a different player. Only add safeWarning text if there is a genuine injury/decline concern - but the pick itself does not change.",
-      "2. STRATEGIC PICK must be a DIFFERENT player than the Safe Pick. It MUST explicitly reason about: who picks before your next turn (from NEXT 20 PICKS) and what positions they likely need, scarcity at this position, fixture runs, and differential value. State in strategicReason specifically what rival behaviour or scarcity factor drove this choice (e.g. \"3 GK-needing teams pick before your next turn\").",
-      "3. Minor injury (injuryStatus=minor) = include with warning. Only confirmed-out players are excluded (already filtered).",
-      "4. If the deterministic Safe Pick has a decline flag or minor injury, mention it in safeWarning, but DO NOT change the pick itself.",
-      "Return JSON only: {safePick:{name,club,position,fplPrice,lastSeasonPts,rating},safeReason:'2-3 sentences stats-focused',safeWarning:'decline or minor injury warning or empty',strategicPick:{name,club,position,fplPrice,lastSeasonPts,rating},strategicReason:'2-3 sentences on WHY this is smart strategically',strategicWarning:'any risk to be aware of or empty',scarcity:'position scarcity warning or empty',nextTarget:'what to aim for next turn',excluded:"+JSON.stringify(excluded)+"}"
+      "2. STRATEGIC PICK must be a DIFFERENT player than the Safe Pick. Use PICKERS BEFORE YOUR NEXT TURN and HOW MANY OF THOSE PICKERS STILL NEED EACH POSITION (this is real computed data, not a guess) to reason about scarcity risk - e.g. if 2 of those pickers still need a GK and only one elite GK is left, that GK may be gone before your next turn. It must also weigh fixture runs and differential value. State in strategicReason specifically which rival need or scarcity number drove this choice (cite the actual number, e.g. \"2 of the 3 pickers before your next turn still need a GK\").",
+      "3. injuryStatus is authoritative from official FPL data: 'fit'=no concern. 'doubtful'/'injured'/'suspended' with injuryChance between 1-75 = include with warning citing injuryNews if present. Players already excluded had injuryChance=0. 'unknown' means no official data was available (a legacy-loaded player) - use injuryNews/Claude judgement instead.",
+      "4. If the deterministic Safe Pick has a decline flag or a doubtful/partial-chance injury, mention it in safeWarning, but DO NOT change the pick itself.",
+      "Return JSON only: {safePick:{name,club,position,fplPrice,lastSeasonPts,rating},safeReason:'2-3 sentences stats-focused',safeWarning:'decline or injury warning or empty',strategicPick:{name,club,position,fplPrice,lastSeasonPts,rating},strategicReason:'2-3 sentences on WHY this is smart strategically, citing the specific rival-need numbers used',strategicWarning:'any risk to be aware of or empty',scarcity:'position scarcity warning or empty',nextTarget:'what to aim for next turn',excluded:"+JSON.stringify(excluded)+"}"
     ];
     var sys=sysLines.join(" ");
     var rec=await withTimeout(callClaude(sys,"Give me two draft pick recommendations: one stats-led Safe Pick and one Strategic Pick.",800),30000,"Recommendation");
