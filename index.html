@@ -428,7 +428,8 @@ const CLUB_COLORS = {
   "Southampton":"#D71920","Sunderland":"#EB172B","Tottenham Hotspur":"#132257",
   "West Ham United":"#7A263A","Wolverhampton Wanderers":"#FDB913","Luton Town":"#F78F1E",
   "Sheffield United":"#EE2737","Middlesbrough":"#E31B23","Coventry City":"#84B0D8",
-  "Norwich City":"#00A650","Derby County":"#1D2C5E","Preston North End":"#FFFFFF"
+  "Norwich City":"#00A650","Derby County":"#1D2C5E","Preston North End":"#FFFFFF",
+  "Hull City":"#F5A623"
 };
 // Maps the short club names returned by the official FPL API (bootstrap-static "teams" array)
 // to the canonical full names used everywhere else in this app (CLUB_COLORS keys, club-limit logic, etc).
@@ -440,6 +441,17 @@ const FPL_TEAM_NAME_MAP = {
   "Nott'm Forest":"Nottingham Forest","Sunderland":"Sunderland","Spurs":"Tottenham Hotspur",
   "West Ham":"West Ham United","Wolves":"Wolverhampton Wanderers"
 };
+// Candidate list for the "who got promoted?" picker shown when the FPL API's team
+// list looks stale (see askClubCorrections below). This is the 2025-26 EFL Championship
+// membership - it's only used to save typing, so it going stale in future seasons just
+// means relying on the free-text "other" box instead, nothing breaks.
+const CHAMPIONSHIP_CLUBS_2025_26 = [
+  "Birmingham City","Blackburn Rovers","Bristol City","Charlton Athletic","Coventry City",
+  "Derby County","Hull City","Ipswich Town","Leicester City","Middlesbrough","Millwall",
+  "Norwich City","Oxford United","Portsmouth","Preston North End","Queens Park Rangers",
+  "Sheffield United","Sheffield Wednesday","Southampton","Stoke City","Swansea City",
+  "Watford","West Bromwich Albion","Wrexham"
+];
 let PL_CLUBS = [];
 
 // ── STATE ──────────────────────────────────────────────────────────────────────
@@ -567,8 +579,36 @@ async function callClaude(system,userMsg,maxTokens){
   return text;
 }
 
+// Same as callClaude, but gives Claude the hosted web search tool so it looks up real,
+// current information instead of recalling it from training data. Used specifically for
+// promoted-club squads, which is exactly the "AI recalls stale data" failure mode this
+// whole FPL rebuild exists to avoid - so backfilling with the same failure mode would
+// defeat the point. Kept separate from callClaude so nothing else in the app is affected.
+async function callClaudeWithSearch(system,userMsg,maxTokens,maxSearches){
+  maxTokens=maxTokens||4000;
+  maxSearches=maxSearches||4;
+  if(!S.apiKey) throw new Error("No API key set");
+  var r=await fetch("https://api.anthropic.com/v1/messages",{
+    method:"POST",
+    headers:{"Content-Type":"application/json","x-api-key":S.apiKey,"anthropic-version":"2023-06-01","anthropic-dangerous-direct-browser-access":"true"},
+    body:JSON.stringify({
+      model:"claude-sonnet-4-5",max_tokens:maxTokens,system:system,messages:[{role:"user",content:userMsg}],
+      tools:[{type:"web_search_20250305",name:"web_search",max_uses:maxSearches}]
+    })
+  });
+  var d=await r.json();
+  if(d.error) throw new Error(d.error.type+": "+d.error.message);
+  var text=(d.content||[]).filter(function(b){return b.type==="text";}).map(function(b){return b.text;}).join("\n");
+  if(!text) throw new Error("Empty response from API");
+  return text;
+}
+
 // ── PLAYER LOADING ─────────────────────────────────────────────────────────────
 function setLoadUI(pct,subtitle,clubCounts,errors,total,failed){
+  // Restore normal vertical centering (askClubListConfirmation/askClubCorrections
+  // switch this off while showing long scrollable checklists - see comment there).
+  var loadWrap = document.querySelector("#loading-screen > div");
+  if(loadWrap) loadWrap.style.alignItems = "center";
   document.getElementById("load-bar").style.width=pct+"%";
   document.getElementById("load-pct").textContent=pct+"%";
   document.getElementById("load-subtitle").textContent=subtitle;
@@ -618,12 +658,20 @@ async function fetchPLClubs(){
 // The FPL API blocks direct browser calls with a hard CORS policy, so requests
 // are routed through a chain of CORS proxies, tried in order until one works.
 async function fetchWithFallback(url){
+  // Corsfix is tried first: it's a real commercial CORS-proxy service (now registered
+  // for this domain at app.corsfix.com), which has proven more reliable than AllOrigins
+  // for a payload this size (~2-4MB) - AllOrigins was consistently failing with a
+  // missing-CORS-header signature on the FPL bootstrap-static response. AllOrigins is
+  // kept as a fallback in case Corsfix's trial period lapses or its quota is hit.
   var attempts = [
-    {label:"AllOrigins", fn:function(){ return fetch("https://api.allorigins.win/raw?url="+encodeURIComponent(url),{headers:{"Accept":"application/json"}}); }},
     {label:"Corsfix", fn:function(){ return fetch("https://proxy.corsfix.com/?"+url,{headers:{"Accept":"application/json"}}); }},
+    {label:"AllOrigins", fn:function(){ return fetch("https://api.allorigins.win/raw?url="+encodeURIComponent(url),{headers:{"Accept":"application/json"}}); }},
     {label:"direct", fn:function(){ return fetch(url,{headers:{"Accept":"application/json"}}); }}
   ];
-  var lastErr;
+  // Collect every attempt's failure reason (not just the last one) so it can be shown
+  // in the app's own UI - console.warn alone is invisible on mobile, where most of this
+  // app's actual usage happens.
+  var failures = [];
   for(var i=0;i<attempts.length;i++){
     try{
       setLoadUI(6,"Fetching official FPL data via "+attempts[i].label+"...",{},[],0,null);
@@ -632,13 +680,98 @@ async function fetchWithFallback(url){
       var text = await r.text();
       var data = JSON.parse(text);
       if(data && Array.isArray(data.elements) && Array.isArray(data.teams)) return data;
-      throw new Error("Unexpected response shape from "+attempts[i].label);
+      throw new Error("unexpected response shape");
     }catch(e){
-      lastErr = e;
+      failures.push(attempts[i].label+": "+e.message);
       console.warn("fetchWithFallback: "+attempts[i].label+" failed - "+e.message);
     }
   }
-  throw new Error("All FPL data sources failed ("+(lastErr?lastErr.message:"unknown error")+")");
+  throw new Error(failures.join(" | "));
+}
+
+async function fetchSingleClubSquad(club, season){
+  season = season || "2026-27";
+  var sys = "You are a football data researcher. Use web search to find "+club+"'s actual, current first-team squad for the "+season+" Premier League season - check sources like the club's official site, the Premier League site, or Wikipedia. Do not rely on memory; search for it. Once you have real results, respond with ONLY a raw JSON array of 20-25 players, each formatted as {name, position (GK/DEF/MID/ATT), fplPrice (estimated £m value, 0 if unknown), lastSeasonPts (prior season FPL points if found, else 0), rating (1-10)}. No markdown, no explanation text before or after the JSON array.";
+  for(var attempt=0; attempt<2; attempt++){
+    try{
+      var raw = await callClaudeWithSearch(sys, "Search for and return "+club+"'s current first-team squad for "+season+".", 4000, 4);
+      var players = extractJSON(raw);
+      if(Array.isArray(players) && players.length>=10){
+        return players.map(function(p){ return normalise(p,club); });
+      }
+    }catch(e){ console.warn("fetchSingleClubSquad failed for "+club+": "+e.message); }
+    if(attempt<1) await new Promise(function(r){ setTimeout(r,1000); });
+  }
+  return [];
+}
+
+// Stage gate: shows the club list the FPL API returned and asks the user to confirm it's
+// correct before trusting it. Reuses the existing loading-screen elements (no new
+// screens/CSS needed). Resolves {ok:true} if confirmed, {ok:false} if not.
+function askClubListConfirmation(clubs){
+  return new Promise(function(resolve){
+    // Flexbox centers this screen's content vertically by default, which on most mobile
+    // browsers makes any overflow above the fold unreachable by scrolling (content that's
+    // taller than the screen gets clipped at the top with no way to scroll up to it).
+    // Switching to flex-start here keeps everything scrollable; setLoadUI() (above)
+    // restores centering once we're back to short status messages.
+    var loadWrap = document.querySelector("#loading-screen > div");
+    if(loadWrap) loadWrap.style.alignItems = "flex-start";
+    document.getElementById("load-title").textContent = "Confirm Premier League Clubs";
+    document.getElementById("load-subtitle").textContent = "Pulled from the official FPL API. This can lag behind real promotion/relegation results for weeks during the close season \u2014 please confirm these 20 clubs are correct.";
+    document.getElementById("load-bar").style.width = "100%";
+    document.getElementById("load-pct").textContent = "";
+    document.getElementById("load-total").textContent = "";
+    document.getElementById("load-clubs").innerHTML = clubs.map(function(c){
+      return '<span class="club-tag" style="background:#1a3a2a;color:#10b981;border:1px solid #238636;">'+c+'</span>';
+    }).join("");
+    document.getElementById("load-errors").innerHTML =
+      '<button class="btn btn-green" style="margin-bottom:8px;" id="clubs-confirm-yes">&#x2713; Yes, this is correct</button>'+
+      '<button class="btn btn-gray" id="clubs-confirm-no">&#x2717; No, some clubs are wrong</button>';
+    document.getElementById("clubs-confirm-yes").onclick = function(){ resolve({ok:true}); };
+    document.getElementById("clubs-confirm-no").onclick = function(){ resolve({ok:false}); };
+  });
+}
+
+// Correction step shown only if the user rejects the FPL club list above. Lets them tick
+// which clubs were relegated (from the list FPL actually returned) and which were
+// promoted (from last season's Championship, plus a free-text box for anything not
+// listed - keeps this working even once that snapshot list goes stale). Resolves
+// {relegated:[...], promoted:[...]}.
+function askClubCorrections(clubs){
+  return new Promise(function(resolve){
+    // Same overflow/scroll fix as askClubListConfirmation above - this screen's checklist
+    // is much longer (20 + 24 clubs), so it needs this even more.
+    var loadWrap = document.querySelector("#loading-screen > div");
+    if(loadWrap) loadWrap.style.alignItems = "flex-start";
+    document.getElementById("load-title").textContent = "Fix the Club List";
+    document.getElementById("load-subtitle").textContent = "Tick clubs that were relegated, then tick (or type) clubs that were promoted.";
+    document.getElementById("load-bar").style.width = "100%";
+    document.getElementById("load-pct").textContent = "";
+    document.getElementById("load-total").textContent = "";
+    document.getElementById("load-clubs").innerHTML =
+      '<div style="width:100%;text-align:left;">'+
+      '<div class="sec-hdr" style="margin-top:0;">Relegated (tick any that no longer belong)</div>'+
+      clubs.map(function(c){
+        return '<label style="display:flex;align-items:center;gap:8px;padding:6px 4px;font-size:13px;color:#f0f6fc;"><input type="checkbox" class="releg-cb" value="'+c.replace(/"/g,"&quot;")+'"> '+c+'</label>';
+      }).join("")+
+      '<div class="sec-hdr">Promoted from the Championship (2025-26 clubs)</div>'+
+      CHAMPIONSHIP_CLUBS_2025_26.map(function(c){
+        return '<label style="display:flex;align-items:center;gap:8px;padding:6px 4px;font-size:13px;color:#f0f6fc;"><input type="checkbox" class="promo-cb" value="'+c.replace(/"/g,"&quot;")+'"> '+c+'</label>';
+      }).join("")+
+      '<label class="lbl">Other promoted club not listed above \u2014 one per line</label>'+
+      '<textarea class="inp" id="promo-other-input" rows="2" style="font-family:monospace;font-size:13px;" placeholder="e.g. Luton Town"></textarea>'+
+      '</div>';
+    document.getElementById("load-errors").innerHTML =
+      '<button class="btn btn-green" style="margin-top:10px;" id="corrections-apply-btn">Apply &amp; Continue</button>';
+    document.getElementById("corrections-apply-btn").onclick = function(){
+      var relegated = Array.prototype.slice.call(document.querySelectorAll(".releg-cb:checked")).map(function(el){ return el.value; });
+      var promoted = Array.prototype.slice.call(document.querySelectorAll(".promo-cb:checked")).map(function(el){ return el.value; });
+      var other = (document.getElementById("promo-other-input").value||"").split("\n").map(function(s){ return s.trim(); }).filter(Boolean);
+      promoted = promoted.concat(other);
+      resolve({relegated:relegated, promoted:promoted});
+    };
+  });
 }
 
 async function loadFromFPLApi(){
@@ -649,7 +782,14 @@ async function loadFromFPLApi(){
   data.teams.forEach(function(t){
     teamNameById[t.id] = FPL_TEAM_NAME_MAP[t.name] || t.name;
   });
-  PL_CLUBS = data.teams.map(function(t){ return teamNameById[t.id]; });
+  var clubs = data.teams.map(function(t){ return teamNameById[t.id]; });
+
+  // Stage gate: confirm the club list with the user before trusting it (see docstrings
+  // on askClubListConfirmation/askClubCorrections above for why).
+  var confirmResult = await askClubListConfirmation(clubs);
+  var correction = confirmResult.ok ? {relegated:[], promoted:[]} : await askClubCorrections(clubs);
+
+  clubs = clubs.filter(function(c){ return correction.relegated.indexOf(c)===-1; });
 
   var posMap = {1:"GK",2:"DEF",3:"MID",4:"ATT"};
   var pool = [];
@@ -659,6 +799,7 @@ async function loadFromFPLApi(){
     if(el.status==="u") return; // "unavailable" = no longer registered at the club (departed/transferred out)
     var club = teamNameById[el.team];
     if(!club) return;
+    if(correction.relegated.indexOf(club)!==-1) return; // user-confirmed relegated club - FPL just hasn't dropped them yet
     pool.push({
       name:((el.web_name||"")+"").trim(),
       club:club,
@@ -669,6 +810,19 @@ async function loadFromFPLApi(){
       fplId: el.id
     });
   });
+
+  // Backfill any promoted clubs FPL doesn't have player data for yet, using a real web
+  // search (not AI recall) for each one.
+  for(var bi=0; bi<correction.promoted.length; bi++){
+    var promotedClub = correction.promoted[bi];
+    if(clubs.indexOf(promotedClub)===-1) clubs.push(promotedClub);
+    setLoadUI(7, "Searching the web for "+promotedClub+"'s current squad (promoted, not yet in FPL data)...", {}, [], pool.length, null);
+    var squad = await fetchSingleClubSquad(promotedClub);
+    if(squad.length>0) pool = pool.concat(squad);
+    else console.warn("Could not find a squad for promoted club: "+promotedClub);
+  }
+
+  PL_CLUBS = clubs;
 
   if(pool.length===0) throw new Error("FPL API returned no usable players");
 
@@ -739,8 +893,9 @@ async function loadAllPlayers(){
       throw new Error("FPL API returned too few players ("+(fplPool?fplPool.length:0)+")");
     }catch(fplErr){
       console.warn("FPL API load failed, falling back to AI-search loading:", fplErr.message);
-      setLoadUI(8, "Official FPL data unavailable ("+fplErr.message+") \u2014 falling back to AI search...", {}, [fplErr.message], 0, null);
-      await new Promise(function(r){ setTimeout(r,1200); });
+      setLoadUI(8, "Official FPL data unavailable \u2014 continuing with backup method in a few seconds...",
+        {}, ["Why it failed: "+fplErr.message], 0, null);
+      await new Promise(function(r){ setTimeout(r,3500); });
     }
 
     // Fallback: legacy Claude-search approach
@@ -912,6 +1067,7 @@ function updateDraftNavVisibility(){
   // Advice is only relevant while actively drafting - hide it once the draft is complete.
   document.querySelectorAll(".nav-btn[data-tab='advice']").forEach(function(b){b.style.display=S.draftDone?"none":"";});
 }
+
 function proceedToApp(){
   showScreen("main");
   // Ensure topbar has the right structure (may have been overwritten by browse mode)
@@ -2229,8 +2385,6 @@ var searchQuery="";
 
 
 var totwGW=null;
-var cumulChartRange="5";   // '5'|'10'|'15'|'all' - independent filter for the Cumulative Points chart
-var gwChartRange="5";      // '5'|'10'|'15'|'all' - independent filter for the Points Per Gameweek chart
 
 
 function getBestXI(gwNum){
@@ -2876,6 +3030,8 @@ var poolClubFilter="ALL",poolPosFilter="ALL",poolSort="pts_desc",poolShow="all";
 var posFilter="ALL";
 var tappedPlayer=null;
 var cumulChart=null; var gwChart=null; var posChart=null; var monthlyChart=null;
+var cumulChartRange="5";   // '5'|'10'|'15'|'all' - independent filter for the Cumulative Points chart
+var gwChartRange="5";      // '5'|'10'|'15'|'all' - independent filter for the Points Per Gameweek chart
 
 function renderPoolTab(){
   var el=document.getElementById("tab-pool");
@@ -3023,9 +3179,9 @@ function renderStatsSection(standings){
   html+='</tr></thead><tbody>';
   S.draftOrder.forEach(function(name){
     html+='<tr><td style="font-weight:700;">'+name+(name===S.myName?" &#x1F464;":"")+'</td>';
+    var prevRank=null;
     // Rank going into the window is used as the baseline so the first arrow shown is meaningful,
     // not blank, even when the window doesn't start at GW1.
-    var prevRank=null;
     if(rankStartGW>1){
       var baseline=S.draftOrder.map(function(n){return {name:n,pts:getPersonTotalPts(n,rankStartGW-1)};}).sort(function(a,b){return b.pts-a.pts;});
       prevRank=baseline.findIndex(function(r){return r.name===name;})+1;
