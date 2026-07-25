@@ -516,10 +516,24 @@ function isClubBlocked(name,club){return clubCountForPicker(name,club)>=S.clubMa
 
 function extractJSON(raw){
   if(!raw) throw new Error("Empty response");
-  var a0=raw.indexOf("["),a1=raw.lastIndexOf("]");
-  if(a0!==-1&&a1>a0){try{return JSON.parse(raw.slice(a0,a1+1));}catch(e){}}
-  var o0=raw.indexOf("{"),o1=raw.lastIndexOf("}");
-  if(o0!==-1&&o1>o0){try{return JSON.parse(raw.slice(o0,o1+1));}catch(e){}}
+  var a0=raw.indexOf("["),o0=raw.indexOf("{");
+  // Whichever bracket type opens FIRST is the true top-level container.
+  // (Previously arrays were always tried first, which meant an object like
+  // {safePick:...,excluded:[...]} would incorrectly return just the nested
+  // excluded array instead of the full object - silently, with no error.)
+  var arrayFirst = a0!==-1 && (o0===-1 || a0<o0);
+  if(arrayFirst){
+    var a1=raw.lastIndexOf("]");
+    if(a1>a0){try{return JSON.parse(raw.slice(a0,a1+1));}catch(e){}}
+  }
+  if(o0!==-1){
+    var o1=raw.lastIndexOf("}");
+    if(o1>o0){try{return JSON.parse(raw.slice(o0,o1+1));}catch(e){}}
+  }
+  if(!arrayFirst && a0!==-1){
+    var a1b=raw.lastIndexOf("]");
+    if(a1b>a0){try{return JSON.parse(raw.slice(a0,a1b+1));}catch(e){}}
+  }
   throw new Error("No JSON found in response");
 }
 function normalise(p,club){
@@ -533,13 +547,7 @@ function normalise(p,club){
     fplPrice:parseFloat(p.fplPrice||p.price||p.cost||0)||0,
     lastSeasonPts:parseInt(p.lastSeasonPts||p.points||p.pts||0)||0,
     rating:parseFloat(p.rating||p.score||5)||5,
-    fplId:p.fplId||p.id||null,
-    // No real FPL availability data for players loaded via the legacy AI-search
-    // path - mark unknown so the advice engine falls back to Claude's judgment
-    // for these specific players instead of assuming they're fit.
-    fplStatus: p.fplStatus || "unknown",
-    chanceNextRound: (p.chanceNextRound===null||p.chanceNextRound===undefined) ? null : p.chanceNextRound,
-    fplNews: p.fplNews || ""
+    fplId:p.fplId||p.id||null
   };
 }
 
@@ -658,13 +666,7 @@ async function loadFromFPLApi(){
       fplPrice: Math.round((el.now_cost/10)*10)/10,
       lastSeasonPts: el.total_points||0,
       rating: 5,
-      fplId: el.id,
-      // Real FPL-maintained availability data (Jul 2026) - replaces asking Claude
-      // to search its own knowledge for injury/suspension status.
-      // status: 'a'=available, 'd'=doubtful, 'i'=injured, 's'=suspended, 'n'=not available (e.g. on loan out)
-      fplStatus: el.status || "a",
-      chanceNextRound: (el.chance_of_playing_next_round===null||el.chance_of_playing_next_round===undefined) ? 100 : el.chance_of_playing_next_round,
-      fplNews: el.news || ""
+      fplId: el.id
     });
   });
 
@@ -904,6 +906,12 @@ async function retryClubs(clubs){
   setTimeout(proceedToApp,1000);
 }
 
+function updateDraftNavVisibility(){
+  document.querySelectorAll(".nav-btn[data-tab='pool']").forEach(function(b){b.style.display=S.draftDone?"":"none";});
+  document.querySelectorAll(".nav-btn[data-tab='stats']").forEach(function(b){b.style.display=S.draftDone?"":"none";});
+  // Advice is only relevant while actively drafting - hide it once the draft is complete.
+  document.querySelectorAll(".nav-btn[data-tab='advice']").forEach(function(b){b.style.display=S.draftDone?"none":"";});
+}
 function proceedToApp(){
   showScreen("main");
   // Ensure topbar has the right structure (may have been overwritten by browse mode)
@@ -915,72 +923,47 @@ function proceedToApp(){
   renderTopBar();
   checkAdviceBanner();
   checkCaptainBanner();
-  document.querySelectorAll(".nav-btn[data-tab='pool']").forEach(function(b){b.style.display=S.draftDone?"":"none";});
-  document.querySelectorAll(".nav-btn[data-tab='stats']").forEach(function(b){b.style.display=S.draftDone?"":"none";});
+  updateDraftNavVisibility();
   showTab(S.draftDone?(S.defaultTab||"myteam"):"draft");
   if(isMyTurn()&&!S.draftDone) generateAdvice();
 }
 
 // ── FPL SCORE REFRESH ──────────────────────────────────────────────────────────
-// Rebuilt (Jul 2026) to pull real data from the official FPL API via the same
-// fetchWithFallback proxy chain used for player loading, instead of asking
-// Claude to "fetch" the endpoint from memory. Matched by fplId, not name.
-async function getCurrentGameweekFromApi(){
-  var data = await fetchWithFallback("https://fantasy.premierleague.com/api/bootstrap-static/");
-  if(!data || !Array.isArray(data.events)) throw new Error('Could not read events from FPL API');
-  var current = data.events.find(function(e){ return e.is_current; });
-  if(current) return current.id;
-  var finished = data.events.filter(function(e){ return e.finished; });
-  if(finished.length > 0) return finished[finished.length - 1].id;
-  return 0; // preseason - no gameweek has started yet
-}
-async function fetchGWLiveScores(gw){
-  var data = await fetchWithFallback("https://fantasy.premierleague.com/api/event/" + gw + "/live/");
-  if(!data || !Array.isArray(data.elements)) throw new Error('Unexpected live-scores response for GW' + gw);
-  var byId = {};
-  data.elements.forEach(function(el){
-    byId[el.id] = (el.stats && typeof el.stats.total_points === 'number') ? el.stats.total_points : 0;
-  });
-  return byId;
-}
-function mapLiveScoresToTeam(byId){
-  var mapped = {};
-  getAllPlayers().forEach(function(p){
-    var pts = 0;
-    if(p.fplId != null && Object.prototype.hasOwnProperty.call(byId, p.fplId)){
-      pts = byId[p.fplId];
-    } else {
-      // Player has no fplId - was loaded via the legacy AI-search fallback
-      // rather than the FPL API, so it can't be matched to a live score.
-      console.warn('No fplId for ' + p.name + ' (' + p.club + ') - scored 0 for this GW');
-    }
-    mapped[p.name + '|' + p.club] = pts;
-  });
-  return mapped;
-}
 async function refreshScores(){
   try{
-    // Step 1: Get current gameweek from the real FPL API (bootstrap-static events)
-    var currentGW = await getCurrentGameweekFromApi();
+    // Step 1: Get current gameweek
+    var sys1 = 'You are a Premier League fantasy football assistant. Today is ' + new Date().toDateString() + '. What is the current Premier League FPL gameweek number? Return ONLY a JSON object like this: {"currentGW": 12}. Raw JSON only.';
+    var raw1 = await callClaude(sys1, 'What is the current FPL gameweek? Return JSON only.', 100);
+    var gwData = extractJSON(raw1);
+    if(!gwData || !gwData.currentGW) throw new Error('Could not determine current gameweek');
+    var currentGW = parseInt(gwData.currentGW);
+    if(isNaN(currentGW) || currentGW < 1 || currentGW > 38) throw new Error('Invalid gameweek: ' + currentGW);
     S.currentGW = currentGW;
-    if(currentGW < 1){
-      sv('meta', {lastRefreshed: S.lastRefreshed, currentGW: S.currentGW});
-      return true; // preseason - nothing to fetch yet
-    }
 
     // Step 2: Fetch scores one gameweek at a time (most recent first)
     var needed = [];
     for(var g = currentGW; g >= 1; g--){
       if(!S.scores[g]) needed.push(g);
-      // Only fetch up to 3 missing gameweeks per refresh to keep it quick
+      // Only fetch up to 3 missing gameweeks per refresh to keep cost/time reasonable
       if(needed.length >= 3) break;
     }
 
     for(var ni = 0; ni < needed.length; ni++){
       var gw = needed[ni];
+      var sys2 = 'You are a Premier League fantasy football assistant. Fetch the FPL API at https://fantasy.premierleague.com/api/event/' + gw + '/live/ and return the points scored by each player in gameweek ' + gw + '. Return ONLY a JSON object where keys are player web_names (short names like "Salah", "Haaland") and values are their integer points for that gameweek. Raw JSON only starting with {.';
       try{
-        var byId = await fetchGWLiveScores(gw);
-        S.scores[gw] = mapLiveScoresToTeam(byId);
+        var raw2 = await callClaude(sys2, 'Get FPL points for all players in gameweek ' + gw + '. Return as JSON object mapping web_name to points.', 4000);
+        var gwScores = extractJSON(raw2);
+        if(gwScores && typeof gwScores === 'object' && !Array.isArray(gwScores)){
+          var mapped = {};
+          getAllPlayers().forEach(function(p){
+            var webName = p.name.toLowerCase();
+            var shortName = p.name.split(' ').pop().toLowerCase();
+            var pts = gwScores[p.name] || gwScores[webName] || gwScores[shortName] || 0;
+            mapped[p.name + '|' + p.club] = parseInt(pts) || 0;
+          });
+          S.scores[gw] = mapped;
+        }
       }catch(e){
         console.warn('GW ' + gw + ' scores failed:', e.message);
       }
@@ -1141,83 +1124,26 @@ async function generateAdvice(){
   });
   var top15=avail.slice(0,15).map(function(p){return p.name+" ("+p.club+", "+p.position+", "+p.lastSeasonPts+"pts)";}).join(", ");
 
-  // Real FPL-maintained availability (status/chance-of-playing/news) - authoritative,
-  // replaces asking Claude to search its own knowledge for injuries/suspensions.
-  function realAvailability(p){
-    var statusMap={a:'fit',d:'doubtful',i:'injured',s:'suspended',n:'unavailable',unknown:'unknown'};
-    return {
-      status: statusMap[p.fplStatus] || 'unknown',
-      chance: (p.chanceNextRound===undefined) ? null : p.chanceNextRound,
-      news: p.fplNews || ''
-    };
-  }
-
-  // Structured rival-needs data: who picks before my next turn, and what positions
-  // they still need, computed from their actual drafted teams (not guessed by Claude).
-  var pickersBeforeNextTurn = nextTurn>=0 ? upcoming.slice(0,nextTurn) : upcoming.slice();
-  var rivalNeeds = pickersBeforeNextTurn.map(function(name){
-    var t=S.teams[name]||{};
-    var needs=Object.keys(SLOTS).filter(function(pos){
-      return pos!=="WC" && (SLOTS[pos]-(t[pos]||[]).length)>0;
-    });
-    return {name:name,needs:needs};
-  });
-  var positionPressure={};
-  ["GK","DEF","MID","ATT"].forEach(function(pos){
-    positionPressure[pos]=rivalNeeds.filter(function(r){return r.needs.includes(pos);}).length;
-  });
-
   try{
-    // Real FPL status handles injuries/suspensions directly - instant, no Claude call.
-    var excluded=[];
-    var realExcludedNames={};
-    avail.slice(0,15).forEach(function(p){
-      var av=realAvailability(p);
-      if((av.status==="injured"||av.status==="suspended") && av.chance===0){
-        excluded.push({name:p.name,club:p.club,reason:(av.status==="injured"?"Injury":"Suspended")+(av.news?": "+av.news:"")+" (FPL: 0% chance of playing)"});
-        realExcludedNames[p.name]=true;
-      }
-    });
-
-    // The three enrichment calls (transfer check, news/context, decline risk) are
-    // independent of each other - they were previously run one after another,
-    // which is why advice generation took 60-90s+ (three sequential round-trips
-    // before the final recommendation call). Firing them together roughly halves
-    // total wait time. They're built from the top of `avail` directly (pre-filter)
-    // rather than waiting on filteredAvail, since the rare transfer-exit case
-    // doesn't change who's worth asking about.
-    var needsClaudeCheck=avail.slice(0,15).filter(function(p){return !realExcludedNames[p.name];});
-    var top15ForFilter=needsClaudeCheck.map(function(p){return p.name+" ("+p.club+")";}).join(", ");
-    var top10=avail.slice(0,10).map(function(p){return p.name+" ("+p.club+")";}).join(", ");
-    var top5=avail.slice(0,5).map(function(p){return p.name+" ("+p.club+")";}).join(", ");
-
-    var filterSys="You are a Premier League transfer analyst. Today: "+new Date().toDateString()+". Official injury/suspension status is already handled from real FPL data - only report: confirmed or highly likely transfers OUT of the Premier League (to Saudi Arabia, MLS, Serie A, Ligue 1 etc), and any fitness concern not yet reflected in official status. Return JSON only: {playerName: {transferRisk:'none'|'possible-pl-exit'|'confirmed-pl-exit', transferDetail:string_or_null, additionalConcern:string_or_null}}. Raw JSON starting with {.";
-    var newsSys="Premier League fantasy football analyst. Today: "+new Date().toDateString()+". For each player get: starting likelihood, rotation risk, fixture difficulty for first 8 GWs, set piece roles, any relevant pre-season news. Return JSON: {playerName:{startingRisk:'low'|'medium'|'high',fixtureRating:1-10,setPiece:true/false,news:string_or_null}}. Raw JSON starting with {.";
-    var declineSys="Premier League fantasy risk analyst. Today: "+new Date().toDateString()+". For each player assess: age (flag 30+), contract year, pre-season 2026 form trend, key teammate dependencies, regression risk. Return JSON: {playerName:{age:number,ageRisk:'low'|'medium'|'high',formTrend:'rising'|'stable'|'declining'|'unknown',declineFlag:boolean,declineReason:string_or_null}}. Raw JSON starting with {.";
-
-    var filterPromise = top15ForFilter ? withTimeout(callClaude(filterSys,"Check transfer status for: "+top15ForFilter,2000),30000,"Filter") : Promise.resolve("{}");
-    var newsPromise = withTimeout(callClaude(newsSys,"Get news and context for: "+top10,2000),30000,"News");
-    var declinePromise = withTimeout(callClaude(declineSys,"Assess decline risk for: "+top5,2000),30000,"Decline");
-
-    var results = await Promise.all([filterPromise, newsPromise, declinePromise]);
-    var filterRaw=results[0], newsRaw=results[1], declineRaw=results[2];
-
+    // Step 1: Hard filter check — injuries and transfers
+    var filterSys="You are a Premier League injury and transfer analyst. Today: "+new Date().toDateString()+". For each player search for: confirmed serious injuries (ACL, cruciate, broken bones, 8+ weeks out) AND confirmed or highly likely transfers OUT of the Premier League (to Saudi Arabia, MLS, Serie A, Ligue 1 etc). Return JSON only: {playerName: {injuryStatus:'fit'|'minor'|'major'|'confirmed-out', injuryDetail:string_or_null, estimatedReturn:string_or_null, transferRisk:'none'|'possible-pl-exit'|'confirmed-pl-exit', transferDetail:string_or_null}}. Raw JSON starting with {.";
+    var filterRaw=await withTimeout(callClaude(filterSys,"Check injuries and transfer status for: "+top15,2000),30000,"Filter");
     var hardFilters={};
     try{ hardFilters=extractJSON(filterRaw)||{}; }catch(e){ console.warn("Filter parse failed"); }
-    var playerNews={};
-    try{ playerNews=extractJSON(newsRaw)||{}; }catch(e){ console.warn("News parse failed"); }
-    var declineRisk={};
-    try{ declineRisk=extractJSON(declineRaw)||{}; }catch(e){ console.warn("Decline parse failed"); }
 
-    // Build filtered available pool
+    // Build excluded list and filtered available pool
+    var excluded=[];
     var filteredAvail=avail.filter(function(p){
-      if(realExcludedNames[p.name]) return false;
       // Hard sanity check: club must be in our official current PL clubs list
       if(PL_CLUBS.length>0 && !PL_CLUBS.includes(p.club)){
         excluded.push({name:p.name,club:p.club,reason:"Not at a current Premier League club (data may be outdated)"});
         return false;
       }
       var f=hardFilters[p.name]||{};
+      if(f.injuryStatus==="confirmed-out"){
+        excluded.push({name:p.name,club:p.club,reason:"Injury: "+(f.injuryDetail||"serious injury")+(f.estimatedReturn?" (return: "+f.estimatedReturn+")":"")});
+        return false;
+      }
       if(f.transferRisk==="confirmed-pl-exit"){
         excluded.push({name:p.name,club:p.club,reason:"Transfer: "+(f.transferDetail||"leaving Premier League")});
         return false;
@@ -1225,12 +1151,25 @@ async function generateAdvice(){
       return true;
     });
 
+    // Step 2: News context for top candidates
+    var top10=filteredAvail.slice(0,10).map(function(p){return p.name+" ("+p.club+")";}).join(", ");
+    var newsSys="Premier League fantasy football analyst. Today: "+new Date().toDateString()+". For each player get: starting likelihood, rotation risk, fixture difficulty for first 8 GWs, set piece roles, any relevant pre-season news. Return JSON: {playerName:{startingRisk:'low'|'medium'|'high',fixtureRating:1-10,setPiece:true/false,news:string_or_null}}. Raw JSON starting with {.";
+    var newsRaw=await withTimeout(callClaude(newsSys,"Get news and context for: "+top10,2000),30000,"News");
+    var playerNews={};
+    try{ playerNews=extractJSON(newsRaw)||{}; }catch(e){ console.warn("News parse failed"); }
+
+    // Step 3: Decline risk for top 5
+    var top5=filteredAvail.slice(0,5).map(function(p){return p.name+" ("+p.club+")";}).join(", ");
+    var declineSys="Premier League fantasy risk analyst. Today: "+new Date().toDateString()+". For each player assess: age (flag 30+), contract year, pre-season 2026 form trend, key teammate dependencies, regression risk. Return JSON: {playerName:{age:number,ageRisk:'low'|'medium'|'high',formTrend:'rising'|'stable'|'declining'|'unknown',declineFlag:boolean,declineReason:string_or_null}}. Raw JSON starting with {.";
+    var declineRaw=await withTimeout(callClaude(declineSys,"Assess decline risk for: "+top5,2000),30000,"Decline");
+    var declineRisk={};
+    try{ declineRisk=extractJSON(declineRaw)||{}; }catch(e){ console.warn("Decline parse failed"); }
+
     // Build enriched player data
     var enriched=filteredAvail.slice(0,40).map(function(p){
       var n=playerNews[p.name]||{};
       var d=declineRisk[p.name]||{};
       var f=hardFilters[p.name]||{};
-      var av=realAvailability(p);
       return {
         name:p.name,club:p.club,pos:p.position,
         price:p.fplPrice,lastPts:p.lastSeasonPts,rating:p.rating,
@@ -1243,10 +1182,8 @@ async function generateAdvice(){
         formTrend:d.formTrend||null,
         declineFlag:d.declineFlag||false,
         declineReason:d.declineReason||null,
-        // Authoritative from official FPL data, not a Claude guess
-        injuryStatus:av.status,
-        injuryChance:av.chance,
-        injuryNews:av.news||f.additionalConcern||null
+        injuryStatus:f.injuryStatus||"fit",
+        injuryDetail:f.injuryDetail||null
       };
     });
 
@@ -1269,17 +1206,16 @@ async function generateAdvice(){
       "TOP GKs AVAILABLE (rated 7+): "+topGKs,
       "CLUBS AT MY LIMIT: "+blockedClubs.join(","),
       "MAX PER CLUB: "+S.clubMax,
-      "PICKERS BEFORE YOUR NEXT TURN, WITH THEIR ACTUAL REMAINING POSITION NEEDS (computed from real drafted squads, not a guess): "+JSON.stringify(rivalNeeds),
-      "HOW MANY OF THOSE PICKERS STILL NEED EACH POSITION: "+JSON.stringify(positionPressure),
+      "NEXT 20 PICKS: "+S.snakeOrder.slice(S.pickIdx,S.pickIdx+20).join(", "),
       "TOP 40 AVAILABLE (already filtered - excluded list is separate): "+JSON.stringify(enriched),
-      "NOTE: Players with confirmed serious injuries or confirmed PL exits have ALREADY been removed from the available list. injuryStatus/injuryChance/injuryNews on each player come from official FPL data, not a guess.",
+      "NOTE: Players with confirmed serious injuries or confirmed PL exits have ALREADY been removed from the available list.",
       "DETERMINISTIC SAFE PICK (already calculated - you MUST use this exact player as safePick): "+JSON.stringify(deterministicSafePick),
       "CRITICAL RULES:",
       "1. SAFE PICK is FIXED - you must return safePick as exactly the player named in DETERMINISTIC SAFE PICK above. Do not substitute a different player. Only add safeWarning text if there is a genuine injury/decline concern - but the pick itself does not change.",
-      "2. STRATEGIC PICK must be a DIFFERENT player than the Safe Pick. Use PICKERS BEFORE YOUR NEXT TURN and HOW MANY OF THOSE PICKERS STILL NEED EACH POSITION (this is real computed data, not a guess) to reason about scarcity risk - e.g. if 2 of those pickers still need a GK and only one elite GK is left, that GK may be gone before your next turn. It must also weigh fixture runs and differential value. State in strategicReason specifically which rival need or scarcity number drove this choice (cite the actual number, e.g. \"2 of the 3 pickers before your next turn still need a GK\").",
-      "3. injuryStatus is authoritative from official FPL data: 'fit'=no concern. 'doubtful'/'injured'/'suspended' with injuryChance between 1-75 = include with warning citing injuryNews if present. Players already excluded had injuryChance=0. 'unknown' means no official data was available (a legacy-loaded player) - use injuryNews/Claude judgement instead.",
-      "4. If the deterministic Safe Pick has a decline flag or a doubtful/partial-chance injury, mention it in safeWarning, but DO NOT change the pick itself.",
-      "Return JSON only: {safePick:{name,club,position,fplPrice,lastSeasonPts,rating},safeReason:'2-3 sentences stats-focused',safeWarning:'decline or injury warning or empty',strategicPick:{name,club,position,fplPrice,lastSeasonPts,rating},strategicReason:'2-3 sentences on WHY this is smart strategically, citing the specific rival-need numbers used',strategicWarning:'any risk to be aware of or empty',scarcity:'position scarcity warning or empty',nextTarget:'what to aim for next turn',excluded:"+JSON.stringify(excluded)+"}"
+      "2. STRATEGIC PICK must be a DIFFERENT player than the Safe Pick. It MUST explicitly reason about: who picks before your next turn (from NEXT 20 PICKS) and what positions they likely need, scarcity at this position, fixture runs, and differential value. State in strategicReason specifically what rival behaviour or scarcity factor drove this choice (e.g. \"3 GK-needing teams pick before your next turn\").",
+      "3. Minor injury (injuryStatus=minor) = include with warning. Only confirmed-out players are excluded (already filtered).",
+      "4. If the deterministic Safe Pick has a decline flag or minor injury, mention it in safeWarning, but DO NOT change the pick itself.",
+      "Return JSON only: {safePick:{name,club,position,fplPrice,lastSeasonPts,rating},safeReason:'2-3 sentences stats-focused',safeWarning:'decline or minor injury warning or empty',strategicPick:{name,club,position,fplPrice,lastSeasonPts,rating},strategicReason:'2-3 sentences on WHY this is smart strategically',strategicWarning:'any risk to be aware of or empty',scarcity:'position scarcity warning or empty',nextTarget:'what to aim for next turn',excluded:"+JSON.stringify(excluded)+"}"
     ];
     var sys=sysLines.join(" ");
     var rec=await withTimeout(callClaude(sys,"Give me two draft pick recommendations: one stats-led Safe Pick and one Strategic Pick.",800),30000,"Recommendation");
@@ -1501,8 +1437,7 @@ function confirmEndDraft(){
 function endDraft(){
   S.draftDone=true; S.hideDraft=true;
   saveAll(); closeModal(); renderTopBar();
-  document.querySelectorAll(".nav-btn[data-tab='pool']").forEach(function(b){b.style.display="";});
-  document.querySelectorAll(".nav-btn[data-tab='stats']").forEach(function(b){b.style.display="";});
+  updateDraftNavVisibility();
   showTab(S.defaultTab||"myteam");
 }
 
@@ -1902,8 +1837,14 @@ function renderLeagueTab(){
     html+='<td style="font-size:12px;">'+s.cap+ct+'</td></tr>';
   });
   html+='</tbody></table></div>';
-  html+='<div class="sec-hdr">Cumulative Points (to GW'+viewGW+')</div><div class="chart-wrap"><canvas id="cumul-chart"></canvas></div>';
-  html+='<div class="sec-hdr">Points Per Gameweek (to GW'+viewGW+')</div><div class="chart-wrap"><canvas id="gw-chart"></canvas></div>';
+  html+='<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">';
+  html+='<div class="sec-hdr" style="margin:0;">Cumulative Points (to GW'+viewGW+')</div>';
+  html+='<select class="inp" style="width:auto;margin:0;font-size:11px;padding:5px 8px;" onchange="cumulChartRange=this.value;drawCumulChartToGW(totwGW);">'+chartRangeOptions(cumulChartRange)+'</select>';
+  html+='</div><div class="chart-wrap"><canvas id="cumul-chart"></canvas></div>';
+  html+='<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-top:8px;">';
+  html+='<div class="sec-hdr" style="margin:0;">Points Per Gameweek (to GW'+viewGW+')</div>';
+  html+='<select class="inp" style="width:auto;margin:0;font-size:11px;padding:5px 8px;" onchange="gwChartRange=this.value;drawGWChartToGW(totwGW);">'+chartRangeOptions(gwChartRange)+'</select>';
+  html+='</div><div class="chart-wrap"><canvas id="gw-chart"></canvas></div>';
   html+='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px;">';
   html+='<div class="sec-hdr" style="margin:0;">&#x1F4C5; Team of the Week &mdash; GW'+viewGW+'</div>';
   html+='<button onclick="shareTOTW()" style="background:rgba(16,185,129,0.12);border:1px solid #10b981;color:#10b981;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:12px;font-weight:700;font-family:Bangers,cursive;letter-spacing:1px;">&#x1F4F2; Share TOTW</button>';
@@ -1943,14 +1884,14 @@ async function doRefreshScores(){
   showModal(msg);
   function upd(t,col){ var el=document.getElementById("rfprog"); if(el){el.textContent=t; if(col)el.style.color=col;} }
   try{
-    upd("Getting current gameweek from official FPL API...");
-    var cgw = await getCurrentGameweekFromApi();
+    upd("Getting current gameweek...");
+    var sys1="Premier League FPL assistant. Today: "+new Date().toDateString()+". Return ONLY JSON: {currentGW: number}. What is the current FPL gameweek?";
+    var raw1=await callClaude(sys1,"Current FPL gameweek as JSON.",100);
+    var gwd=extractJSON(raw1);
+    if(!gwd||!gwd.currentGW) throw new Error("Could not get gameweek");
+    var cgw=parseInt(gwd.currentGW);
+    if(isNaN(cgw)||cgw<1||cgw>38) throw new Error("Invalid GW: "+cgw);
     S.currentGW=cgw;
-    if(cgw<1){
-      upd("Preseason - no gameweeks played yet","#10b981");
-      sv("meta",{lastRefreshed:S.lastRefreshed,currentGW:S.currentGW,lastBackup:S.lastBackup});
-      setTimeout(closeModal,1500); renderLeagueTab(); renderSettingsTab(); return;
-    }
     var needed=[];
     for(var g=cgw;g>=1;g--){ if(!S.scores[g]) needed.push(g); if(needed.length>=3) break; }
     if(needed.length===0){
@@ -1962,10 +1903,19 @@ async function doRefreshScores(){
     for(var ni=0;ni<needed.length;ni++){
       var gw=needed[ni];
       upd("Fetching GW"+gw+" scores ("+(ni+1)+"/"+needed.length+")...");
+      var sys2="FPL assistant. Fetch https://fantasy.premierleague.com/api/event/"+gw+"/live/ and return player points for GW"+gw+". ONLY JSON: {web_name: points}. Raw JSON starting with {.";
       try{
-        var byId = await fetchGWLiveScores(gw);
-        S.scores[gw] = mapLiveScoresToTeam(byId);
-      }catch(e2){ console.warn("GW"+gw+" failed:", e2.message); }
+        var raw2=await callClaude(sys2,"GW"+gw+" points as JSON.",4000);
+        var gws=extractJSON(raw2);
+        if(gws&&typeof gws==="object"&&!Array.isArray(gws)){
+          var mapped={};
+          getAllPlayers().forEach(function(p){
+            var nl=p.name.toLowerCase(),sh=p.name.split(" ").pop().toLowerCase();
+            mapped[p.name+"|"+p.club]=parseInt(gws[p.name]||gws[nl]||gws[sh]||0)||0;
+          });
+          S.scores[gw]=mapped;
+        }
+      }catch(e2){ console.warn("GW"+gw+" failed"); }
     }
     S.lastRefreshed=new Date().toISOString();
     sv("scores",S.scores); sv("meta",{lastRefreshed:S.lastRefreshed,currentGW:S.currentGW});
@@ -2112,8 +2062,7 @@ function autoFillDraft(){
   S.draftDone=true; S.hideDraft=true;
   saveAll();
   renderTopBar(); checkCaptainBanner();
-  document.querySelectorAll(".nav-btn[data-tab='pool']").forEach(function(b){b.style.display="";});
-  document.querySelectorAll(".nav-btn[data-tab='stats']").forEach(function(b){b.style.display="";});
+  updateDraftNavVisibility();
   showToast("Test data filled — 5 GWs of fake scores generated!");
   closeModal();
   showTab("myteam");
@@ -2280,6 +2229,8 @@ var searchQuery="";
 
 
 var totwGW=null;
+var cumulChartRange="5";   // '5'|'10'|'15'|'all' - independent filter for the Cumulative Points chart
+var gwChartRange="5";      // '5'|'10'|'15'|'all' - independent filter for the Points Per Gameweek chart
 
 
 function getBestXI(gwNum){
@@ -2349,8 +2300,6 @@ function renderStatsTab(){
     html+=renderXITable(getBestXI(null),true);
   }
   html+=renderStatsSection(standings);
-  html+='<div class="sec-hdr">Points by Position</div><div class="chart-wrap"><canvas id="pos-chart"></canvas></div>';
-  html+='<div class="sec-hdr">Monthly Performance</div><div class="chart-wrap"><canvas id="monthly-chart"></canvas></div>';
   html+='</div>';
   el.innerHTML=html;
   setTimeout(function(){drawPosChart();drawMonthlyChart();},150);
@@ -2916,8 +2865,7 @@ document.addEventListener("DOMContentLoaded",function(){
   loadAll();
   if(S.apiKey){ var ak=document.getElementById("setup-apikey"); if(ak) ak.value=S.apiKey; }
   // Tab visibility
-  document.querySelectorAll(".nav-btn[data-tab='pool']").forEach(function(b){b.style.display=S.draftDone?"":"none";});
-  document.querySelectorAll(".nav-btn[data-tab='stats']").forEach(function(b){b.style.display=S.draftDone?"":"none";});
+  updateDraftNavVisibility();
   // Always show welcome screen first
   renderWelcomeScreen();
   showScreen("welcome");
@@ -3067,15 +3015,22 @@ function renderStatsSection(standings){
   bestGW.forEach(function(b){html+='<tr><td style="font-weight:700;">'+b.name+(b.name===S.myName?" &#x1F464;":"")+'</td><td>GW'+(b.gw||"-")+'</td><td style="color:#10b981;font-weight:700;">'+b.pts+'</td></tr>';});
   html+='</tbody></table>';
 
-  // Week by week rank changes
-  html+='<div class="sec-hdr">Gameweek Rank Changes</div>';
+  // Week by week rank changes - most recent weeks, not always GW1-10
+  var rankStartGW=Math.max(1,S.currentGW-9);
+  html+='<div class="sec-hdr">Gameweek Rank Changes'+(rankStartGW>1?' (last 10 GWs)':'')+'</div>';
   html+='<div style="overflow-x:auto;margin-bottom:16px;"><table class="tbl"><thead><tr><th>Name</th>';
-  for(var g=1;g<=Math.min(S.currentGW,10);g++) html+='<th>GW'+g+'</th>';
+  for(var g=rankStartGW;g<=S.currentGW;g++) html+='<th>GW'+g+'</th>';
   html+='</tr></thead><tbody>';
   S.draftOrder.forEach(function(name){
     html+='<tr><td style="font-weight:700;">'+name+(name===S.myName?" &#x1F464;":"")+'</td>';
+    // Rank going into the window is used as the baseline so the first arrow shown is meaningful,
+    // not blank, even when the window doesn't start at GW1.
     var prevRank=null;
-    for(var g=1;g<=Math.min(S.currentGW,10);g++){
+    if(rankStartGW>1){
+      var baseline=S.draftOrder.map(function(n){return {name:n,pts:getPersonTotalPts(n,rankStartGW-1)};}).sort(function(a,b){return b.pts-a.pts;});
+      prevRank=baseline.findIndex(function(r){return r.name===name;})+1;
+    }
+    for(var g=rankStartGW;g<=S.currentGW;g++){
       var ranked=S.draftOrder.map(function(n){return {name:n,pts:getPersonTotalPts(n,g)};}).sort(function(a,b){return b.pts-a.pts;});
       var rank=ranked.findIndex(function(r){return r.name===name;})+1;
       var arrow="";
@@ -3136,11 +3091,21 @@ function drawExtraCharts(){
   drawMonthlyChart();
 }
 
+function chartRangeStart(maxGW,rangeFilter){
+  if(rangeFilter==="all") return 1;
+  var n=parseInt(rangeFilter,10)||5;
+  return Math.max(1,maxGW-n+1);
+}
+function chartRangeOptions(sel){
+  var opts=[["all","Show all weeks"],["15","Past 15 weeks"],["10","Past 10 weeks"],["5","Past 5 weeks"]];
+  return opts.map(function(o){return '<option value="'+o[0]+'"'+(o[0]===sel?" selected":"")+'>'+o[1]+'</option>';}).join("");
+}
 function drawCumulChartToGW(maxGW){
   var ctx=document.getElementById("cumul-chart");
   if(!ctx) return;
   if(cumulChart) cumulChart.destroy();
-  var gws=Array.from({length:maxGW},function(_,i){return i+1;});
+  var startGW=chartRangeStart(maxGW,cumulChartRange);
+  var gws=Array.from({length:maxGW-startGW+1},function(_,i){return startGW+i;});
   var datasets=S.draftOrder.map(function(name,i){return {label:name,data:gws.map(function(g){return getPersonTotalPts(name,g);}),borderColor:CHART_COLORS[i%CHART_COLORS.length],backgroundColor:"transparent",borderWidth:name===S.myName?3:1.5,pointRadius:3,tension:0.3};});
   cumulChart=new Chart(ctx,{type:"line",data:{labels:gws.map(function(g){return "GW"+g;}),datasets:datasets},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:"#8b949e",font:{size:11}}}},scales:{x:{ticks:{color:"#484f58",font:{size:10}}},y:{ticks:{color:"#484f58",font:{size:10}},grid:{color:"#21262d"}}}}});
 }
@@ -3148,7 +3113,8 @@ function drawGWChartToGW(maxGW){
   var ctx=document.getElementById("gw-chart");
   if(!ctx) return;
   if(gwChart) gwChart.destroy();
-  var gws=Array.from({length:maxGW},function(_,i){return i+1;});
+  var startGW=chartRangeStart(maxGW,gwChartRange);
+  var gws=Array.from({length:maxGW-startGW+1},function(_,i){return startGW+i;});
   var datasets=S.draftOrder.map(function(name,i){return {label:name,data:gws.map(function(g){return getPersonGWPts(name,g);}),borderColor:CHART_COLORS[i%CHART_COLORS.length],backgroundColor:CHART_COLORS[i%CHART_COLORS.length]+"22",borderWidth:name===S.myName?3:1.5,pointRadius:3,tension:0.3};});
   gwChart=new Chart(ctx,{type:"line",data:{labels:gws.map(function(g){return "GW"+g;}),datasets:datasets},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:"#8b949e",font:{size:11}}}},scales:{x:{ticks:{color:"#484f58",font:{size:10}}},y:{ticks:{color:"#484f58",font:{size:10}},grid:{color:"#21262d"}}}}});
 }
