@@ -418,7 +418,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-07-25.1";
+const APP_VERSION = "2026-07-25.2";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 const TOTAL_PICKS = 17;
 const CHART_COLORS = ["#10b981","#3b82f6","#f59e0b","#ef4444","#8b5cf6","#ec4899","#06b6d4","#84cc16","#f97316","#a855f7","#14b8a6","#eab308"];
@@ -2460,7 +2460,21 @@ function renderStatsTab(){
   html+=renderStatsSection(standings);
   html+='</div>';
   el.innerHTML=html;
-  setTimeout(function(){drawPosChart();drawMonthlyChart();},150);
+  setTimeout(function(){
+    // Each chart is wrapped independently so a failure in one can't silently prevent
+    // the other from drawing, and any error is shown right in the chart's own box
+    // instead of only going to a console that's hard to reach on mobile.
+    try{ drawPosChart(); }catch(e){
+      console.error("drawPosChart failed:", e);
+      var w=document.getElementById("pos-chart");
+      if(w&&w.parentNode) w.parentNode.innerHTML='<div class="error-msg" style="font-size:11px;">Points by Position chart error: '+e.message+'</div>';
+    }
+    try{ drawMonthlyChart(); }catch(e){
+      console.error("drawMonthlyChart failed:", e);
+      var w2=document.getElementById("monthly-chart");
+      if(w2&&w2.parentNode) w2.parentNode.innerHTML='<div class="error-msg" style="font-size:11px;">Monthly Performance chart error: '+e.message+'</div>';
+    }
+  },150);
 }
 
 
