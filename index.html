@@ -414,7 +414,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-08-09.3";
+const APP_VERSION = "2026-08-09.4";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 const TOTAL_PICKS = 17;
 const CHART_COLORS = ["#10b981","#3b82f6","#f59e0b","#ef4444","#8b5cf6","#ec4899","#06b6d4","#84cc16","#f97316","#a855f7","#14b8a6","#eab308"];
@@ -657,7 +657,7 @@ async function fetchPLClubs(){
 // old Claude-search loader (fetchPLClubs/loadClubBatches below) suffered from.
 // The FPL API blocks direct browser calls with a hard CORS policy, so requests
 // are routed through a chain of CORS proxies, tried in order until one works.
-async function fetchWithFallback(url){
+async function fetchWithFallback(url, validateFn, onProgress){
   // Corsfix is tried first: it's a real commercial CORS-proxy service (now registered
   // for this domain at app.corsfix.com), which has proven more reliable than AllOrigins
   // for a payload this size (~2-4MB) - AllOrigins was consistently failing with a
@@ -668,18 +668,22 @@ async function fetchWithFallback(url){
     {label:"AllOrigins", fn:function(){ return fetch("https://api.allorigins.win/raw?url="+encodeURIComponent(url),{headers:{"Accept":"application/json"}}); }},
     {label:"direct", fn:function(){ return fetch(url,{headers:{"Accept":"application/json"}}); }}
   ];
-  // Collect every attempt's failure reason (not just the last one) so it can be shown
-  // in the app's own UI - console.warn alone is invisible on mobile, where most of this
-  // app's actual usage happens.
+  // validateFn lets callers check the shape of THEIR endpoint's response - bootstrap-static
+  // (elements+teams) and the live-scores endpoint (elements only, different inner shape) are
+  // not the same shape, so this can no longer be hardcoded to one endpoint's expectations.
+  var validate = validateFn || function(data){ return data && Array.isArray(data.elements) && Array.isArray(data.teams); };
+  // onProgress lets callers report status into their OWN UI (loading screen vs. a refresh
+  // modal) instead of this function reaching into the player-load screen's DOM directly.
+  var report = onProgress || function(label){ setLoadUI(6,"Fetching official FPL data via "+label+"...",{},[],0,null); };
   var failures = [];
   for(var i=0;i<attempts.length;i++){
     try{
-      setLoadUI(6,"Fetching official FPL data via "+attempts[i].label+"...",{},[],0,null);
+      report(attempts[i].label);
       var r = await attempts[i].fn();
       if(!r.ok) throw new Error("HTTP "+r.status);
       var text = await r.text();
       var data = JSON.parse(text);
-      if(data && Array.isArray(data.elements) && Array.isArray(data.teams)) return data;
+      if(validate(data)) return data;
       throw new Error("unexpected response shape");
     }catch(e){
       failures.push(attempts[i].label+": "+e.message);
@@ -1087,16 +1091,19 @@ function proceedToApp(){
 // ── FPL SCORE REFRESH ──────────────────────────────────────────────────────────
 async function refreshScores(){
   try{
-    // Step 1: Get current gameweek
-    var sys1 = 'You are a Premier League fantasy football assistant. Today is ' + new Date().toDateString() + '. What is the current Premier League FPL gameweek number? Return ONLY a JSON object like this: {"currentGW": 12}. Raw JSON only.';
-    var raw1 = await callClaude(sys1, 'What is the current FPL gameweek? Return JSON only.', 100);
-    var gwData = extractJSON(raw1);
-    if(!gwData || !gwData.currentGW) throw new Error('Could not determine current gameweek');
-    var currentGW = parseInt(gwData.currentGW);
-    if(isNaN(currentGW) || currentGW < 1 || currentGW > 38) throw new Error('Invalid gameweek: ' + currentGW);
+    // Get the REAL current gameweek from FPL's own bootstrap-static events array
+    // (is_current/finished flags), instead of asking the AI to guess today's gameweek.
+    var bootstrap = await fetchWithFallback(
+      "https://fantasy.premierleague.com/api/bootstrap-static/",
+      function(data){ return data && Array.isArray(data.elements) && Array.isArray(data.teams); },
+      function(){} // silent background refresh - no UI to report progress into
+    );
+    var events = bootstrap.events||[];
+    var currentEvt = events.find(function(e){ return e.is_current; });
+    var finishedIds = events.filter(function(e){ return e.finished; }).map(function(e){ return e.id; });
+    var currentGW = currentEvt ? currentEvt.id : (finishedIds.length ? Math.max.apply(null,finishedIds) : 1);
     S.currentGW = currentGW;
 
-    // Step 2: Fetch scores one gameweek at a time (most recent first)
     var needed = [];
     for(var g = currentGW; g >= 1; g--){
       if(!S.scores[g]) needed.push(g);
@@ -1104,22 +1111,24 @@ async function refreshScores(){
       if(needed.length >= 3) break;
     }
 
+    var idToKey={};
+    getAllPlayers().forEach(function(p){ if(p.fplId!=null) idToKey[p.fplId]=p.name+"|"+p.club; });
+
     for(var ni = 0; ni < needed.length; ni++){
       var gw = needed[ni];
-      var sys2 = 'You are a Premier League fantasy football assistant. Fetch the FPL API at https://fantasy.premierleague.com/api/event/' + gw + '/live/ and return the points scored by each player in gameweek ' + gw + '. Return ONLY a JSON object where keys are player web_names (short names like "Salah", "Haaland") and values are their integer points for that gameweek. Raw JSON only starting with {.';
       try{
-        var raw2 = await callClaude(sys2, 'Get FPL points for all players in gameweek ' + gw + '. Return as JSON object mapping web_name to points.', 4000);
-        var gwScores = extractJSON(raw2);
-        if(gwScores && typeof gwScores === 'object' && !Array.isArray(gwScores)){
-          var mapped = {};
-          getAllPlayers().forEach(function(p){
-            var webName = p.name.toLowerCase();
-            var shortName = p.name.split(' ').pop().toLowerCase();
-            var pts = gwScores[p.name] || gwScores[webName] || gwScores[shortName] || 0;
-            mapped[p.name + '|' + p.club] = parseInt(pts) || 0;
-          });
-          S.scores[gw] = mapped;
-        }
+        var liveData = await fetchWithFallback(
+          "https://fantasy.premierleague.com/api/event/"+gw+"/live/",
+          function(data){ return data && Array.isArray(data.elements); },
+          function(){}
+        );
+        var mapped = {};
+        liveData.elements.forEach(function(el){
+          var key=idToKey[el.id];
+          if(!key) return;
+          mapped[key]=(el.stats&&el.stats.total_points)||0;
+        });
+        S.scores[gw] = mapped;
       }catch(e){
         console.warn('GW ' + gw + ' scores failed:', e.message);
       }
@@ -1139,7 +1148,8 @@ async function refreshScores(){
 // Only runs if draft is done and last refresh was more than 6 hours ago
 async function autoRefreshIfNeeded(){
   if(!S.draftDone) return;
-  if(!S.apiKey) return;
+  // No API key check needed - refreshScores() now fetches real FPL data directly via
+  // the proxy chain and no longer calls the Anthropic API at all.
   checkSeasonEnd();
   var sixHours = 6 * 60 * 60 * 1000;
   var lastRefresh = S.lastRefreshed ? new Date(S.lastRefreshed).getTime() : 0;
@@ -2082,20 +2092,29 @@ function drawGWChart(){
 
 async function doRefreshScores(){
   var msg='<h3>&#x1F504; Refreshing Scores</h3>';
-  msg+='<p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Fetching latest FPL data. This may take 20-30 seconds.</p>';
+  msg+='<p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Fetching real data directly from the official FPL API.</p>';
   msg+='<div id="rfprog" style="color:#10b981;font-size:13px;margin-bottom:14px;">Starting...</div>';
   msg+='<div class="spinner"><div class="dot"></div><div class="dot" style="animation-delay:0.2s"></div><div class="dot" style="animation-delay:0.4s"></div></div>';
   showModal(msg);
   function upd(t,col){ var el=document.getElementById("rfprog"); if(el){el.textContent=t; if(col)el.style.color=col;} }
+  // Local progress reporter for fetchWithFallback that writes into THIS modal instead of
+  // the player-loading screen's DOM (which isn't present here).
+  function modalProgress(label){ upd("Connecting via "+label+"..."); }
   try{
-    upd("Getting current gameweek...");
-    var sys1="Premier League FPL assistant. Today: "+new Date().toDateString()+". Return ONLY JSON: {currentGW: number}. What is the current FPL gameweek?";
-    var raw1=await callClaude(sys1,"Current FPL gameweek as JSON.",100);
-    var gwd=extractJSON(raw1);
-    if(!gwd||!gwd.currentGW) throw new Error("Could not get gameweek");
-    var cgw=parseInt(gwd.currentGW);
-    if(isNaN(cgw)||cgw<1||cgw>38) throw new Error("Invalid GW: "+cgw);
+    // Step 1: get the REAL current gameweek from FPL's own bootstrap-static events array
+    // (is_current/finished flags), instead of asking the AI to guess today's gameweek.
+    upd("Getting current gameweek from official FPL data...");
+    var bootstrap = await fetchWithFallback(
+      "https://fantasy.premierleague.com/api/bootstrap-static/",
+      function(data){ return data && Array.isArray(data.elements) && Array.isArray(data.teams); },
+      modalProgress
+    );
+    var events = bootstrap.events||[];
+    var currentEvt = events.find(function(e){ return e.is_current; });
+    var finishedIds = events.filter(function(e){ return e.finished; }).map(function(e){ return e.id; });
+    var cgw = currentEvt ? currentEvt.id : (finishedIds.length ? Math.max.apply(null,finishedIds) : 1);
     S.currentGW=cgw;
+
     var needed=[];
     for(var g=cgw;g>=1;g--){ if(!S.scores[g]) needed.push(g); if(needed.length>=3) break; }
     if(needed.length===0){
@@ -2104,26 +2123,34 @@ async function doRefreshScores(){
       sv("meta",{lastRefreshed:S.lastRefreshed,currentGW:S.currentGW,lastBackup:S.lastBackup});
       setTimeout(closeModal,1500); renderLeagueTab(); renderSettingsTab(); return;
     }
+
+    // Build fplId -> playerKey lookup once from every drafted player (free-typed non-PL
+    // wildcards have no fplId and are intentionally excluded - they score 0 until subbed
+    // in, which is the existing, correct behaviour for those).
+    var idToKey={};
+    getAllPlayers().forEach(function(p){ if(p.fplId!=null) idToKey[p.fplId]=p.name+"|"+p.club; });
+
     for(var ni=0;ni<needed.length;ni++){
       var gw=needed[ni];
       upd("Fetching GW"+gw+" scores ("+(ni+1)+"/"+needed.length+")...");
-      var sys2="FPL assistant. Fetch https://fantasy.premierleague.com/api/event/"+gw+"/live/ and return player points for GW"+gw+". ONLY JSON: {web_name: points}. Raw JSON starting with {.";
       try{
-        var raw2=await callClaude(sys2,"GW"+gw+" points as JSON.",4000);
-        var gws=extractJSON(raw2);
-        if(gws&&typeof gws==="object"&&!Array.isArray(gws)){
-          var mapped={};
-          getAllPlayers().forEach(function(p){
-            var nl=p.name.toLowerCase(),sh=p.name.split(" ").pop().toLowerCase();
-            mapped[p.name+"|"+p.club]=parseInt(gws[p.name]||gws[nl]||gws[sh]||0)||0;
-          });
-          S.scores[gw]=mapped;
-        }
-      }catch(e2){ console.warn("GW"+gw+" failed"); }
+        var liveData = await fetchWithFallback(
+          "https://fantasy.premierleague.com/api/event/"+gw+"/live/",
+          function(data){ return data && Array.isArray(data.elements); },
+          modalProgress
+        );
+        var mapped={};
+        liveData.elements.forEach(function(el){
+          var key=idToKey[el.id];
+          if(!key) return; // player not on anyone's drafted roster - irrelevant to us
+          mapped[key]=(el.stats&&el.stats.total_points)||0;
+        });
+        S.scores[gw]=mapped;
+      }catch(e2){ console.warn("GW"+gw+" failed: "+e2.message); }
     }
     S.lastRefreshed=new Date().toISOString();
     sv("scores",S.scores); sv("meta",{lastRefreshed:S.lastRefreshed,currentGW:S.currentGW});
-    upd("Done! GW"+S.currentGW+" loaded.","#10b981");
+    upd("Done! GW"+S.currentGW+" loaded from official FPL data.","#10b981");
     setTimeout(closeModal,1500); renderLeagueTab(); renderSettingsTab();
   }catch(e){
     upd("Failed: "+e.message,"#ef4444");
@@ -2377,7 +2404,7 @@ function doImportBackup(){
 function openScoreOverride(){
   var players=getAllPlayers();
   var msg='<h3>&#x270F; Manual Score Override</h3>';
-  msg+='<p style="color:#8b949e;font-size:13px;margin-bottom:10px;">Override a player score for a specific gameweek if Claude returned incorrect data.</p>';
+  msg+='<p style="color:#8b949e;font-size:13px;margin-bottom:10px;">Manually correct a player\'s score for a specific gameweek, e.g. if FPL\'s own data is later revised (bonus points are sometimes adjusted a day or two after a gameweek).</p>';
   msg+='<label class="lbl">Gameweek</label>';
   msg+='<select class="inp" id="ov-gw" style="margin-bottom:10px;">';
   for(var g=1;g<=Math.max(S.currentGW,1);g++) msg+='<option value="'+g+'"'+(g===S.currentGW?" selected":"")+'>GW'+g+'</option>';
