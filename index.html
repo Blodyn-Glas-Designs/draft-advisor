@@ -1286,8 +1286,14 @@ async function generateAdvice(){
 
   try{
     // Step 1: Hard filter check — injuries and transfers
-    var filterSys="You are a Premier League injury and transfer analyst. Today: "+new Date().toDateString()+". For each player search for: confirmed serious injuries (ACL, cruciate, broken bones, 8+ weeks out) AND confirmed or highly likely transfers OUT of the Premier League (to Saudi Arabia, MLS, Serie A, Ligue 1 etc). Return JSON only: {playerName: {injuryStatus:'fit'|'minor'|'major'|'confirmed-out', injuryDetail:string_or_null, estimatedReturn:string_or_null, transferRisk:'none'|'possible-pl-exit'|'confirmed-pl-exit', transferDetail:string_or_null}}. Raw JSON starting with {.";
-    var filterRaw=await withTimeout(callClaude(filterSys,"Check injuries and transfer status for: "+top15,2000),30000,"Filter");
+    // Uses callClaudeWithSearch (real web search) rather than plain AI recall, because this
+    // call actually REMOVES players from the candidate pool below - a false "confirmed-out"
+    // from stale training data would silently shrink Safe/Strategic Pick options, which is
+    // exactly the failure mode the FPL API rebuild was meant to fix elsewhere in this file.
+    // newsSys/declineSys (below) stay on plain callClaude since they only add context text,
+    // not exclusions, and running three search calls per turn would slow down live drafting.
+    var filterSys="You are a Premier League injury and transfer analyst. Today: "+new Date().toDateString()+". Use web search to check each player for: confirmed serious injuries (ACL, cruciate, broken bones, 8+ weeks out) AND confirmed or highly likely transfers OUT of the Premier League (to Saudi Arabia, MLS, Serie A, Ligue 1 etc). Do not rely on memory - search for current news on each player. Once you have real search results, respond with ONLY raw JSON, no markdown, no explanation text before or after: {playerName: {injuryStatus:'fit'|'minor'|'major'|'confirmed-out', injuryDetail:string_or_null, estimatedReturn:string_or_null, transferRisk:'none'|'possible-pl-exit'|'confirmed-pl-exit', transferDetail:string_or_null}}.";
+    var filterRaw=await withTimeout(callClaudeWithSearch(filterSys,"Check injuries and transfer status for: "+top15,3000,6),45000,"Filter");
     var hardFilters={};
     try{ hardFilters=extractJSON(filterRaw)||{}; }catch(e){ console.warn("Filter parse failed"); }
 
