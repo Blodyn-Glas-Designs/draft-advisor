@@ -414,7 +414,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-08-09.2";
+const APP_VERSION = "2026-08-09.3";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 const TOTAL_PICKS = 17;
 const CHART_COLORS = ["#10b981","#3b82f6","#f59e0b","#ef4444","#8b5cf6","#ec4899","#06b6d4","#84cc16","#f97316","#a855f7","#14b8a6","#eab308"];
@@ -1861,6 +1861,24 @@ function confirmSub(personName,wcIdx,outName,outClub,outPos,outIdx){
   var wcPlayer=(team.WC||[])[wcIdx];
   var outPlayer=(team[outPos]||[])[outIdx];
   if(!wcPlayer||!outPlayer){closeModal();return;}
+  // Genuine second confirmation before an irreversible action - previously tapping a
+  // player row committed the sub instantly despite the modal text warning it's permanent.
+  var html='<h3>&#x26A0; Confirm Substitution</h3>';
+  html+='<p style="color:#8b949e;font-size:13px;margin-bottom:6px;">This cannot be undone.</p>';
+  html+='<div class="card" style="margin-bottom:14px;">';
+  html+='<div style="color:#ef4444;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px;">Out (stops scoring now)</div>';
+  html+='<div class="pname" style="margin-bottom:10px;">'+outPlayer.name+' <span style="color:#8b949e;font-size:12px;">('+outPlayer.club+')</span></div>';
+  html+='<div style="color:#10b981;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px;">In</div>';
+  html+='<div class="pname">'+wcPlayer.name+'</div>';
+  html+='</div>';
+  html+='<div class="confirm-btns"><button class="cb-yes" onclick="executeSub(\''+personName.replace(/'/g,"\\'")+'\','+wcIdx+',\''+outName.replace(/'/g,"\\'")+'\',\''+outClub.replace(/'/g,"\\'")+'\',\''+outPos+'\','+outIdx+')">&#x2713; Confirm Swap</button><button class="cb-no" onclick="closeModal()">Cancel</button></div>';
+  showModal(html);
+}
+function executeSub(personName,wcIdx,outName,outClub,outPos,outIdx){
+  var team=S.teams[personName]||{};
+  var wcPlayer=(team.WC||[])[wcIdx];
+  var outPlayer=(team[outPos]||[])[outIdx];
+  if(!wcPlayer||!outPlayer){closeModal();return;}
   if(!S.wildcardSubs[personName]) S.wildcardSubs[personName]=[];
   S.wildcardSubs[personName].push({inPlayer:wcPlayer,outPlayer:outPlayer,gameweek:S.currentGW,wcIdx:wcIdx,outPos:outPos,outIdx:outIdx});
   sv("wildcards",S.wildcardSubs);
@@ -2142,11 +2160,10 @@ function renderSettingsTab(){
   html+='</div>';
   html+='<div class="card">';
   html+='<div style="font-weight:700;margin-bottom:6px;">Data</div>';
-  html+='<div style="color:#8b949e;font-size:12px;margin-bottom:12px;">Players: '+S.playerPool.length+' &middot; GW: '+S.currentGW+' &middot; Last refresh: '+(S.lastRefreshed?new Date(S.lastRefreshed).toLocaleDateString():"Never")+'</div>';
+  html+='<div style="color:#8b949e;font-size:12px;margin-bottom:12px;">Players: '+S.playerPool.length+' &middot; Scores through GW'+S.currentGW+(S.scores[S.currentGW]?'':' (not yet fetched)')+' &middot; Last refresh: '+(S.lastRefreshed?new Date(S.lastRefreshed).toLocaleString():"Never")+'</div>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;" onclick="doRefreshScores()">&#x1F504; Refresh Scores</button>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #8b5cf6;color:#8b5cf6;" onclick="confirmAutoFill()">&#x1F3B2; Auto-Fill Test Data</button>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;" onclick="openScoreOverride()">&#x270F; Manual Score Override</button>';
-  html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #8b5cf6;color:#a78bfa;" onclick="confirmBacktest()">&#x1F9EA; Backtest Advice (2024/25)</button>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #10b981;color:#10b981;" onclick="exportBackup()">&#x2B07; Export Backup</button>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #10b981;color:#10b981;" onclick="importBackup()">&#x2B06; Import Backup</button>';
   html+='<button class="btn btn-gray" onclick="confirmReset()">&#x26A0; Reset Data</button>';
@@ -2390,7 +2407,15 @@ function doScoreOverride(){
 function checkSeasonEnd(){
   if(!S.draftDone||S.currentGW<38) return;
   var cfg=ld("cfg",{});
-  if(!cfg.seasonComplete){ cfg.seasonComplete=true; sv("cfg",cfg); }
+  if(!cfg.seasonComplete){
+    cfg.seasonComplete=true; sv("cfg",cfg);
+    // Fire the summary automatically the first time the season completes, rather than
+    // silently flipping a flag nothing else reads. Only fires once (guarded by the flag
+    // above) - the manual "Season Summary" button on the welcome screen (gated on the same
+    // S.currentGW>=38 condition) remains available as a fallback regardless of whether
+    // this auto-trigger runs, e.g. if the app wasn't open at the exact moment GW38 landed.
+    setTimeout(function(){ renderSeasonSummary(); },500);
+  }
 }
 function renderSeasonSummary(){
   var standings=S.draftOrder.map(function(n){return {name:n,total:getPersonTotalPts(n)};}).sort(function(a,b){return b.total-a.total;});
@@ -2481,6 +2506,9 @@ function renderStatsTab(){
   if(Object.keys(S.scores).length===0){
     html+='<div class="warn">No scores loaded yet.</div>';
   } else {
+    if(!S.scores[S.currentGW]){
+      html+='<div class="warn" style="margin-bottom:10px;">&#x26A0; GW'+S.currentGW+' scores haven\'t been refreshed yet - figures below reflect GW'+(S.currentGW-1)+' and earlier. Use Refresh Scores in Settings to update.</div>';
+    }
     html+=renderXITable(getBestXI(null),true);
   }
   html+=renderStatsSection(standings);
@@ -2540,85 +2568,6 @@ function resumeInterruptedLoad(){
     });
   }, 100);
 }
-
-
-
-function confirmBacktest(){
-  var msg='<h3>&#x1F9EA; Backtest Advice Quality</h3>';
-  msg+='<p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Simulates what the advisor would have recommended for pick 1 in August 2024, then checks what those players actually scored in 2024/25. Useful for validating advice quality.</p>';
-  msg+='<p style="color:#fbbf24;font-size:12px;margin-bottom:14px;">Uses 2-3 API calls. Takes about 30 seconds.</p>';
-  msg+='<button class="btn btn-blue" style="margin-bottom:8px;" onclick="runBacktest()">&#x1F9EA; Run Backtest</button>';
-  msg+='<button class="btn btn-gray" onclick="closeModal()">Cancel</button>';
-  showModal(msg);
-}
-
-
-async function runBacktest(){
-  closeModal();
-  showModal('<h3>&#x1F9EA; Running Backtest...</h3><div id="bt-progress" style="color:#10b981;font-size:13px;margin-bottom:14px;">Simulating August 2024 draft...</div><div class="spinner"><div class="dot"></div><div class="dot" style="animation-delay:0.2s"></div><div class="dot" style="animation-delay:0.4s"></div></div>');
-
-  function upd(t){ var el=document.getElementById("bt-progress"); if(el) el.textContent=t; }
-
-  try{
-    upd("Step 1: Getting 2023/24 top performers...");
-    var sys1="Premier League FPL expert. Return the top 20 FPL players by total points in the 2023/24 season. Return JSON array: [{name,club,position,fplPrice2024,points2324,rating}]. Raw JSON starting with [.";
-    var raw1=await withTimeout(callClaude(sys1,"Top 20 FPL players by 2023/24 points. JSON array.",2000),30000,"Historical data");
-    var hist=extractJSON(raw1)||[];
-
-    upd("Step 2: Simulating August 2024 draft advice...");
-    var sys2="You are an elite fantasy draft advisor simulating a draft taking place in August 2024 BEFORE the 2024/25 season. Using 2023/24 FPL points as your primary stat. Available players: "+JSON.stringify(hist)+". It is pick 1 of a snake draft. No players taken yet. Rules: max 2 per club, 17 picks total (2GK,5DEF,5MID,3ATT,2WC). Return JSON: {safePick:{name,reason},strategicPick:{name,reason},excluded:[{name,reason}]}. Raw JSON starting with {.";
-    var raw2=await withTimeout(callClaude(sys2,"Who would you recommend as pick 1 in August 2024?",600),30000,"2024 advice");
-    var advice2024=extractJSON(raw2)||{};
-
-    upd("Step 3: Getting actual 2024/25 season outcomes...");
-    var nominees=[advice2024.safePick&&advice2024.safePick.name,advice2024.strategicPick&&advice2024.strategicPick.name].filter(Boolean).join(" and ");
-    var sys3="Premier League FPL expert. What actually happened to "+nominees+" in the 2024/25 FPL season? Return their actual points total, any injuries, form issues, or surprises. Also return Erling Haaland and Mohamed Salah 2024/25 points for comparison. Return JSON: {players:[{name,actualPoints2425,whatHappened}]}. Raw JSON starting with {.";
-    var raw3=await withTimeout(callClaude(sys3,"What were the actual 2024/25 FPL outcomes for "+nominees+"?",1000),30000,"Outcomes");
-    var outcomes=extractJSON(raw3)||{players:[]};
-
-    // Show results
-    var html='<h3>&#x1F9EA; Backtest Results</h3>';
-    html+='<p style="color:#8b949e;font-size:12px;margin-bottom:14px;">Simulated: August 2024 draft, pick 1. Validated against actual 2024/25 season.</p>';
-
-    html+='<div class="sec-hdr">What the advisor would have recommended (Aug 2024)</div>';
-    if(advice2024.safePick){
-      html+='<div class="card" style="border-color:#10b981;margin-bottom:8px;">';
-      html+='<div style="color:#10b981;font-size:11px;font-family:Rajdhani,system-ui;letter-spacing:1px;margin-bottom:4px;">SAFE PICK</div>';
-      html+='<div style="font-weight:700;font-family:Bangers,cursive;font-size:18px;">'+advice2024.safePick.name+'</div>';
-      html+='<div style="color:#8b949e;font-size:12px;margin-top:4px;">'+(advice2024.safePick.reason||"")+'</div>';
-      html+='</div>';
-    }
-    if(advice2024.strategicPick){
-      html+='<div class="card" style="border-color:#ec4899;margin-bottom:8px;">';
-      html+='<div style="color:#f472b6;font-size:11px;font-family:Rajdhani,system-ui;letter-spacing:1px;margin-bottom:4px;">STRATEGIC PICK</div>';
-      html+='<div style="font-weight:700;font-family:Bangers,cursive;font-size:18px;">'+advice2024.strategicPick.name+'</div>';
-      html+='<div style="color:#8b949e;font-size:12px;margin-top:4px;">'+(advice2024.strategicPick.reason||"")+'</div>';
-      html+='</div>';
-    }
-    if(advice2024.excluded&&advice2024.excluded.length>0){
-      html+='<div style="color:#484f58;font-size:12px;margin-bottom:10px;">Excluded: '+advice2024.excluded.map(function(e){return e.name+" ("+e.reason+")";}).join(", ")+'</div>';
-    }
-
-    html+='<div class="sec-hdr">What actually happened in 2024/25</div>';
-    (outcomes.players||[]).forEach(function(p){
-      var good=p.actualPoints2425>=180;
-      html+='<div class="card" style="margin-bottom:8px;">';
-      html+='<div style="display:flex;justify-content:space-between;align-items:center;">';
-      html+='<div style="font-weight:700;font-family:Bangers,cursive;font-size:16px;">'+p.name+'</div>';
-      html+='<div style="font-size:18px;font-weight:700;color:'+(good?"#10b981":"#ef4444")+';">'+( p.actualPoints2425||"?")+'pts</div>';
-      html+='</div>';
-      html+='<div style="color:#8b949e;font-size:12px;margin-top:4px;">'+(p.whatHappened||"")+'</div>';
-      html+='</div>';
-    });
-
-    html+='<button class="btn btn-gray" style="margin-top:8px;" onclick="closeModal()">Close</button>';
-    document.getElementById("modal-content").innerHTML=html;
-
-  }catch(e){
-    document.getElementById("modal-content").innerHTML='<h3>Backtest Failed</h3><p style="color:#ef4444;">'+e.message+'</p><button class="btn btn-gray" style="margin-top:10px;" onclick="closeModal()">Close</button>';
-  }
-}
-
 
 
 
@@ -2849,14 +2798,18 @@ function showTab(tabId){
   var el=document.getElementById("tab-"+tabId);
   if(el) el.classList.add("active");
   document.querySelectorAll(".nav-btn[data-tab='"+tabId+"']").forEach(function(b){b.classList.add("active");});
-  if(tabId==="draft") renderDraftTab();
-  else if(tabId==="myteam") renderMyTeamTab();
-  else if(tabId==="friends") renderFriendsTab();
-  else if(tabId==="league") renderLeagueTab();
-  else if(tabId==="advice") renderAdviceTab();
-  else if(tabId==="settings") renderSettingsTab();
-  else if(tabId==="pool") renderPoolTab();
-  else if(tabId==="stats") renderStatsTab();
+  var renderFn = {
+    draft: renderDraftTab, myteam: renderMyTeamTab, friends: renderFriendsTab,
+    league: renderLeagueTab, advice: renderAdviceTab, settings: renderSettingsTab,
+    pool: renderPoolTab, stats: renderStatsTab
+  }[tabId];
+  if(!renderFn) return;
+  // Show a brief spinner immediately, then defer the actual (synchronous, sometimes
+  // heavy - e.g. Stats tab computing across every gameweek) render to the next tick so
+  // the browser gets a chance to paint the spinner first, rather than the tab appearing
+  // to freeze/stay blank while the render function blocks the main thread.
+  if(el) el.innerHTML='<div class="spinner" style="padding-top:40px;"><div class="dot"></div><div class="dot" style="animation-delay:0.2s"></div><div class="dot" style="animation-delay:0.4s"></div></div>';
+  setTimeout(renderFn, 0);
 }
 function goToSetup(){ showScreen("setup"); }
 function showScreen(id){
