@@ -138,11 +138,7 @@ label.lbl{display:block;color:#8b5cf6;font-size:11px;text-transform:uppercase;le
         <input class="inp" id="dsetup-myname" placeholder="e.g. James">
         <label class="lbl">Draft Order &mdash; one name per line, first pick at top</label>
         <textarea class="inp" id="dsetup-order" rows="7" style="resize:vertical;font-family:monospace;font-size:13px;" placeholder="James&#10;Tom&#10;Sarah&#10;Alex&#10;Lucy&#10;Mike"></textarea>
-        <label class="lbl">Max players per club</label>
-        <select class="inp" id="dsetup-clubmax">
-          <option value="2">2 players max per club</option>
-          <option value="3">3 players max per club</option>
-        </select>
+        <div style="color:#8b949e;font-size:12px;margin-top:4px;">Max 3 players per club (fixed rule)</div>
         <button class="btn btn-green" style="margin-top:16px;font-size:16px;padding:16px;" onclick="handleDraftSetupClick()">&#x26BD; Start Draft &rarr;</button>
         <button class="btn btn-gray" style="margin-top:8px;" onclick="showScreen('welcome')">&#x2190; Back</button>
       </div>
@@ -418,7 +414,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-08-09.1";
+const APP_VERSION = "2026-08-09.2";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 const TOTAL_PICKS = 17;
 const CHART_COLORS = ["#10b981","#3b82f6","#f59e0b","#ef4444","#8b5cf6","#ec4899","#06b6d4","#84cc16","#f97316","#a855f7","#14b8a6","#eab308"];
@@ -460,7 +456,7 @@ let PL_CLUBS = [];
 
 // ── STATE ──────────────────────────────────────────────────────────────────────
 let S = {
-  apiKey:"", myName:"", draftOrder:[], clubMax:2,
+  apiKey:"", myName:"", draftOrder:[], clubMax:3,
   playerPool:[], pickedMap:{}, teams:{}, snakeOrder:[], pickIdx:0,
   draftDone:false, hideDraft:false, captains:{}, wildcardSubs:{},
   scores:{}, lastRefreshed:null, currentGW:1, history:[],
@@ -495,7 +491,7 @@ function saveAll(){
 function loadAll(){
   var c=ld("cfg",{});
   S.apiKey=c.apiKey||""; S.myName=c.myName||""; S.draftOrder=c.draftOrder||[];
-  S.clubMax=c.clubMax||2; S.defaultTab=c.defaultTab||"myteam";
+  S.clubMax=c.clubMax||3; S.defaultTab=c.defaultTab||"myteam";
   S.hideDraft=c.hideDraft||false; S.draftDone=c.draftDone||false;
   S.playerPool=ld("pool",[]); S.pickedMap=ld("picked",{}); S.teams=ld("teams",{});
   var sn=ld("snake",{}); S.snakeOrder=sn.snakeOrder||[]; S.pickIdx=sn.pickIdx||0;
@@ -1355,6 +1351,28 @@ async function generateAdvice(){
 
     // Step 4: Determine Safe Pick deterministically (don't trust AI to rank by points)
     // Find the best available player for the MOST NEEDED position, by lastSeasonPts
+    // Build a REAL rival-needs summary from S.teams (actual rosters), instead of just handing
+    // the AI a raw name list and letting it invent plausible-sounding but fabricated claims
+    // about what rivals need. Previously this used S.snakeOrder.slice(S.pickIdx,...), which
+    // starts at the CURRENT picker's own turn - meaning your own name was included as a
+    // "rival" in the list the AI reasoned about (the bug where James saw himself referenced
+    // as an opposing drafter). Now: only genuine rivals picking strictly before your next turn,
+    // each with their real remaining position needs pulled from S.teams.
+    var rivalNamesBeforeNextTurn = [];
+    var rivalSpan = nextTurn<0 ? upcoming : upcoming.slice(0,nextTurn);
+    rivalSpan.forEach(function(n){ if(n!==S.myName && rivalNamesBeforeNextTurn.indexOf(n)===-1) rivalNamesBeforeNextTurn.push(n); });
+    var rivalNeeds = rivalNamesBeforeNextTurn.map(function(n){
+      var t=S.teams[n]||{};
+      var needs=Object.keys(SLOTS).filter(function(pos){ return pos!=="WC" && SLOTS[pos]-(t[pos]||[]).length>0; });
+      return n+" needs "+(needs.length?needs.join("/"):"nothing - squad full");
+    }).join("; ");
+    // Round number, so the prompt can scale urgency language appropriately - "urgent" framing
+    // this early (1-2 picks made) was misleading since nothing is genuinely scarce yet.
+    var picksMadeSoFar = S.pickIdx;
+    var draftersCount = S.draftOrder.length||1;
+    var currentRound = Math.floor(picksMadeSoFar/draftersCount)+1;
+    var totalRounds = Math.ceil(S.snakeOrder.length/draftersCount);
+
     var neededPositions = Object.keys(slotsLeft).filter(function(pos){ return pos!=="WC" && slotsLeft[pos]>0; });
     var safePickCandidates = filteredAvail.filter(function(p){
       return neededPositions.includes(p.position) && !blockedClubs.includes(p.club);
@@ -1369,16 +1387,18 @@ async function generateAdvice(){
       "MY TEAM: "+JSON.stringify(myTeam),
       "SLOTS NEEDED: "+JSON.stringify(slotsLeft)+" ("+totalLeft+" picks left)",
       "PICKS UNTIL MY NEXT TURN: "+(nextTurn<0?"last pick":nextTurn),
+      "DRAFT PROGRESS: round "+currentRound+" of "+totalRounds+" ("+picksMadeSoFar+" total picks made so far).",
       "TOP GKs AVAILABLE (rated 7+): "+topGKs,
       "CLUBS AT MY LIMIT: "+blockedClubs.join(","),
       "MAX PER CLUB: "+S.clubMax,
-      "NEXT 20 PICKS: "+S.snakeOrder.slice(S.pickIdx,S.pickIdx+20).join(", "),
+      "RIVALS PICKING BEFORE YOUR NEXT TURN, WITH THEIR REAL REMAINING POSITION NEEDS: "+(rivalNeeds||"none - you pick again immediately"),
       "TOP 40 AVAILABLE (already filtered - excluded list is separate): "+JSON.stringify(enriched),
       "NOTE: Players with confirmed serious injuries or confirmed PL exits have ALREADY been removed from the available list.",
       "DETERMINISTIC SAFE PICK (already calculated - you MUST use this exact player as safePick): "+JSON.stringify(deterministicSafePick),
       "CRITICAL RULES:",
       "1. SAFE PICK is FIXED - you must return safePick as exactly the player named in DETERMINISTIC SAFE PICK above. Do not substitute a different player. Only add safeWarning text if there is a genuine injury/decline concern - but the pick itself does not change.",
-      "2. STRATEGIC PICK must be a DIFFERENT player than the Safe Pick. It MUST explicitly reason about: who picks before your next turn (from NEXT 20 PICKS) and what positions they likely need, scarcity at this position, fixture runs, and differential value. State in strategicReason specifically what rival behaviour or scarcity factor drove this choice (e.g. \"3 GK-needing teams pick before your next turn\").",
+      "2. STRATEGIC PICK must be a DIFFERENT player than the Safe Pick. Base your reasoning ONLY on the real data given above - the RIVALS PICKING BEFORE YOUR NEXT TURN list and their REAL remaining needs, real position scarcity among TOP 40 AVAILABLE, fixture runs, and differential value. Do NOT invent rival needs, rival names, or claims not supported by the data given. If the rival list is empty or shows no real overlap in need, say so plainly rather than manufacturing urgency.",
+      "2b. Scale urgency language to DRAFT PROGRESS above - with few picks made (early rounds), do not use words like \"urgent\", \"desperate\", or \"must act now\" unless TOP 40 AVAILABLE genuinely shows a position running low. Early picks should read as calm and considered, not panicked.",
       "3. Minor injury (injuryStatus=minor) = include with warning. Only confirmed-out players are excluded (already filtered).",
       "4. If the deterministic Safe Pick has a decline flag or minor injury, mention it in safeWarning, but DO NOT change the pick itself.",
       "Return JSON only: {safePick:{name,club,position,fplPrice,lastSeasonPts,rating},safeReason:'2-3 sentences stats-focused',safeWarning:'decline or minor injury warning or empty',strategicPick:{name,club,position,fplPrice,lastSeasonPts,rating},strategicReason:'2-3 sentences on WHY this is smart strategically',strategicWarning:'any risk to be aware of or empty',scarcity:'position scarcity warning or empty',nextTarget:'what to aim for next turn',excluded:"+JSON.stringify(excluded)+"}"
@@ -2312,7 +2332,7 @@ function doImportBackup(){
     var backup=pendingBackup;
     S.myName=backup.myName||"";
     S.draftOrder=backup.draftOrder||[];
-    S.clubMax=backup.clubMax||2;
+    S.clubMax=backup.clubMax||3;
     S.draftDone=backup.draftDone||false;
     S.teams=backup.teams||{};
     S.pickedMap=backup.pickedMap||{};
@@ -2498,7 +2518,7 @@ function resumeInterruptedLoad(){
   S.apiKey = cfg.apiKey||"";
   S.myName = cfg.myName||"";
   S.draftOrder = cfg.draftOrder||[];
-  S.clubMax = cfg.clubMax||2;
+  S.clubMax = cfg.clubMax||3;
   S.snakeOrder = buildSnake(S.draftOrder, TOTAL_PICKS);
   initTeams();
 
@@ -2896,20 +2916,17 @@ function showDraftSetup(){
   if(nameEl&&S.myName) nameEl.value=S.myName;
   var orderEl=document.getElementById("dsetup-order");
   if(orderEl&&S.draftOrder.length>0) orderEl.value=S.draftOrder.join("\n");
-  var clubEl=document.getElementById("dsetup-clubmax");
-  if(clubEl) clubEl.value=S.clubMax||2;
   showScreen("draft-setup");
 }
 
 function handleDraftSetupClick(){
   var myName=document.getElementById("dsetup-myname").value.trim();
   var orderRaw=document.getElementById("dsetup-order").value.trim();
-  var clubMax=parseInt(document.getElementById("dsetup-clubmax").value)||2;
   if(!myName){showToast("Enter your name");return;}
   var draftOrder=orderRaw.split("\n").map(function(s){return s.trim();}).filter(Boolean);
   if(draftOrder.length<2){showToast("Enter at least 2 names");return;}
   if(!draftOrder.includes(myName)){showToast("Your name must be in the draft order");return;}
-  S.myName=myName; S.draftOrder=draftOrder; S.clubMax=clubMax;
+  S.myName=myName; S.draftOrder=draftOrder; S.clubMax=3;
   // Restore API key from the player load step if not already in S
   if(!S.apiKey){ var cfg=ld("cfg",{}); S.apiKey=cfg.apiKey||""; }
   S.snakeOrder=buildSnake(draftOrder,TOTAL_PICKS);
