@@ -414,7 +414,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-08-09.4";
+const APP_VERSION = "2026-08-09.6";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 const TOTAL_PICKS = 17;
 const CHART_COLORS = ["#10b981","#3b82f6","#f59e0b","#ef4444","#8b5cf6","#ec4899","#06b6d4","#84cc16","#f97316","#a855f7","#14b8a6","#eab308"];
@@ -458,7 +458,7 @@ let PL_CLUBS = [];
 let S = {
   apiKey:"", myName:"", draftOrder:[], clubMax:3,
   playerPool:[], pickedMap:{}, teams:{}, snakeOrder:[], pickIdx:0,
-  draftDone:false, hideDraft:false, captains:{}, wildcardSubs:{},
+  draftDone:false, hideDraft:false, captains:{}, captainHistory:{}, wildcardSubs:{},
   scores:{}, lastRefreshed:null, currentGW:1, history:[],
   advice:null, adviceLoading:false, defaultTab:"myteam",
   lastBackup:null
@@ -484,7 +484,7 @@ function saveAll(){
   sv("cfg",{apiKey:S.apiKey,myName:S.myName,draftOrder:S.draftOrder,clubMax:S.clubMax,defaultTab:S.defaultTab,hideDraft:S.hideDraft,draftDone:S.draftDone});
   sv("pool",S.playerPool); sv("picked",S.pickedMap); sv("teams",S.teams);
   sv("snake",{snakeOrder:S.snakeOrder,pickIdx:S.pickIdx});
-  sv("captains",S.captains); sv("wildcards",S.wildcardSubs);
+  sv("captains",S.captains); sv("captainHistory",S.captainHistory); sv("wildcards",S.wildcardSubs);
   sv("scores",S.scores); sv("meta",{lastRefreshed:S.lastRefreshed,currentGW:S.currentGW});
   sv("clubs",PL_CLUBS);
 }
@@ -495,7 +495,7 @@ function loadAll(){
   S.hideDraft=c.hideDraft||false; S.draftDone=c.draftDone||false;
   S.playerPool=ld("pool",[]); S.pickedMap=ld("picked",{}); S.teams=ld("teams",{});
   var sn=ld("snake",{}); S.snakeOrder=sn.snakeOrder||[]; S.pickIdx=sn.pickIdx||0;
-  S.captains=ld("captains",{}); S.wildcardSubs=ld("wildcards",{});
+  S.captains=ld("captains",{}); S.captainHistory=ld("captainHistory",{}); S.wildcardSubs=ld("wildcards",{});
   S.scores=ld("scores",{}); var m=ld("meta",{});
   S.lastRefreshed=m.lastRefreshed||null; S.currentGW=m.currentGW||1; S.lastBackup=m.lastBackup||null;
   var savedClubs=ld("clubs",[]);
@@ -1176,8 +1176,6 @@ function getAllPlayers(){
   return all;
 }
 function getPlayerPts(key,ownerName,upToGW){
-  var cap=S.captains[ownerName];
-  var isCap=cap&&(cap.player.name+"|"+cap.player.club)===key;
   var sub=(S.wildcardSubs[ownerName]||[]).find(function(s){return (s.outPlayer.name+"|"+s.outPlayer.club)===key;});
   var subGW=sub?sub.gameweek:null;
   var total=0;
@@ -1185,6 +1183,8 @@ function getPlayerPts(key,ownerName,upToGW){
   for(var g=1;g<=maxGW;g++){
     if(subGW&&g>=subGW) continue;
     var pts=(S.scores[g]||{})[key]||0;
+    var capThisGW=getCaptainForGW(ownerName,g);
+    var isCap=capThisGW&&(capThisGW.name+"|"+capThisGW.club)===key;
     total+=isCap?pts*2:pts;
   }
   return total;
@@ -1197,14 +1197,15 @@ function getPersonTotalPts(name,upToGW){
   return total;
 }
 function getPersonGWPts(name,gw){
-  var t=S.teams[name]||{},cap=S.captains[name],total=0,gwS=S.scores[gw]||{};
+  var t=S.teams[name]||{},total=0,gwS=S.scores[gw]||{};
+  var capThisGW=getCaptainForGW(name,gw);
   ["GK","DEF","MID","ATT","WC"].forEach(function(pos){
     (t[pos]||[]).forEach(function(p){
       var key=p.name+"|"+p.club;
       var sub=(S.wildcardSubs[name]||[]).find(function(s){return (s.outPlayer.name+"|"+s.outPlayer.club)===key;});
       if(sub&&gw>=sub.gameweek) return;
       var pts=gwS[key]||0;
-      var isCap=cap&&(cap.player.name+"|"+cap.player.club)===key;
+      var isCap=capThisGW&&(capThisGW.name+"|"+capThisGW.club)===key;
       total+=isCap?pts*2:pts;
     });
   });
@@ -1212,6 +1213,28 @@ function getPersonGWPts(name,gw){
 }
 
 // ── CAPTAIN ────────────────────────────────────────────────────────────────────
+// Returns whichever player was actually captain during a SPECIFIC gameweek, based on
+// S.captainHistory (a chronological list of {player,startGW} eras per drafter). This is
+// what makes captain doubling correctly time-bound: nominating a new captain now only
+// doubles their points from this point forward, and preserves the previous captain's
+// doubled points for the weeks they actually held the armband - rather than the old
+// behaviour of always applying whichever captain is CURRENT to every historical week.
+function getCaptainForGW(name, gw){
+  var hist = S.captainHistory[name];
+  if(hist && hist.length>0){
+    var active=null;
+    for(var i=0;i<hist.length;i++){
+      if(hist[i].startGW<=gw) active=hist[i]; else break;
+    }
+    return active ? active.player : null;
+  }
+  // Backward compatibility: data saved before this fix existed has no history array yet.
+  // Fall back to whatever is currently set, applied from the start - this preserves
+  // existing users' already-seen totals exactly as they were, rather than retroactively
+  // changing points they've already counted on.
+  var cur = S.captains[name];
+  return cur ? cur.player : null;
+}
 function capDaysLeft(name){
   var cap=S.captains[name];
   if(!cap) return null;
@@ -1639,8 +1662,8 @@ function endDraft(){
 
 // ── RENDER: MY TEAM ────────────────────────────────────────────────────────────
 function getPlayerGWPts(key, ownerName, gw){
-  var cap=S.captains[ownerName];
-  var isCap=cap&&(cap.player.name+"|"+cap.player.club)===key;
+  var capThisGW=getCaptainForGW(ownerName,gw);
+  var isCap=capThisGW&&(capThisGW.name+"|"+capThisGW.club)===key;
   var sub=(S.wildcardSubs[ownerName]||[]).find(function(s){return (s.outPlayer.name+"|"+s.outPlayer.club)===key;});
   if(sub&&gw>=sub.gameweek) return 0;
   var pts=(S.scores[gw]||{})[key]||0;
@@ -1677,6 +1700,7 @@ function renderMyTeamTab(){
   }
 
   html+='<div class="sec-hdr">Squad</div>';
+  var capForVGW=getCaptainForGW(S.myName,vGW);
   Object.entries(SLOTS).forEach(function(entry){
     var pos=entry[0],needed=entry[1];
     html+='<div style="margin-bottom:12px;"><div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;"><span class="badge badge-'+pos+'">'+pos+'</span><span style="color:#484f58;font-size:11px;">'+(team[pos]||[]).length+"/"+needed+"</span></div>";
@@ -1684,7 +1708,7 @@ function renderMyTeamTab(){
       var p=(team[pos]||[])[i];
       if(p){
         var key=p.name+"|"+p.club;
-        var isCap=cap&&(cap.player.name+"|"+cap.player.club)===key;
+        var isCap=capForVGW&&(capForVGW.name+"|"+capForVGW.club)===key;
         var cumPts=getPlayerPts(key,S.myName,vGW);
         var gwScore=getPlayerGWPts(key,S.myName,vGW);
         var subbed=(S.wildcardSubs[S.myName]||[]).find(function(s){return (s.outPlayer.name+"|"+s.outPlayer.club)===key;});
@@ -1770,11 +1794,15 @@ function renderFriendDetail(el,name){
       '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">'+
       '<span style="font-size:12px;color:#8b949e;">Captain:</span>'+
       '<strong style="font-size:13px;">'+cap.player.name+'</strong>'+
-      '<span class="cap-badge">C</span>'+capTimerHtml(name)+'</div></div>';
+      '<span class="cap-badge">C</span>'+capTimerHtml(name)+
+      '<button class="btn btn-gray" style="width:auto;padding:4px 8px;font-size:11px;margin-left:auto;" onclick="openCaptainModal(\''+safeName.replace(/'/g,"\\'")+'\')">Change</button></div></div>';
+  } else {
+    html+='<div class="warn">&#x26A0;&#xFE0F; No captain!<button class="btn btn-blue" style="margin-top:6px;padding:6px;" onclick="openCaptainModal(\''+safeName.replace(/'/g,"\\'")+'\')">Nominate</button></div>';
   }
 
   Object.entries(SLOTS).forEach(function(entry){
     var pos=entry[0],needed=entry[1];
+    var capForVGW=getCaptainForGW(name,vGW);
     html+='<div style="margin-bottom:12px;"><div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">'+
       '<span class="badge badge-'+pos+'">'+pos+'</span>'+
       '<span style="color:#484f58;font-size:11px;">'+(team[pos]||[]).length+"/"+needed+"</span></div>";
@@ -1782,7 +1810,7 @@ function renderFriendDetail(el,name){
       var p=(team[pos]||[])[i];
       if(p){
         var key=p.name+"|"+p.club;
-        var isCap=cap&&(cap.player.name+"|"+cap.player.club)===key;
+        var isCap=capForVGW&&(capForVGW.name+"|"+capForVGW.club)===key;
         var cumPts=getPlayerPts(key,name,vGW);
         var gwScore=getPlayerGWPts(key,name,vGW);
         var subbed=(S.wildcardSubs[name]||[]).find(function(s){return (s.outPlayer.name+"|"+s.outPlayer.club)===key;});
@@ -1844,8 +1872,22 @@ function setCaptain(personName,pName,pClub){
   var team=S.teams[personName]||{},player=null;
   ["GK","DEF","MID","ATT"].forEach(function(pos){(team[pos]||[]).forEach(function(p){if(p.name===pName&&p.club===pClub)player=p;});});
   if(!player) return;
+  var startGW = S.currentGW||1;
+  if(!S.captainHistory[personName]) S.captainHistory[personName]=[];
+  // Seed history for pre-existing data that had a captain set before this fix existed -
+  // treat that earlier captain as having applied from GW1, so their already-seen totals
+  // don't silently change the moment a new captain is nominated.
+  if(S.captainHistory[personName].length===0 && S.captains[personName]){
+    S.captainHistory[personName].push({player:S.captains[personName].player, startGW:1});
+  }
+  var histArr=S.captainHistory[personName];
+  var lastEntry=histArr[histArr.length-1];
+  var isSamePlayer=lastEntry && lastEntry.player.name===player.name && lastEntry.player.club===player.club;
+  // Only open a new era if this is genuinely a different captain - avoids a redundant
+  // zero-length entry if the same player is re-confirmed as captain.
+  if(!isSamePlayer) histArr.push({player:player, startGW:startGW});
   S.captains[personName]={player:player,dateSet:new Date().toISOString()};
-  sv("captains",S.captains);
+  sv("captains",S.captains); sv("captainHistory",S.captainHistory);
   closeModal(); checkCaptainBanner();
   renderMyTeamTab(); renderFriendsTab();
 }
@@ -2274,7 +2316,10 @@ function autoFillDraft(){
   S.draftOrder.forEach(function(name){
     var t=S.teams[name]||{},players=[];
     ["GK","DEF","MID","ATT"].forEach(function(pos){(t[pos]||[]).forEach(function(p){players.push(p);});});
-    if(players.length>=2) S.captains[name]={player:players[1],dateSet:new Date().toISOString()};
+    if(players.length>=2){
+      S.captains[name]={player:players[1],dateSet:new Date().toISOString()};
+      S.captainHistory[name]=[{player:players[1],startGW:1}];
+    }
   });
   var gwInput=document.getElementById("fill-gws");
   var numGWs=gwInput?Math.min(38,Math.max(1,parseInt(gwInput.value)||10)):10;
@@ -2313,6 +2358,7 @@ function exportBackup(){
     snakeOrder:S.snakeOrder,
     pickIdx:S.pickIdx,
     captains:S.captains,
+    captainHistory:S.captainHistory,
     wildcardSubs:S.wildcardSubs,
     scores:S.scores,
     currentGW:S.currentGW,
@@ -2383,6 +2429,7 @@ function doImportBackup(){
     S.snakeOrder=backup.snakeOrder||[];
     S.pickIdx=backup.pickIdx||0;
     S.captains=backup.captains||{};
+    S.captainHistory=backup.captainHistory||{};
     S.wildcardSubs=backup.wildcardSubs||{};
     S.scores=backup.scores||{};
     S.currentGW=backup.currentGW||1;
@@ -2750,7 +2797,7 @@ function buildBackupObject(){
     myName:S.myName, draftOrder:S.draftOrder, clubMax:S.clubMax,
     draftDone:S.draftDone, teams:S.teams, pickedMap:S.pickedMap,
     snakeOrder:S.snakeOrder, pickIdx:S.pickIdx,
-    captains:S.captains, wildcardSubs:S.wildcardSubs,
+    captains:S.captains, captainHistory:S.captainHistory, wildcardSubs:S.wildcardSubs,
     scores:S.scores, currentGW:S.currentGW, lastRefreshed:S.lastRefreshed,
     playerPool:S.playerPool, clubs:PL_CLUBS
   };
