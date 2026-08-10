@@ -414,7 +414,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-08-09.6";
+const APP_VERSION = "2026-08-09.7";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 const TOTAL_PICKS = 17;
 const CHART_COLORS = ["#10b981","#3b82f6","#f59e0b","#ef4444","#8b5cf6","#ec4899","#06b6d4","#84cc16","#f97316","#a855f7","#14b8a6","#eab308"];
@@ -459,7 +459,7 @@ let S = {
   apiKey:"", myName:"", draftOrder:[], clubMax:3,
   playerPool:[], pickedMap:{}, teams:{}, snakeOrder:[], pickIdx:0,
   draftDone:false, hideDraft:false, captains:{}, captainHistory:{}, wildcardSubs:{},
-  scores:{}, lastRefreshed:null, currentGW:1, history:[],
+  scores:{}, scoresFetched:{}, scoreOverrides:{}, lastRefreshed:null, currentGW:1, history:[],
   advice:null, adviceLoading:false, defaultTab:"myteam",
   lastBackup:null
 };
@@ -485,7 +485,8 @@ function saveAll(){
   sv("pool",S.playerPool); sv("picked",S.pickedMap); sv("teams",S.teams);
   sv("snake",{snakeOrder:S.snakeOrder,pickIdx:S.pickIdx});
   sv("captains",S.captains); sv("captainHistory",S.captainHistory); sv("wildcards",S.wildcardSubs);
-  sv("scores",S.scores); sv("meta",{lastRefreshed:S.lastRefreshed,currentGW:S.currentGW});
+  sv("scores",S.scores); sv("scoresFetched",S.scoresFetched); sv("scoreOverrides",S.scoreOverrides);
+  sv("meta",{lastRefreshed:S.lastRefreshed,currentGW:S.currentGW});
   sv("clubs",PL_CLUBS);
 }
 function loadAll(){
@@ -496,7 +497,8 @@ function loadAll(){
   S.playerPool=ld("pool",[]); S.pickedMap=ld("picked",{}); S.teams=ld("teams",{});
   var sn=ld("snake",{}); S.snakeOrder=sn.snakeOrder||[]; S.pickIdx=sn.pickIdx||0;
   S.captains=ld("captains",{}); S.captainHistory=ld("captainHistory",{}); S.wildcardSubs=ld("wildcards",{});
-  S.scores=ld("scores",{}); var m=ld("meta",{});
+  S.scores=ld("scores",{}); S.scoresFetched=ld("scoresFetched",{}); S.scoreOverrides=ld("scoreOverrides",{});
+  var m=ld("meta",{});
   S.lastRefreshed=m.lastRefreshed||null; S.currentGW=m.currentGW||1; S.lastBackup=m.lastBackup||null;
   var savedClubs=ld("clubs",[]);
   if(savedClubs.length>0) PL_CLUBS=savedClubs;
@@ -1106,7 +1108,7 @@ async function refreshScores(){
 
     var needed = [];
     for(var g = currentGW; g >= 1; g--){
-      if(!S.scores[g]) needed.push(g);
+      if(!S.scoresFetched[g]) needed.push(g);
       // Only fetch up to 3 missing gameweeks per refresh to keep cost/time reasonable
       if(needed.length >= 3) break;
     }
@@ -1128,14 +1130,21 @@ async function refreshScores(){
           if(!key) return;
           mapped[key]=(el.stats&&el.stats.total_points)||0;
         });
+        // Preserve any manually-overridden values for this gameweek rather than letting
+        // the real fetch silently clobber a correction the user deliberately made.
+        var overrides=S.scoreOverrides[gw]||{};
+        Object.keys(overrides).forEach(function(key){
+          if((S.scores[gw]||{})[key]!=null) mapped[key]=S.scores[gw][key];
+        });
         S.scores[gw] = mapped;
+        S.scoresFetched[gw] = true;
       }catch(e){
         console.warn('GW ' + gw + ' scores failed:', e.message);
       }
     }
 
     S.lastRefreshed = new Date().toISOString();
-    sv('scores', S.scores);
+    sv('scores', S.scores); sv('scoresFetched', S.scoresFetched);
     sv('meta', {lastRefreshed: S.lastRefreshed, currentGW: S.currentGW});
     return true;
   }catch(e){
@@ -1443,20 +1452,25 @@ async function generateAdvice(){
     console.log("Advice parsed:", parsed);
 
     // Defensive normalisation - handle variations in response shape
+    function realPlayerOrFallback(fallbackPlayer){
+      return fallbackPlayer ? {name:fallbackPlayer.name,club:fallbackPlayer.club,position:fallbackPlayer.position,fplPrice:fallbackPlayer.fplPrice,lastSeasonPts:fallbackPlayer.lastSeasonPts,rating:fallbackPlayer.rating} : null;
+    }
     function normalisePick(pickObj, fallbackPlayer){
-      if(!pickObj) return fallbackPlayer ? {name:fallbackPlayer.name,club:fallbackPlayer.club,position:fallbackPlayer.position,fplPrice:fallbackPlayer.fplPrice,lastSeasonPts:fallbackPlayer.lastSeasonPts,rating:fallbackPlayer.rating} : null;
+      if(!pickObj) return realPlayerOrFallback(fallbackPlayer);
       // Sometimes Claude nests it differently or uses different key names
       var name = pickObj.name || pickObj.playerName || pickObj.player;
-      if(!name) return fallbackPlayer ? {name:fallbackPlayer.name,club:fallbackPlayer.club,position:fallbackPlayer.position,fplPrice:fallbackPlayer.fplPrice,lastSeasonPts:fallbackPlayer.lastSeasonPts,rating:fallbackPlayer.rating} : null;
-      // Try to find the full player record from our pool to fill any gaps
-      var fullMatch = avail.find(function(p){return p.name===name;});
+      if(!name) return realPlayerOrFallback(fallbackPlayer);
+      // Match against the real available pool (name+club, since names alone can collide)
+      var fullMatch = avail.find(function(p){return p.name===name && (!pickObj.club || p.club===pickObj.club);}) ||
+                       avail.find(function(p){return p.name===name;});
+      // If the AI named a player that isn't genuinely in the real, currently-available pool,
+      // do NOT fabricate a placeholder entry (previously: club:"Unknown", fplPrice:0, etc,
+      // displayed as if it were a real recommendation). Fall back to the real, verified
+      // candidate instead - the displayed pick must always be a real, available player.
+      if(!fullMatch) return realPlayerOrFallback(fallbackPlayer);
       return {
-        name: name,
-        club: pickObj.club || (fullMatch?fullMatch.club:"Unknown"),
-        position: pickObj.position || (fullMatch?fullMatch.position:"MID"),
-        fplPrice: pickObj.fplPrice!=null ? pickObj.fplPrice : (fullMatch?fullMatch.fplPrice:0),
-        lastSeasonPts: pickObj.lastSeasonPts!=null ? pickObj.lastSeasonPts : (fullMatch?fullMatch.lastSeasonPts:0),
-        rating: pickObj.rating!=null ? pickObj.rating : (fullMatch?fullMatch.rating:5)
+        name: fullMatch.name, club: fullMatch.club, position: fullMatch.position,
+        fplPrice: fullMatch.fplPrice, lastSeasonPts: fullMatch.lastSeasonPts, rating: fullMatch.rating
       };
     }
 
@@ -1482,7 +1496,7 @@ async function generateAdvice(){
         strategicWarning: parsed.strategicWarning || parsed.strategic_warning || "",
         scarcity: parsed.scarcity || "",
         nextTarget: parsed.nextTarget || parsed.next_target || "",
-        excluded: parsed.excluded || excluded || []
+        excluded: excluded || []
       };
     } else {
       throw new Error("Could not parse recommendation JSON");
@@ -1940,12 +1954,48 @@ function executeSub(personName,wcIdx,outName,outClub,outPos,outIdx){
 function resolveWildcard(personName,wcIdx){
   showModal('<h3>Resolve Wildcard</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">This player is now at a PL club. Select their club to link FPL scoring.</p><label class="lbl">Premier League Club</label><select class="inp" id="resolve-club" style="margin-bottom:14px;">'+PL_CLUBS.map(function(c){return '<option>'+c+'</option>';}).join("")+'</select><button class="btn btn-blue" onclick="doResolveWildcard(\''+personName.replace(/'/g,"\\'")+'\','+wcIdx+')">Resolve</button>');
 }
-function doResolveWildcard(personName,wcIdx){
+async function doResolveWildcard(personName,wcIdx){
   var club=document.getElementById("resolve-club").value;
   var team=S.teams[personName];
   if(!team||!team.WC[wcIdx]) return;
+  var playerName=team.WC[wcIdx].name;
+  document.getElementById("modal-content").innerHTML='<h3>Resolve Wildcard</h3><div style="color:#10b981;font-size:13px;margin-bottom:14px;">Looking up '+playerName+' in official FPL data...</div><div class="spinner"><div class="dot"></div><div class="dot" style="animation-delay:0.2s"></div><div class="dot" style="animation-delay:0.4s"></div></div>';
+  // Attempt to find this player's REAL FPL element id so they receive live scoring like
+  // every other player, instead of the previous behaviour where a resolved non-PL wildcard
+  // never got an fplId at all and would silently score 0 forever with no warning - a direct
+  // accuracy gap against official FPL, since nothing told the user this wasn't working.
+  var fplId=null, matchWarning="";
+  try{
+    var bootstrap = await fetchWithFallback(
+      "https://fantasy.premierleague.com/api/bootstrap-static/",
+      function(data){ return data && Array.isArray(data.elements) && Array.isArray(data.teams); },
+      function(){}
+    );
+    var teamId=null;
+    bootstrap.teams.forEach(function(t){ if((FPL_TEAM_NAME_MAP[t.name]||t.name)===club) teamId=t.id; });
+    var nameLower=playerName.toLowerCase();
+    var candidates=bootstrap.elements.filter(function(el){
+      if(teamId!=null && el.team!==teamId) return false;
+      var full=((el.first_name||"")+" "+(el.second_name||"")).toLowerCase();
+      return el.web_name.toLowerCase()===nameLower || full.indexOf(nameLower)!==-1 || nameLower.indexOf(el.web_name.toLowerCase())!==-1;
+    });
+    if(candidates.length===1){
+      fplId=candidates[0].id;
+    } else if(candidates.length===0){
+      matchWarning="Could not find "+playerName+" in official FPL data for "+club+" - they won't receive automatic live scoring. Use Manual Score Override in Settings each gameweek instead, or check the name/club spelling and try again.";
+    } else {
+      matchWarning="Found multiple possible matches for "+playerName+" at "+club+" - couldn't confirm which one automatically, so live scoring isn't linked. Use Manual Score Override in Settings each gameweek instead.";
+    }
+  }catch(e){
+    matchWarning="Couldn't reach official FPL data to confirm "+playerName+" ("+e.message+"). Live scoring isn't linked yet - use Manual Score Override in Settings, or try resolving again later.";
+  }
   team.WC[wcIdx].club=club; team.WC[wcIdx].isNonPL=false;
-  sv("teams",S.teams); closeModal(); renderMyTeamTab();
+  if(fplId!=null) team.WC[wcIdx].fplId=fplId;
+  sv("teams",S.teams);
+  closeModal();
+  if(matchWarning) showToast(matchWarning);
+  else showToast(playerName+" linked to official FPL data - live scoring active.");
+  renderMyTeamTab();
 }
 
 // ── RENDER: ADVICE ─────────────────────────────────────────────────────────────
@@ -2158,7 +2208,7 @@ async function doRefreshScores(){
     S.currentGW=cgw;
 
     var needed=[];
-    for(var g=cgw;g>=1;g--){ if(!S.scores[g]) needed.push(g); if(needed.length>=3) break; }
+    for(var g=cgw;g>=1;g--){ if(!S.scoresFetched[g]) needed.push(g); if(needed.length>=3) break; }
     if(needed.length===0){
       upd("All up to date! GW"+cgw,"#10b981");
       S.lastRefreshed=new Date().toISOString();
@@ -2187,11 +2237,18 @@ async function doRefreshScores(){
           if(!key) return; // player not on anyone's drafted roster - irrelevant to us
           mapped[key]=(el.stats&&el.stats.total_points)||0;
         });
+        // Preserve any manually-overridden values for this gameweek rather than letting
+        // the real fetch silently clobber a correction the user deliberately made.
+        var overrides=S.scoreOverrides[gw]||{};
+        Object.keys(overrides).forEach(function(key){
+          if((S.scores[gw]||{})[key]!=null) mapped[key]=S.scores[gw][key];
+        });
         S.scores[gw]=mapped;
+        S.scoresFetched[gw]=true;
       }catch(e2){ console.warn("GW"+gw+" failed: "+e2.message); }
     }
     S.lastRefreshed=new Date().toISOString();
-    sv("scores",S.scores); sv("meta",{lastRefreshed:S.lastRefreshed,currentGW:S.currentGW});
+    sv("scores",S.scores); sv("scoresFetched",S.scoresFetched); sv("meta",{lastRefreshed:S.lastRefreshed,currentGW:S.currentGW});
     upd("Done! GW"+S.currentGW+" loaded from official FPL data.","#10b981");
     setTimeout(closeModal,1500); renderLeagueTab(); renderSettingsTab();
   }catch(e){
@@ -2227,6 +2284,14 @@ function renderSettingsTab(){
   html+='</select>';
   html+='<button class="btn btn-blue" style="margin-top:14px;" onclick="saveSettings()">Save Settings</button>';
   html+='</div>';
+  var unmatched = getAllPlayers().filter(function(p){ return p.fplId==null && !p.isNonPL; });
+  if(unmatched.length>0){
+    html+='<div class="card" style="border-color:#ef4444;">';
+    html+='<div style="font-weight:700;margin-bottom:6px;color:#ef4444;">&#x26A0; Live Scoring Not Linked</div>';
+    html+='<div style="color:#8b949e;font-size:12px;margin-bottom:8px;">'+unmatched.length+' drafted player(s) have no official FPL ID and will NOT receive automatic live scores - this usually means they were loaded before the official FPL API had them (e.g. a newly promoted club, or the backup AI-search loader was used because the FPL API was briefly unreachable). Use Manual Score Override each gameweek for these, or try a fresh player pool reload if it\'s early enough in the season.</div>';
+    html+='<div style="color:#f87171;font-size:12px;">'+unmatched.map(function(p){return p.name+" ("+p.club+")";}).join(", ")+'</div>';
+    html+='</div>';
+  }
   html+='<div class="card">';
   html+='<div style="font-weight:700;margin-bottom:6px;">Data</div>';
   html+='<div style="color:#8b949e;font-size:12px;margin-bottom:12px;">Players: '+S.playerPool.length+' &middot; Scores through GW'+S.currentGW+(S.scores[S.currentGW]?'':' (not yet fetched)')+' &middot; Last refresh: '+(S.lastRefreshed?new Date(S.lastRefreshed).toLocaleString():"Never")+'</div>';
@@ -2361,6 +2426,8 @@ function exportBackup(){
     captainHistory:S.captainHistory,
     wildcardSubs:S.wildcardSubs,
     scores:S.scores,
+    scoresFetched:S.scoresFetched,
+    scoreOverrides:S.scoreOverrides,
     currentGW:S.currentGW,
     lastRefreshed:S.lastRefreshed,
     playerPool:S.playerPool,
@@ -2432,6 +2499,8 @@ function doImportBackup(){
     S.captainHistory=backup.captainHistory||{};
     S.wildcardSubs=backup.wildcardSubs||{};
     S.scores=backup.scores||{};
+    S.scoresFetched=backup.scoresFetched||{};
+    S.scoreOverrides=backup.scoreOverrides||{};
     S.currentGW=backup.currentGW||1;
     S.lastRefreshed=backup.lastRefreshed||null;
     S.playerPool=backup.playerPool||[];
@@ -2472,7 +2541,9 @@ function doScoreOverride(){
   var pts=parseInt(document.getElementById("ov-pts").value)||0;
   if(!S.scores[gw]) S.scores[gw]={};
   S.scores[gw][key]=pts;
-  sv("scores",S.scores);
+  if(!S.scoreOverrides[gw]) S.scoreOverrides[gw]={};
+  S.scoreOverrides[gw][key]=true;
+  sv("scores",S.scores); sv("scoreOverrides",S.scoreOverrides);
   closeModal();
   showToast("Score updated: "+key.split("|")[0]+" GW"+gw+" = "+pts+"pts");
   renderLeagueTab();
@@ -2798,7 +2869,8 @@ function buildBackupObject(){
     draftDone:S.draftDone, teams:S.teams, pickedMap:S.pickedMap,
     snakeOrder:S.snakeOrder, pickIdx:S.pickIdx,
     captains:S.captains, captainHistory:S.captainHistory, wildcardSubs:S.wildcardSubs,
-    scores:S.scores, currentGW:S.currentGW, lastRefreshed:S.lastRefreshed,
+    scores:S.scores, scoresFetched:S.scoresFetched, scoreOverrides:S.scoreOverrides,
+    currentGW:S.currentGW, lastRefreshed:S.lastRefreshed,
     playerPool:S.playerPool, clubs:PL_CLUBS
   };
 }
