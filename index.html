@@ -414,7 +414,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-08-09.7";
+const APP_VERSION = "2026-08-09.8";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 const TOTAL_PICKS = 17;
 const CHART_COLORS = ["#10b981","#3b82f6","#f59e0b","#ef4444","#8b5cf6","#ec4899","#06b6d4","#84cc16","#f97316","#a855f7","#14b8a6","#eab308"];
@@ -1185,12 +1185,18 @@ function getAllPlayers(){
   return all;
 }
 function getPlayerPts(key,ownerName,upToGW){
-  var sub=(S.wildcardSubs[ownerName]||[]).find(function(s){return (s.outPlayer.name+"|"+s.outPlayer.club)===key;});
-  var subGW=sub?sub.gameweek:null;
+  var team=S.teams[ownerName]||{};
+  var isWCPlayer=(team.WC||[]).some(function(p){return (p.name+"|"+p.club)===key;});
+  var subOut=(S.wildcardSubs[ownerName]||[]).find(function(s){return (s.outPlayer.name+"|"+s.outPlayer.club)===key;});
+  var subIn=(S.wildcardSubs[ownerName]||[]).find(function(s){return (s.inPlayer.name+"|"+s.inPlayer.club)===key;});
+  var subOutGW=subOut?subOut.gameweek:null;
   var total=0;
   var maxGW=upToGW||S.currentGW;
   for(var g=1;g<=maxGW;g++){
-    if(subGW&&g>=subGW) continue;
+    if(subOutGW&&g>=subOutGW) continue;
+    // WC-slot players are bench picks - they contribute nothing until the gameweek they're
+    // actually subbed in, and nothing at all if never subbed in yet.
+    if(isWCPlayer && (!subIn || g<subIn.gameweek)) continue;
     var pts=(S.scores[g]||{})[key]||0;
     var capThisGW=getCaptainForGW(ownerName,g);
     var isCap=capThisGW&&(capThisGW.name+"|"+capThisGW.club)===key;
@@ -1211,8 +1217,12 @@ function getPersonGWPts(name,gw){
   ["GK","DEF","MID","ATT","WC"].forEach(function(pos){
     (t[pos]||[]).forEach(function(p){
       var key=p.name+"|"+p.club;
-      var sub=(S.wildcardSubs[name]||[]).find(function(s){return (s.outPlayer.name+"|"+s.outPlayer.club)===key;});
-      if(sub&&gw>=sub.gameweek) return;
+      var subOut=(S.wildcardSubs[name]||[]).find(function(s){return (s.outPlayer.name+"|"+s.outPlayer.club)===key;});
+      if(subOut&&gw>=subOut.gameweek) return;
+      if(pos==="WC"){
+        var subIn=(S.wildcardSubs[name]||[]).find(function(s){return (s.inPlayer.name+"|"+s.inPlayer.club)===key;});
+        if(!subIn||gw<subIn.gameweek) return;
+      }
       var pts=gwS[key]||0;
       var isCap=capThisGW&&(capThisGW.name+"|"+capThisGW.club)===key;
       total+=isCap?pts*2:pts;
@@ -1676,13 +1686,94 @@ function endDraft(){
 
 // ── RENDER: MY TEAM ────────────────────────────────────────────────────────────
 function getPlayerGWPts(key, ownerName, gw){
+  var team=S.teams[ownerName]||{};
+  var isWCPlayer=(team.WC||[]).some(function(p){return (p.name+"|"+p.club)===key;});
   var capThisGW=getCaptainForGW(ownerName,gw);
   var isCap=capThisGW&&(capThisGW.name+"|"+capThisGW.club)===key;
-  var sub=(S.wildcardSubs[ownerName]||[]).find(function(s){return (s.outPlayer.name+"|"+s.outPlayer.club)===key;});
-  if(sub&&gw>=sub.gameweek) return 0;
+  var subOut=(S.wildcardSubs[ownerName]||[]).find(function(s){return (s.outPlayer.name+"|"+s.outPlayer.club)===key;});
+  if(subOut&&gw>=subOut.gameweek) return 0;
+  if(isWCPlayer){
+    var subIn=(S.wildcardSubs[ownerName]||[]).find(function(s){return (s.inPlayer.name+"|"+s.inPlayer.club)===key;});
+    if(!subIn||gw<subIn.gameweek) return 0;
+  }
   var pts=(S.scores[gw]||{})[key]||0;
   return isCap?pts*2:pts;
 }
+function renderSquadSection(owner, vGW, capForVGW){
+  var team=S.teams[owner]||{};
+  var html='<div class="sec-hdr">Squad</div>';
+  var usedForThisView=[];
+  ["GK","DEF","MID","ATT"].forEach(function(pos){
+    var needed=SLOTS[pos];
+    html+='<div style="margin-bottom:12px;"><div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;"><span class="badge badge-'+pos+'">'+pos+'</span><span style="color:#484f58;font-size:11px;">'+(team[pos]||[]).length+"/"+needed+"</span></div>";
+    for(var i=0;i<needed;i++){
+      var p=(team[pos]||[])[i];
+      if(p){
+        var key=p.name+"|"+p.club;
+        var subOut=(S.wildcardSubs[owner]||[]).find(function(s){return (s.outPlayer.name+"|"+s.outPlayer.club)===key;});
+        // Only reflect the swap once the viewed gameweek has reached the point the sub
+        // actually happened - navigating to an earlier week should still show the
+        // original player, since the swap hadn't occurred yet at that point in time.
+        var swapActive = subOut && vGW>=subOut.gameweek;
+        var displayPlayer = swapActive ? subOut.inPlayer : p;
+        var displayKey = displayPlayer.name+"|"+displayPlayer.club;
+        if(swapActive) usedForThisView.push({outgoing:p, sub:subOut});
+        var isCap=capForVGW&&(capForVGW.name+"|"+capForVGW.club)===displayKey;
+        var cumPts=getPlayerPts(displayKey,owner,vGW);
+        var gwScore=getPlayerGWPts(displayKey,owner,vGW);
+        var subNote=swapActive?'<span style="font-size:9px;color:#a78bfa;font-weight:normal;"> &middot; WC sub GW'+subOut.gameweek+'</span>':"";
+        html+='<div class="roster-slot filled">'+
+          '<div style="display:flex;align-items:center;justify-content:space-between;">'+
+          '<div style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+
+          displayPlayer.name+(isCap?'<span class="cap-badge">C&times;2</span>':"")+subNote+
+          ' <span style="font-size:10px;color:#484f58;font-weight:normal;">'+(displayPlayer.pickNumber?"#"+displayPlayer.pickNumber:"")+'</span></div>'+
+          '<div style="font-size:11px;color:#8b949e;">'+displayPlayer.club+' &middot; &pound;'+(displayPlayer.fplPrice||0)+'m</div></div>'+
+          '<div style="text-align:right;flex-shrink:0;padding-left:8px;">'+
+          '<span style="color:#10b981;font-size:14px;font-weight:700;font-family:Bangers,cursive;letter-spacing:0.5px;">'+cumPts+'</span>'+
+          '<span style="color:#484f58;font-size:11px;margin-left:4px;">+'+gwScore+'</span>'+
+          '</div></div></div>';
+      } else {
+        html+='<div class="roster-slot"><div style="color:#484f58;font-size:12px;">Empty slot</div></div>';
+      }
+    }
+    html+="</div>";
+  });
+
+  // WC section - only slots not yet used. Once a WC slot has been subbed in, it's removed
+  // from this list entirely (that player now appears in their new position slot above).
+  var wcRows="";
+  (team.WC||[]).forEach(function(p,i){
+    var key=p.name+"|"+p.club;
+    var subIn=(S.wildcardSubs[owner]||[]).find(function(s){return (s.inPlayer.name+"|"+s.inPlayer.club)===key;});
+    if(subIn) return;
+    var ownerEsc=owner.replace(/'/g,"\\'");
+    if(p.isNonPL){
+      wcRows+='<button class="btn btn-gray" style="margin-top:4px;font-size:12px;padding:7px;border-color:#f59e0b;" onclick="resolveWildcard(\''+ownerEsc+'\','+i+')">&#x26A0; Resolve '+p.name+' (Non-PL)</button>';
+    } else {
+      wcRows+='<button class="btn btn-gray" style="margin-top:4px;font-size:12px;padding:7px;" onclick="openSubModal(\''+ownerEsc+'\','+i+')">Sub in '+p.name+' ('+(p.position||"position unconfirmed")+')</button>';
+    }
+  });
+  if(wcRows && S.draftDone){
+    html+='<div style="margin-bottom:12px;"><div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;"><span class="badge badge-WC">WC</span><span style="color:#484f58;font-size:11px;">Wildcards</span></div>'+wcRows+'</div>';
+  }
+
+  // Used Players - outgoing players whose sub has taken effect as of the viewed gameweek,
+  // with their points locked at the point of substitution.
+  if(usedForThisView.length>0){
+    html+='<div class="sec-hdr" style="margin-top:16px;">Used Players</div>';
+    usedForThisView.forEach(function(u){
+      var key=u.outgoing.name+"|"+u.outgoing.club;
+      var lockedPts=getPlayerPts(key,owner,vGW);
+      html+='<div class="roster-slot" style="opacity:0.55;"><div style="display:flex;align-items:center;justify-content:space-between;">'+
+        '<div style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+u.outgoing.name+'</div>'+
+        '<div style="font-size:11px;color:#8b949e;">'+u.outgoing.club+' &middot; Subbed GW'+u.sub.gameweek+' for '+u.sub.inPlayer.name+'</div></div>'+
+        '<div style="text-align:right;flex-shrink:0;padding-left:8px;"><span style="color:#484f58;font-size:14px;font-weight:700;font-family:Bangers,cursive;letter-spacing:0.5px;">'+lockedPts+'</span></div>'+
+        '</div></div>';
+    });
+  }
+  return html;
+}
+
 function renderMyTeamTab(){
   var el=document.getElementById("tab-myteam");
   if(teamViewGW===null) teamViewGW=S.currentGW;
@@ -1713,46 +1804,7 @@ function renderMyTeamTab(){
     html+='<div class="warn">&#x26A0;&#xFE0F; No captain!<button class="btn btn-blue" style="margin-top:6px;padding:6px;" onclick="openMyCaptainModal()">Nominate</button></div>';
   }
 
-  html+='<div class="sec-hdr">Squad</div>';
-  var capForVGW=getCaptainForGW(S.myName,vGW);
-  Object.entries(SLOTS).forEach(function(entry){
-    var pos=entry[0],needed=entry[1];
-    html+='<div style="margin-bottom:12px;"><div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;"><span class="badge badge-'+pos+'">'+pos+'</span><span style="color:#484f58;font-size:11px;">'+(team[pos]||[]).length+"/"+needed+"</span></div>";
-    for(var i=0;i<needed;i++){
-      var p=(team[pos]||[])[i];
-      if(p){
-        var key=p.name+"|"+p.club;
-        var isCap=capForVGW&&(capForVGW.name+"|"+capForVGW.club)===key;
-        var cumPts=getPlayerPts(key,S.myName,vGW);
-        var gwScore=getPlayerGWPts(key,S.myName,vGW);
-        var subbed=(S.wildcardSubs[S.myName]||[]).find(function(s){return (s.outPlayer.name+"|"+s.outPlayer.club)===key;});
-        html+='<div class="roster-slot filled"'+(subbed?' style="opacity:0.4;"':"")+
-          '><div style="display:flex;align-items:center;justify-content:space-between;">'+
-          '<div style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+
-          p.name+(isCap?'<span class="cap-badge">C&times;2</span>':"")+
-          ' <span style="font-size:10px;color:#484f58;font-weight:normal;">'+(p.pickNumber?"#"+p.pickNumber:"")+'</span></div>'+
-          '<div style="font-size:11px;color:#8b949e;">'+p.club+(subbed?" &middot; <span style='color:#ef4444;'>Subbed</span>":"")+' &middot; &pound;'+p.fplPrice+'m</div></div>'+
-          '<div style="text-align:right;flex-shrink:0;padding-left:8px;">'+
-          '<span style="color:#10b981;font-size:14px;font-weight:700;font-family:Bangers,cursive;letter-spacing:0.5px;">'+cumPts+'</span>'+
-          '<span style="color:#484f58;font-size:11px;margin-left:4px;">+'+gwScore+'</span>'+
-          '</div></div></div>';
-      } else {
-        html+='<div class="roster-slot"><div style="color:#484f58;font-size:12px;">Empty slot</div></div>';
-      }
-    }
-    if(pos==="WC"&&S.draftDone){
-      (team[pos]||[]).forEach(function(p,i){
-        var key=p.name+"|"+p.club;
-        var subIn=(S.wildcardSubs[S.myName]||[]).find(function(s){return (s.inPlayer.name+"|"+s.inPlayer.club)===key;});
-        if(!subIn&&!p.isNonPL){
-          html+='<button class="btn btn-gray" style="margin-top:4px;font-size:12px;padding:7px;" onclick="openMySubModal('+i+')">Sub in '+p.name+'</button>';
-        } else if(p.isNonPL&&!subIn){
-          html+='<button class="btn btn-gray" style="margin-top:4px;font-size:12px;padding:7px;border-color:#f59e0b;" onclick="resolveMyWildcard('+i+')">&#x26A0; Resolve '+p.name+' (Non-PL)</button>';
-        }
-      });
-    }
-    html+="</div>";
-  });
+  html+=renderSquadSection(S.myName, vGW, getCaptainForGW(S.myName,vGW));
   html+="</div>";
   el.innerHTML=html;
 }
@@ -1814,37 +1866,7 @@ function renderFriendDetail(el,name){
     html+='<div class="warn">&#x26A0;&#xFE0F; No captain!<button class="btn btn-blue" style="margin-top:6px;padding:6px;" onclick="openCaptainModal(\''+safeName.replace(/'/g,"\\'")+'\')">Nominate</button></div>';
   }
 
-  Object.entries(SLOTS).forEach(function(entry){
-    var pos=entry[0],needed=entry[1];
-    var capForVGW=getCaptainForGW(name,vGW);
-    html+='<div style="margin-bottom:12px;"><div style="display:flex;align-items:center;gap:8px;margin-bottom:4px;">'+
-      '<span class="badge badge-'+pos+'">'+pos+'</span>'+
-      '<span style="color:#484f58;font-size:11px;">'+(team[pos]||[]).length+"/"+needed+"</span></div>";
-    for(var i=0;i<needed;i++){
-      var p=(team[pos]||[])[i];
-      if(p){
-        var key=p.name+"|"+p.club;
-        var isCap=capForVGW&&(capForVGW.name+"|"+capForVGW.club)===key;
-        var cumPts=getPlayerPts(key,name,vGW);
-        var gwScore=getPlayerGWPts(key,name,vGW);
-        var subbed=(S.wildcardSubs[name]||[]).find(function(s){return (s.outPlayer.name+"|"+s.outPlayer.club)===key;});
-        html+='<div class="roster-slot filled"'+(subbed?' style="opacity:0.4;"':"")+'>'+
-          '<div style="display:flex;align-items:center;justify-content:space-between;">'+
-          '<div style="flex:1;min-width:0;">'+
-          '<div style="font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+
-          p.name+(isCap?'<span class="cap-badge">C&times;2</span>':"")+
-          ' <span style="font-size:10px;color:#484f58;font-weight:normal;">'+(p.pickNumber?"#"+p.pickNumber:"")+'</span></div>'+
-          '<div style="font-size:11px;color:#8b949e;">'+p.club+(subbed?" &middot; <span style='color:#ef4444;'>Subbed</span>":"")+'</div></div>'+
-          '<div style="text-align:right;flex-shrink:0;padding-left:8px;">'+
-          '<span style="color:#10b981;font-size:14px;font-weight:700;font-family:Bangers,cursive;letter-spacing:0.5px;">'+cumPts+'</span>'+
-          '<span style="color:#484f58;font-size:11px;margin-left:4px;">+'+gwScore+'</span>'+
-          '</div></div></div>';
-      } else {
-        html+='<div class="roster-slot"><div style="color:#484f58;font-size:12px;">Empty</div></div>';
-      }
-    }
-    html+="</div>";
-  });
+  html+=renderSquadSection(name, vGW, getCaptainForGW(name,vGW));
   html+="</div>";
   el.innerHTML=html;
   // Store friend name for GW nav
@@ -1911,15 +1933,21 @@ function openSubModal(personName,wcIdx){
   var team=S.teams[personName]||{};
   var wcPlayer=(team.WC||[])[wcIdx];
   if(!wcPlayer) return;
-  var html='<h3>Sub In '+wcPlayer.name+'</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Select a player to permanently replace. They will stop scoring from now.</p>';
-  ["GK","DEF","MID","ATT"].forEach(function(pos){
-    (team[pos]||[]).forEach(function(p,i){
-      var key=p.name+"|"+p.club;
-      var gone=(S.wildcardSubs[personName]||[]).find(function(s){return (s.outPlayer.name+"|"+s.outPlayer.club)===key;});
-      if(gone) return;
-      html+='<div class="player-row" onclick="confirmSub(\''+personName.replace(/'/g,"\\'")+'\','+wcIdx+',\''+p.name.replace(/'/g,"\\'")+'\',\''+p.club.replace(/'/g,"\\'")+'\',\''+pos+'\','+i+')"><div style="display:flex;align-items:center;gap:10px;"><span class="badge badge-'+p.position+'">'+p.position+'</span><div style="flex:1;"><div class="pname">'+p.name+'</div><div class="psub">'+p.club+"</div></div></div></div>";
-    });
+  var wcPos=wcPlayer.position;
+  var html='<h3>Sub In '+wcPlayer.name+'</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Select a '+(wcPos||"matching-position")+' player to permanently replace. They will stop scoring from now.</p>';
+  if(!wcPos || !["GK","DEF","MID","ATT"].includes(wcPos)){
+    html+='<div class="warn">This player\'s position isn\'t confirmed yet. Resolve them first if they\'re a non-PL signing.</div>';
+    showModal(html); return;
+  }
+  var shown=0;
+  (team[wcPos]||[]).forEach(function(p,i){
+    var key=p.name+"|"+p.club;
+    var gone=(S.wildcardSubs[personName]||[]).find(function(s){return (s.outPlayer.name+"|"+s.outPlayer.club)===key;});
+    if(gone) return;
+    shown++;
+    html+='<div class="player-row" onclick="confirmSub(\''+personName.replace(/'/g,"\\'")+'\','+wcIdx+',\''+p.name.replace(/'/g,"\\'")+'\',\''+p.club.replace(/'/g,"\\'")+'\',\''+wcPos+'\','+i+')"><div style="display:flex;align-items:center;gap:10px;"><span class="badge badge-'+p.position+'">'+p.position+'</span><div style="flex:1;"><div class="pname">'+p.name+'</div><div class="psub">'+p.club+"</div></div></div></div>";
   });
+  if(shown===0) html+='<div class="warn">No eligible '+wcPos+' players left to replace - they may all already be used.</div>';
   showModal(html);
 }
 function confirmSub(personName,wcIdx,outName,outClub,outPos,outIdx){
@@ -1952,10 +1980,18 @@ function executeSub(personName,wcIdx,outName,outClub,outPos,outIdx){
   if(viewingFriend===personName) renderFriendDetail(document.getElementById("tab-friends"),personName);
 }
 function resolveWildcard(personName,wcIdx){
-  showModal('<h3>Resolve Wildcard</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">This player is now at a PL club. Select their club to link FPL scoring.</p><label class="lbl">Premier League Club</label><select class="inp" id="resolve-club" style="margin-bottom:14px;">'+PL_CLUBS.map(function(c){return '<option>'+c+'</option>';}).join("")+'</select><button class="btn btn-blue" onclick="doResolveWildcard(\''+personName.replace(/'/g,"\\'")+'\','+wcIdx+')">Resolve</button>');
+  var team=S.teams[personName]||{};
+  var wcPlayer=(team.WC||[])[wcIdx];
+  var guessedPos=(wcPlayer&&wcPlayer.position)||"";
+  var posOptions=[["","Not sure - try to detect automatically"],["GK","Goalkeeper"],["DEF","Defender"],["MID","Midfielder"],["ATT","Forward"]];
+  showModal('<h3>Resolve Wildcard</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">This player is now at a PL club. Select their club to link FPL scoring.</p><label class="lbl">Premier League Club</label><select class="inp" id="resolve-club" style="margin-bottom:14px;">'+PL_CLUBS.map(function(c){return '<option>'+c+'</option>';}).join("")+'</select>'+
+    '<label class="lbl">Position (only used if we can\'t confirm one automatically from official FPL data)</label><select class="inp" id="resolve-pos-manual" style="margin-bottom:14px;">'+posOptions.map(function(o){return '<option value="'+o[0]+'"'+(o[0]===guessedPos?" selected":"")+'>'+o[1]+'</option>';}).join("")+'</select>'+
+    '<button class="btn btn-blue" onclick="doResolveWildcard(\''+personName.replace(/'/g,"\\'")+'\','+wcIdx+')">Resolve</button>');
 }
+var FPL_ELEMENT_TYPE_MAP={1:"GK",2:"DEF",3:"MID",4:"ATT"};
 async function doResolveWildcard(personName,wcIdx){
   var club=document.getElementById("resolve-club").value;
+  var manualPos=document.getElementById("resolve-pos-manual").value;
   var team=S.teams[personName];
   if(!team||!team.WC[wcIdx]) return;
   var playerName=team.WC[wcIdx].name;
@@ -1964,7 +2000,7 @@ async function doResolveWildcard(personName,wcIdx){
   // every other player, instead of the previous behaviour where a resolved non-PL wildcard
   // never got an fplId at all and would silently score 0 forever with no warning - a direct
   // accuracy gap against official FPL, since nothing told the user this wasn't working.
-  var fplId=null, matchWarning="";
+  var fplId=null, matchWarning="", resolvedPos=null;
   try{
     var bootstrap = await fetchWithFallback(
       "https://fantasy.premierleague.com/api/bootstrap-static/",
@@ -1981,6 +2017,9 @@ async function doResolveWildcard(personName,wcIdx){
     });
     if(candidates.length===1){
       fplId=candidates[0].id;
+      // Confident match found - use their real official position automatically rather
+      // than trusting whatever was guessed when they were free-typed in at draft time.
+      resolvedPos=FPL_ELEMENT_TYPE_MAP[candidates[0].element_type]||null;
     } else if(candidates.length===0){
       matchWarning="Could not find "+playerName+" in official FPL data for "+club+" - they won't receive automatic live scoring. Use Manual Score Override in Settings each gameweek instead, or check the name/club spelling and try again.";
     } else {
@@ -1989,12 +2028,19 @@ async function doResolveWildcard(personName,wcIdx){
   }catch(e){
     matchWarning="Couldn't reach official FPL data to confirm "+playerName+" ("+e.message+"). Live scoring isn't linked yet - use Manual Score Override in Settings, or try resolving again later.";
   }
-  team.WC[wcIdx].club=club; team.WC[wcIdx].isNonPL=false;
+  // Fall back to the manually-selected position only if we couldn't confidently detect one.
+  var finalPos = resolvedPos || manualPos || team.WC[wcIdx].position || null;
+  if(!finalPos){
+    closeModal();
+    showToast("Couldn't confirm a position for "+playerName+" - please try Resolve again and select a position manually so subbing works correctly.");
+    return;
+  }
+  team.WC[wcIdx].club=club; team.WC[wcIdx].isNonPL=false; team.WC[wcIdx].position=finalPos;
   if(fplId!=null) team.WC[wcIdx].fplId=fplId;
   sv("teams",S.teams);
   closeModal();
   if(matchWarning) showToast(matchWarning);
-  else showToast(playerName+" linked to official FPL data - live scoring active.");
+  else showToast(playerName+" linked to official FPL data ("+finalPos+") - live scoring active.");
   renderMyTeamTab();
 }
 
