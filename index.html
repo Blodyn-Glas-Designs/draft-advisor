@@ -349,6 +349,8 @@ label.lbl{display:block;color:#8b5cf6;font-size:11px;text-transform:uppercase;le
     <div id="tab-settings" class="tab-content"></div>
     <div id="tab-pool" class="tab-content"></div>
     <div id="tab-stats" class="tab-content"></div>
+    <div id="tab-cup" class="tab-content"></div>
+    <div id="tab-rules" class="tab-content"></div>
     <div id="bottomnav">
       <button class="nav-btn" data-tab="draft" onclick="showTab('draft')"><span class="icon">&#x1F3DF;</span><span>Draft</span></button>
       <button class="nav-btn" data-tab="myteam" onclick="showTab('myteam')"><span class="icon">&#x1F464;</span><span>My Team</span></button>
@@ -414,7 +416,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-08-09.8";
+const APP_VERSION = "2026-08-09.13";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 const TOTAL_PICKS = 17;
 const CHART_COLORS = ["#10b981","#3b82f6","#f59e0b","#ef4444","#8b5cf6","#ec4899","#06b6d4","#84cc16","#f97316","#a855f7","#14b8a6","#eab308"];
@@ -460,6 +462,7 @@ let S = {
   playerPool:[], pickedMap:{}, teams:{}, snakeOrder:[], pickIdx:0,
   draftDone:false, hideDraft:false, captains:{}, captainHistory:{}, wildcardSubs:{},
   scores:{}, scoresFetched:{}, scoreOverrides:{}, lastRefreshed:null, currentGW:1, history:[],
+  cups:[],
   advice:null, adviceLoading:false, defaultTab:"myteam",
   lastBackup:null
 };
@@ -487,6 +490,7 @@ function saveAll(){
   sv("captains",S.captains); sv("captainHistory",S.captainHistory); sv("wildcards",S.wildcardSubs);
   sv("scores",S.scores); sv("scoresFetched",S.scoresFetched); sv("scoreOverrides",S.scoreOverrides);
   sv("meta",{lastRefreshed:S.lastRefreshed,currentGW:S.currentGW});
+  sv("cups",S.cups);
   sv("clubs",PL_CLUBS);
 }
 function loadAll(){
@@ -498,6 +502,7 @@ function loadAll(){
   var sn=ld("snake",{}); S.snakeOrder=sn.snakeOrder||[]; S.pickIdx=sn.pickIdx||0;
   S.captains=ld("captains",{}); S.captainHistory=ld("captainHistory",{}); S.wildcardSubs=ld("wildcards",{});
   S.scores=ld("scores",{}); S.scoresFetched=ld("scoresFetched",{}); S.scoreOverrides=ld("scoreOverrides",{});
+  S.cups=ld("cups",[]);
   var m=ld("meta",{});
   S.lastRefreshed=m.lastRefreshed||null; S.currentGW=m.currentGW||1; S.lastBackup=m.lastBackup||null;
   var savedClubs=ld("clubs",[]);
@@ -1254,18 +1259,52 @@ function getCaptainForGW(name, gw){
   var cur = S.captains[name];
   return cur ? cur.player : null;
 }
+var CAPTAIN_BUDGET_DAYS = 90;
+// Sums real elapsed time across every era this specific player has held the captaincy for
+// this owner (potentially several separate, non-contiguous stints - e.g. captained, swapped
+// out due to injury, re-nominated weeks later). This is a TRUE lifetime budget: time only
+// accrues while they're actually captain, and stays frozen (banked) while they're not.
+function getCaptainBudget(ownerName, playerKey){
+  var hist = S.captainHistory[ownerName]||[];
+  var usedMs = 0, hasEverBeenCaptain = false, isCurrentlyActive = false;
+  var nowMs = Date.now();
+  hist.forEach(function(era){
+    var eraKey = era.player.name+"|"+era.player.club;
+    if(eraKey!==playerKey) return;
+    hasEverBeenCaptain = true;
+    if(!era.startDate) return; // pre-fix data with no real date recorded - can't count it
+    var startMs = new Date(era.startDate).getTime();
+    var endMs = era.endDate ? new Date(era.endDate).getTime() : nowMs;
+    if(era.endDate==null) isCurrentlyActive = true;
+    usedMs += Math.max(0, endMs-startMs);
+  });
+  var usedDays = usedMs/(1000*60*60*24);
+  var remainingDays = Math.max(0, CAPTAIN_BUDGET_DAYS-usedDays);
+  return {usedDays:usedDays, remainingDays:remainingDays, hasEverBeenCaptain:hasEverBeenCaptain, isCurrentlyActive:isCurrentlyActive};
+}
+// Small badge shown next to a player - active countdown while they're captain now, a
+// frozen "banked" balance while they held the armband before but aren't currently captain,
+// or an explicit "budget used" flag once their full 90 days is spent (they can never be
+// re-nominated once this shows).
+function captainBudgetBadgeHtml(ownerName, playerKey){
+  var b=getCaptainBudget(ownerName,playerKey);
+  if(!b.hasEverBeenCaptain) return "";
+  var d=Math.ceil(b.remainingDays);
+  if(d<=0) return '<span class="cap-timer red">BUDGET USED</span>';
+  var cls=d<=7?"amber":"green";
+  var label=b.isCurrentlyActive?d+"d left":d+"d banked";
+  return '<span class="cap-timer '+cls+'">'+label+'</span>';
+}
 function capDaysLeft(name){
   var cap=S.captains[name];
   if(!cap) return null;
-  var set=new Date(cap.dateSet),exp=new Date(set);
-  exp.setMonth(exp.getMonth()+3);
-  return Math.ceil((exp-new Date())/(1000*60*60*24));
+  var key=cap.player.name+"|"+cap.player.club;
+  return Math.ceil(getCaptainBudget(name,key).remainingDays);
 }
 function capTimerHtml(name){
-  var d=capDaysLeft(name);
-  if(d===null) return "";
-  var cls=d<=0?"red":d<=7?"amber":"green";
-  return '<span class="cap-timer '+cls+'">'+(d<=0?"EXPIRED":d+"d left")+'</span>';
+  var cap=S.captains[name];
+  if(!cap) return "";
+  return captainBudgetBadgeHtml(name, cap.player.name+"|"+cap.player.club);
 }
 
 // ── DRAFT CORE ─────────────────────────────────────────────────────────────────
@@ -1701,7 +1740,11 @@ function getPlayerGWPts(key, ownerName, gw){
 }
 function renderSquadSection(owner, vGW, capForVGW){
   var team=S.teams[owner]||{};
-  var html='<div class="sec-hdr">Squad</div>';
+  var html='';
+  if(S.draftDone && emergencyReplaceWindowOpen()){
+    html+='<button class="btn btn-gray" style="margin-bottom:12px;border:1px solid #f59e0b;color:#f59e0b;font-size:12px;padding:8px;" onclick="openEmergencyReplaceSelect(\''+owner.replace(/'/g,"\\'")+'\')">&#x26A0; Player left the Premier League? Free replacement (before Fri 21 Aug kickoff)</button>';
+  }
+  html+='<div class="sec-hdr">Squad</div>';
   var usedForThisView=[];
   ["GK","DEF","MID","ATT"].forEach(function(pos){
     var needed=SLOTS[pos];
@@ -1722,11 +1765,12 @@ function renderSquadSection(owner, vGW, capForVGW){
         var cumPts=getPlayerPts(displayKey,owner,vGW);
         var gwScore=getPlayerGWPts(displayKey,owner,vGW);
         var subNote=swapActive?'<span style="font-size:9px;color:#a78bfa;font-weight:normal;"> &middot; WC sub GW'+subOut.gameweek+'</span>':"";
+        var pickOrder=getPersonalPickOrder(owner,displayKey);
         html+='<div class="roster-slot filled">'+
           '<div style="display:flex;align-items:center;justify-content:space-between;">'+
           '<div style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+
-          displayPlayer.name+(isCap?'<span class="cap-badge">C&times;2</span>':"")+subNote+
-          ' <span style="font-size:10px;color:#484f58;font-weight:normal;">'+(displayPlayer.pickNumber?"#"+displayPlayer.pickNumber:"")+'</span></div>'+
+          displayPlayer.name+(isCap?'<span class="cap-badge">C&times;2</span>':"")+captainBudgetBadgeHtml(owner,displayKey)+subNote+
+          ' <span style="font-size:10px;color:#484f58;font-weight:normal;">'+(pickOrder?"Pick #"+pickOrder:"")+'</span></div>'+
           '<div style="font-size:11px;color:#8b949e;">'+displayPlayer.club+' &middot; &pound;'+(displayPlayer.fplPrice||0)+'m</div></div>'+
           '<div style="text-align:right;flex-shrink:0;padding-left:8px;">'+
           '<span style="color:#10b981;font-size:14px;font-weight:700;font-family:Bangers,cursive;letter-spacing:0.5px;">'+cumPts+'</span>'+
@@ -1888,18 +1932,28 @@ function friendGWFwd(){
 function openMySubModal(i){ openSubModal(S.myName, i); }
 function resolveMyWildcard(i){ resolveWildcard(S.myName, i); }
 function openMyCaptainModal(){ openCaptainModal(S.myName); }
+function getPersonalPickOrder(ownerName, key){
+  var myPicks=Object.entries(S.pickedMap).filter(function(e){return e[1]===ownerName;}).map(function(e){return e[0];});
+  var idx=myPicks.indexOf(key);
+  return idx>=0?idx+1:null;
+}
 function openCaptainModal(personName){
   var team=S.teams[personName]||{};
   var existing=S.captains[personName];
   var myPicks=Object.entries(S.pickedMap).filter(function(e){return e[1]===personName;}).map(function(e){return e[0];});
   var firstPickKey=myPicks[0]||null;
-  var html='<h3>Nominate Captain for '+personName+'</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Cannot be their first pick. Points doubled for up to 3 months.</p>';
+  var html='<h3>Nominate Captain for '+personName+'</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Cannot be their first pick. Each player has a 90-day lifetime budget as captain (can be split across separate stints).</p>';
   ["GK","DEF","MID","ATT"].forEach(function(pos){
     (team[pos]||[]).forEach(function(p){
       var key=p.name+"|"+p.club;
       if(key===firstPickKey) return;
       var isCur=existing&&(existing.player.name+"|"+existing.player.club)===key;
-      html+='<div class="player-row'+(isCur?" tapped":"")+'" onclick="setCaptain(\''+personName.replace(/'/g,"\\'")+'\',\''+p.name.replace(/'/g,"\\'")+'\',\''+p.club.replace(/'/g,"\\'")+'\')"><div style="display:flex;align-items:center;gap:10px;"><span class="badge badge-'+p.position+'">'+p.position+'</span><div style="flex:1;"><div class="pname">'+p.name+(isCur?' <span class="cap-badge">Current C</span>':"")+' <span style="font-size:10px;color:#484f58;font-weight:normal;">'+(p.pickNumber?"#"+p.pickNumber:"")+"</span></div><div class='psub'>"+p.club+"</div></div></div></div>";
+      var budget=getCaptainBudget(personName,key);
+      var exhausted=budget.hasEverBeenCaptain && budget.remainingDays<=0 && !isCur;
+      var order=getPersonalPickOrder(personName,key);
+      var rowCls="player-row"+(isCur?" tapped":"")+(exhausted?" grayed":"");
+      var rowClick=exhausted?"":"onclick=\"setCaptain('"+personName.replace(/'/g,"\\'")+"','"+p.name.replace(/'/g,"\\'")+"','"+p.club.replace(/'/g,"\\'")+"')\"";
+      html+='<div class="'+rowCls+'" '+rowClick+'><div style="display:flex;align-items:center;gap:10px;"><span class="badge badge-'+p.position+'">'+p.position+'</span><div style="flex:1;"><div class="pname">'+p.name+(isCur?' <span class="cap-badge">Current C</span>':"")+captainBudgetBadgeHtml(personName,key)+' <span style="font-size:10px;color:#484f58;font-weight:normal;">'+(order?"Pick #"+order:"")+"</span></div><div class='psub'>"+p.club+(exhausted?" &middot; can't be re-nominated":"")+"</div></div></div></div>";
     });
   });
   showModal(html);
@@ -1908,21 +1962,35 @@ function setCaptain(personName,pName,pClub){
   var team=S.teams[personName]||{},player=null;
   ["GK","DEF","MID","ATT"].forEach(function(pos){(team[pos]||[]).forEach(function(p){if(p.name===pName&&p.club===pClub)player=p;});});
   if(!player) return;
+  var key=pName+"|"+pClub;
+  var budget=getCaptainBudget(personName,key);
+  if(budget.remainingDays<=0 && budget.hasEverBeenCaptain){
+    showToast(pName+" has used their full 90 days as captain and can't be nominated again.");
+    return;
+  }
   var startGW = S.currentGW||1;
+  var nowIso = new Date().toISOString();
   if(!S.captainHistory[personName]) S.captainHistory[personName]=[];
   // Seed history for pre-existing data that had a captain set before this fix existed -
-  // treat that earlier captain as having applied from GW1, so their already-seen totals
-  // don't silently change the moment a new captain is nominated.
+  // treat that earlier captain as having applied from GW1/their original dateSet, so their
+  // already-seen totals and accrued budget usage don't silently change or reset.
   if(S.captainHistory[personName].length===0 && S.captains[personName]){
-    S.captainHistory[personName].push({player:S.captains[personName].player, startGW:1});
+    S.captainHistory[personName].push({
+      player:S.captains[personName].player, startGW:1,
+      startDate:S.captains[personName].dateSet||nowIso, endDate:null
+    });
   }
   var histArr=S.captainHistory[personName];
   var lastEntry=histArr[histArr.length-1];
   var isSamePlayer=lastEntry && lastEntry.player.name===player.name && lastEntry.player.club===player.club;
   // Only open a new era if this is genuinely a different captain - avoids a redundant
   // zero-length entry if the same player is re-confirmed as captain.
-  if(!isSamePlayer) histArr.push({player:player, startGW:startGW});
-  S.captains[personName]={player:player,dateSet:new Date().toISOString()};
+  if(!isSamePlayer){
+    // Close out whichever era was previously open (it stops accruing budget usage now).
+    if(lastEntry && lastEntry.endDate==null) lastEntry.endDate=nowIso;
+    histArr.push({player:player, startGW:startGW, startDate:nowIso, endDate:null});
+  }
+  S.captains[personName]={player:player,dateSet:nowIso};
   sv("captains",S.captains); sv("captainHistory",S.captainHistory);
   closeModal(); checkCaptainBanner();
   renderMyTeamTab(); renderFriendsTab();
@@ -2308,6 +2376,37 @@ function shareWhatsApp(){
   var text="⚽ Fantasy Draft Leaderboard — GW"+S.currentGW+"\n\n"+standings.map(function(s,i){return (i+1)+". "+s.name+": "+s.total+"pts";}).join("\n")+"\n\n🤖 Draft Advisor App";
   window.open("https://wa.me/?text="+encodeURIComponent(text),"_blank");
 }
+function shareCupRound(cupId, roundIdx){
+  var cup=S.cups.find(function(c){return c.id===cupId;});
+  if(!cup) return;
+  var round=cup.rounds[roundIdx];
+  if(!round) return;
+  var lines=[];
+  round.matchups.forEach(function(m){
+    if(m.bye){
+      lines.push(m.p1+" — BYE, through automatically");
+      return;
+    }
+    var winner=getCupMatchWinner(cup,round,m);
+    var s1=S.scores[round.gw]?getPersonGWPts(m.p1,round.gw):null;
+    var s2=S.scores[round.gw]?getPersonGWPts(m.p2,round.gw):null;
+    if(!winner || s1===null){
+      lines.push(m.p1+" vs "+m.p2+" — awaiting GW"+round.gw+" scores");
+      return;
+    }
+    var tieNote=(s1===s2)?(m.forcedWinner?" (tiebreak: coin flip)":" (tiebreak: captain score)"):"";
+    lines.push(m.p1+" "+s1+" - "+s2+" "+m.p2+". "+winner+" advances"+tieNote+".");
+  });
+  var header="🏆 "+cup.name+" — Round "+(roundIdx+1)+" (GW"+round.gw+")";
+  var text=header+"\n\n"+lines.join("\n")+"\n\n🤖 Draft Advisor App";
+  window.open("https://wa.me/?text="+encodeURIComponent(text),"_blank");
+}
+function shareCupFinal(cupId){
+  var cup=S.cups.find(function(c){return c.id===cupId;});
+  if(!cup||cup.status!=="completed") return;
+  var text="🏆 "+cup.name+" — WINNER: "+cup.winner+"! 🎉\n\n🤖 Draft Advisor App";
+  window.open("https://wa.me/?text="+encodeURIComponent(text),"_blank");
+}
 
 // ── RENDER: SETTINGS ───────────────────────────────────────────────────────────
 function renderSettingsTab(){
@@ -2344,6 +2443,8 @@ function renderSettingsTab(){
   html+='<button class="btn btn-gray" style="margin-bottom:8px;" onclick="doRefreshScores()">&#x1F504; Refresh Scores</button>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #8b5cf6;color:#8b5cf6;" onclick="confirmAutoFill()">&#x1F3B2; Auto-Fill Test Data</button>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;" onclick="openScoreOverride()">&#x270F; Manual Score Override</button>';
+  html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #6366f1;color:#818cf8;" onclick="showTab(\'rules\')">&#x1F4D6; League Rules</button>';
+  html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #f59e0b;color:#f59e0b;" onclick="showTab(\'cup\')">&#x1F3C6; Knockout Cup</button>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #10b981;color:#10b981;" onclick="exportBackup()">&#x2B07; Export Backup</button>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #10b981;color:#10b981;" onclick="importBackup()">&#x2B06; Import Backup</button>';
   html+='<button class="btn btn-gray" onclick="confirmReset()">&#x26A0; Reset Data</button>';
@@ -2424,16 +2525,17 @@ function autoFillDraft(){
     }
   }
   S.pickIdx=S.snakeOrder.length;
+  var gwInput=document.getElementById("fill-gws");
+  var numGWs=gwInput?Math.min(38,Math.max(1,parseInt(gwInput.value)||10)):10;
   S.draftOrder.forEach(function(name){
     var t=S.teams[name]||{},players=[];
     ["GK","DEF","MID","ATT"].forEach(function(pos){(t[pos]||[]).forEach(function(p){players.push(p);});});
     if(players.length>=2){
-      S.captains[name]={player:players[1],dateSet:new Date().toISOString()};
-      S.captainHistory[name]=[{player:players[1],startGW:1}];
+      var startDate=new Date(Date.now()-numGWs*7*24*60*60*1000).toISOString();
+      S.captains[name]={player:players[1],dateSet:startDate};
+      S.captainHistory[name]=[{player:players[1],startGW:1,startDate:startDate,endDate:null}];
     }
   });
-  var gwInput=document.getElementById("fill-gws");
-  var numGWs=gwInput?Math.min(38,Math.max(1,parseInt(gwInput.value)||10)):10;
   for(var gw=1;gw<=numGWs;gw++){
     var gwScores={};
     Object.keys(S.pickedMap).forEach(function(key){
@@ -2454,6 +2556,285 @@ function autoFillDraft(){
   showTab("myteam");
 }
 
+
+// ── PRE-SEASON EMERGENCY REPLACEMENT ────────────────────────────────────────────
+// Free, one-time-per-player replacement for a drafted player who leaves the Premier
+// League before the season actually kicks off - distinct from a wildcard sub (uses no
+// slot, no permanent-swap limit). Only available before the real season-opener kickoff:
+// Arsenal v Coventry City, Friday 21 August 2026, 20:00 BST (19:00 UTC) - confirmed via
+// the official Premier League fixture release, not guessed.
+var EMERGENCY_REPLACE_CUTOFF = new Date("2026-08-21T19:00:00Z").getTime();
+function emergencyReplaceWindowOpen(){ return Date.now() < EMERGENCY_REPLACE_CUTOFF; }
+function openEmergencyReplaceSelect(owner){
+  var team=S.teams[owner]||{};
+  var html='<h3>&#x26A0; Player Left the Premier League?</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Free replacement from the undrafted pool, only available before kickoff of the season opener (Fri 21 Aug, 8pm). Select who left.</p>';
+  var any=false;
+  ["GK","DEF","MID","ATT"].forEach(function(pos){
+    (team[pos]||[]).forEach(function(p,i){
+      if(p.isNonPL) return;
+      any=true;
+      html+='<div class="player-row" onclick="openEmergencyReplaceTarget(\''+owner.replace(/'/g,"\\'")+'\',\''+pos+'\','+i+')"><div style="display:flex;align-items:center;gap:10px;"><span class="badge badge-'+p.position+'">'+p.position+'</span><div style="flex:1;"><div class="pname">'+p.name+'</div><div class="psub">'+p.club+'</div></div></div></div>';
+    });
+  });
+  if(!any) html+='<div style="color:#8b949e;font-size:13px;">No eligible players.</div>';
+  showModal(html);
+}
+function openEmergencyReplaceTarget(owner,pos,idx){
+  var team=S.teams[owner]||{};
+  var outgoing=(team[pos]||[])[idx];
+  if(!outgoing) return;
+  var pickedKeys=Object.keys(S.pickedMap);
+  var avail=S.playerPool.filter(function(p){
+    if(p.position!==outgoing.position) return false;
+    if(pickedKeys.indexOf(p.name+"|"+p.club)!==-1) return false;
+    // Club-max check, correctly excluding the outgoing player's own club membership -
+    // they're leaving, so their slot shouldn't count against a same-club replacement.
+    var count=clubCountForPicker(owner,p.club) - (outgoing.club===p.club?1:0);
+    return count<S.clubMax;
+  }).sort(function(a,b){return b.lastSeasonPts-a.lastSeasonPts;});
+  var html='<h3>Replace '+outgoing.name+'</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Select a '+outgoing.position+' from undrafted players.</p>';
+  if(avail.length===0) html+='<div class="warn">No eligible undrafted '+outgoing.position+' available.</div>';
+  avail.slice(0,60).forEach(function(p){
+    html+='<div class="player-row" onclick="doEmergencyReplace(\''+owner.replace(/'/g,"\\'")+'\',\''+pos+'\','+idx+',\''+p.name.replace(/'/g,"\\'")+'\',\''+p.club.replace(/'/g,"\\'")+'\')"><div style="display:flex;align-items:center;gap:10px;"><span class="badge badge-'+p.position+'">'+p.position+'</span><div style="flex:1;"><div class="pname">'+p.name+'</div><div class="psub">'+p.club+' &middot; '+p.lastSeasonPts+'pts</div></div></div></div>';
+  });
+  showModal(html);
+}
+function doEmergencyReplace(owner,pos,idx,newName,newClub){
+  var team=S.teams[owner];
+  var outgoing=team&&team[pos]&&team[pos][idx];
+  if(!outgoing) return;
+  // Safety check: don't let this collide with the separate wildcard-sub system if a sub
+  // has somehow already touched this exact player (shouldn't happen pre-season, but avoid
+  // corrupting wildcardSubs bookkeeping if it ever does).
+  var inSubHistory=(S.wildcardSubs[owner]||[]).some(function(s){
+    var k=outgoing.name+"|"+outgoing.club;
+    return (s.outPlayer.name+"|"+s.outPlayer.club)===k || (s.inPlayer.name+"|"+s.inPlayer.club)===k;
+  });
+  if(inSubHistory){ showToast("This player is already involved in a wildcard sub - can't use the free pre-season replacement."); return; }
+  var newPlayer=S.playerPool.find(function(p){return p.name===newName&&p.club===newClub;});
+  if(!newPlayer){ showToast("Player not found."); return; }
+  var outgoingKey=outgoing.name+"|"+outgoing.club;
+  var newKey=newName+"|"+newClub;
+  // Rebuild pickedMap preserving insertion order, swapping the old key for the new one at
+  // the exact same position - personal pick order (and therefore the "can't be your first
+  // pick" captain rule) is derived from this order, so the replacement should inherit the
+  // departed player's exact slot rather than being treated as a brand new pick.
+  var rebuilt={};
+  Object.entries(S.pickedMap).forEach(function(e){
+    if(e[0]===outgoingKey) rebuilt[newKey]=owner;
+    else rebuilt[e[0]]=e[1];
+  });
+  S.pickedMap=rebuilt;
+  team[pos][idx]=Object.assign({},newPlayer,{pickNumber:outgoing.pickNumber});
+  sv("teams",S.teams); sv("picked",S.pickedMap);
+  closeModal();
+  showToast(outgoing.name+" replaced with "+newName+" - free pre-season swap.");
+  renderMyTeamTab(); renderFriendsTab();
+}
+
+// ── KNOCKOUT CUP ───────────────────────────────────────────────────────────────
+// A cup runs in parallel to the main draft/league - same teams, same real GW scores,
+// just compared head-to-head in a randomly-drawn single-elimination bracket for
+// whichever gameweeks the organiser nominates. See renderCupTab/renderCupDetail below.
+var viewingCup=null;
+function shuffleArr(arr){
+  var a=arr.slice();
+  for(var i=a.length-1;i>0;i--){ var j=Math.floor(Math.random()*(i+1)); var t=a[i]; a[i]=a[j]; a[j]=t; }
+  return a;
+}
+// Determines the winner of a single matchup using the SAME real GW score data shown
+// everywhere else (captain doubling, sub handling all already baked into getPersonGWPts).
+// Tiebreak order: 1) team GW score, 2) each captain's own GW score, 3) a one-time random
+// decision that gets permanently frozen (stored on the matchup) so it never flips on a
+// later re-render.
+function getCupMatchWinner(cup,round,matchup){
+  if(matchup.bye) return matchup.p1;
+  if(!S.scores[round.gw]) return null; // scores not in yet - pending
+  var s1=getPersonGWPts(matchup.p1,round.gw), s2=getPersonGWPts(matchup.p2,round.gw);
+  if(s1>s2) return matchup.p1;
+  if(s2>s1) return matchup.p2;
+  var cap1=getCaptainForGW(matchup.p1,round.gw), cap2=getCaptainForGW(matchup.p2,round.gw);
+  var c1pts=cap1?((S.scores[round.gw]||{})[cap1.name+"|"+cap1.club]||0):null;
+  var c2pts=cap2?((S.scores[round.gw]||{})[cap2.name+"|"+cap2.club]||0):null;
+  if(c1pts!=null && c2pts!=null && c1pts!==c2pts) return c1pts>c2pts?matchup.p1:matchup.p2;
+  if(!matchup.forcedWinner){
+    matchup.forcedWinner=Math.random()<0.5?matchup.p1:matchup.p2;
+    sv("cups",S.cups);
+  }
+  return matchup.forcedWinner;
+}
+function openCreateCup(){
+  var options=S.draftOrder.map(function(n){
+    return '<label style="display:flex;align-items:center;gap:8px;padding:6px 0;"><input type="checkbox" class="cup-participant" value="'+n.replace(/"/g,"&quot;")+'" checked> '+n+'</label>';
+  }).join("");
+  showModal('<h3>&#x1F3C6; New Knockout Cup</h3>'+
+    '<label class="lbl">Cup name</label><input class="inp" id="cup-name" placeholder="e.g. Christmas Cup" style="margin-bottom:14px;">'+
+    '<label class="lbl">Participants</label><div style="margin-bottom:14px;">'+options+'</div>'+
+    '<button class="btn btn-blue" onclick="doCreateCup()">Create &amp; Draw Round 1</button>'+
+    '<button class="btn btn-gray" style="margin-top:8px;" onclick="closeModal()">Cancel</button>');
+}
+function doCreateCup(){
+  var name=document.getElementById("cup-name").value.trim()||("Cup "+(S.cups.length+1));
+  var checked=Array.prototype.map.call(document.querySelectorAll(".cup-participant:checked"),function(el){return el.value;});
+  if(checked.length<2){ showToast("Need at least 2 participants."); return; }
+  var cup={id:"cup"+Date.now(), name:name, participants:checked, rounds:[], status:"active", winner:null};
+  S.cups.push(cup);
+  sv("cups",S.cups);
+  closeModal();
+  promptDrawRound(cup.id);
+}
+function promptDrawRound(cupId){
+  showModal('<h3>&#x1F3B2; Draw Round</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Which gameweek should decide this round?</p>'+
+    '<label class="lbl">Gameweek</label><input class="inp" id="cup-round-gw" type="number" min="1" max="38" value="'+(S.currentGW||1)+'" style="margin-bottom:14px;">'+
+    '<button class="btn btn-blue" onclick="confirmDrawRound(\''+cupId+'\')">&#x1F3B2; Draw Random Pairings</button>'+
+    '<button class="btn btn-gray" style="margin-top:8px;" onclick="closeModal()">Cancel</button>');
+}
+function confirmDrawRound(cupId){
+  var gw=parseInt(document.getElementById("cup-round-gw").value)||S.currentGW;
+  closeModal();
+  drawCupRound(cupId,gw);
+}
+function drawCupRound(cupId,gw){
+  var cup=S.cups.find(function(c){return c.id===cupId;});
+  if(!cup) return;
+  var pool;
+  if(cup.rounds.length===0){
+    pool=cup.participants.slice();
+  } else {
+    var lastRound=cup.rounds[cup.rounds.length-1];
+    pool=lastRound.matchups.map(function(m){return getCupMatchWinner(cup,lastRound,m);});
+    if(pool.indexOf(null)!==-1){ showToast("Last round isn't fully decided yet - scores for GW"+lastRound.gw+" are still needed."); return; }
+  }
+  if(pool.length<=1){
+    cup.status="completed"; cup.winner=pool[0]||null; sv("cups",S.cups); renderCupTab(); return;
+  }
+  var shuffled=shuffleArr(pool);
+  var matchups=[];
+  // Odd number of players this round - one gets a random bye (auto-advances, no match).
+  if(shuffled.length%2===1){
+    var byeIdx=Math.floor(Math.random()*shuffled.length);
+    var byePlayer=shuffled.splice(byeIdx,1)[0];
+    matchups.push({p1:byePlayer,p2:null,bye:true});
+  }
+  for(var i=0;i<shuffled.length;i+=2){
+    matchups.push({p1:shuffled[i],p2:shuffled[i+1],bye:false});
+  }
+  cup.rounds.push({gw:gw,matchups:matchups});
+  sv("cups",S.cups);
+  renderCupTab();
+}
+function renderCupTab(){
+  var el=document.getElementById("tab-cup");
+  if(!el) return;
+  if(viewingCup){ renderCupDetail(el,viewingCup); return; }
+  var html='<div style="padding:14px;overflow-y:auto;flex:1;">';
+  html+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;"><button class="btn btn-gray" style="width:auto;padding:7px 12px;font-size:13px;" onclick="showTab(\'settings\')">&#x2190; Settings</button><div style="flex:1;font-weight:700;font-size:15px;font-family:Rajdhani,system-ui;">Knockout Cups</div></div>';
+  html+='<button class="btn btn-blue" style="margin-bottom:14px;" onclick="openCreateCup()">&#x1F3C6; New Knockout Cup</button>';
+  if(S.cups.length===0){
+    html+='<div style="color:#8b949e;font-size:13px;">No cups yet - tap above to set one up.</div>';
+  } else {
+    S.cups.slice().reverse().forEach(function(cup){
+      var roundLabel=cup.status==="completed"?("Winner: "+cup.winner):(cup.participants.length+" players &middot; Round "+cup.rounds.length);
+      html+='<button onclick="viewingCup=\''+cup.id+'\';renderCupTab();" style="display:flex;align-items:center;width:100%;background:#161b22;border:1px solid #30363d;border-radius:12px;padding:14px 16px;margin-bottom:8px;cursor:pointer;text-align:left;font-family:inherit;">'+
+        '<div style="flex:1;"><div style="color:#f0f6fc;font-weight:700;font-size:15px;">'+(cup.status==="completed"?"&#x1F3C6; ":"")+cup.name+'</div>'+
+        '<div style="color:#8b949e;font-size:12px;margin-top:2px;">'+roundLabel+'</div></div>'+
+        '<div style="color:#8b949e;font-size:18px;">&#x203A;</div></button>';
+    });
+  }
+  html+="</div>";
+  el.innerHTML=html;
+}
+function renderCupDetail(el,cupId){
+  var cup=S.cups.find(function(c){return c.id===cupId;});
+  if(!cup){ viewingCup=null; renderCupTab(); return; }
+  // Auto-complete: if the final round's last matchup has just resolved, finish the cup
+  // immediately rather than waiting for an extra manual "draw next round" tap.
+  if(cup.status!=="completed" && cup.rounds.length>0){
+    var lr=cup.rounds[cup.rounds.length-1];
+    var winners=lr.matchups.map(function(m){return getCupMatchWinner(cup,lr,m);});
+    if(winners.indexOf(null)===-1 && winners.length===1){
+      cup.status="completed"; cup.winner=winners[0]; sv("cups",S.cups);
+    }
+  }
+  var html='<div style="padding:14px;overflow-y:auto;flex:1;">';
+  html+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;"><button class="btn btn-gray" style="width:auto;padding:7px 12px;font-size:13px;" onclick="viewingCup=null;renderCupTab();">&#x2190; Cups</button><div style="flex:1;font-weight:700;font-size:15px;font-family:Rajdhani,system-ui;">'+cup.name+'</div></div>';
+
+  if(cup.status==="completed"){
+    html+='<div class="card" style="border-color:#f59e0b;text-align:center;padding:20px;margin-bottom:14px;"><div style="font-size:28px;">&#x1F3C6;</div><div style="font-family:Bangers,cursive;font-size:22px;color:#fbbf24;">'+cup.winner+'</div><div style="color:#8b949e;font-size:12px;">Cup Winner</div></div>';
+  }
+
+  cup.rounds.forEach(function(round,ri){
+    html+='<div class="sec-hdr">Round '+(ri+1)+' &middot; GW'+round.gw+'</div>';
+    round.matchups.forEach(function(m){
+      if(m.bye){
+        html+='<div class="roster-slot"><div style="display:flex;justify-content:space-between;align-items:center;"><div style="font-size:13px;font-weight:700;">'+m.p1+'</div><div style="color:#8b949e;font-size:11px;">BYE - through automatically</div></div></div>';
+        return;
+      }
+      var winner=getCupMatchWinner(cup,round,m);
+      var gwReady=!!S.scores[round.gw];
+      var s1=gwReady?getPersonGWPts(m.p1,round.gw):null;
+      var s2=gwReady?getPersonGWPts(m.p2,round.gw):null;
+      var tieNote=winner&&s1===s2?(m.forcedWinner?" (tiebreak: random)":" (tiebreak: captain score)"):"";
+      html+='<div class="roster-slot">'+
+        '<div style="display:flex;justify-content:space-between;align-items:center;"><div style="font-size:13px;font-weight:700;'+(winner===m.p1?"color:#10b981;":winner?"color:#484f58;":"")+'">'+m.p1+(winner===m.p1?' &#x2713;':'')+'</div><div style="font-family:Bangers,cursive;font-size:15px;">'+(s1!==null?s1:"-")+'</div></div>'+
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-top:4px;"><div style="font-size:13px;font-weight:700;'+(winner===m.p2?"color:#10b981;":winner?"color:#484f58;":"")+'">'+m.p2+(winner===m.p2?' &#x2713;':'')+'</div><div style="font-family:Bangers,cursive;font-size:15px;">'+(s2!==null?s2:"-")+'</div></div>'+
+        (winner?'<div style="color:#10b981;font-size:10px;margin-top:4px;">'+winner+' through'+tieNote+'</div>':'<div style="color:#8b949e;font-size:10px;margin-top:4px;">Awaiting GW'+round.gw+' scores</div>')+
+        '</div>';
+    });
+    var roundDecided=round.matchups.every(function(m){return m.bye||getCupMatchWinner(cup,round,m)!=null;});
+    if(roundDecided){
+      html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #25D366;color:#25D366;" onclick="shareCupRound(\''+cup.id+'\','+ri+')">&#x1F4F2; Share Round '+(ri+1)+' Results</button>';
+    }
+  });
+
+  if(cup.status==="completed"){
+    html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #25D366;color:#25D366;" onclick="shareCupFinal(\''+cup.id+'\')">&#x1F4F2; Share Final Result</button>';
+  }
+
+  if(cup.status!=="completed" && cup.rounds.length>0){
+    var last=cup.rounds[cup.rounds.length-1];
+    var lastWinners=last.matchups.map(function(m){return getCupMatchWinner(cup,last,m);});
+    if(lastWinners.indexOf(null)===-1 && lastWinners.length>1){
+      html+='<button class="btn btn-blue" style="margin-top:8px;" onclick="promptDrawRound(\''+cup.id+'\')">&#x1F3B2; Draw Round '+(cup.rounds.length+1)+'</button>';
+    }
+  }
+  html+="</div>";
+  el.innerHTML=html;
+}
+
+// ── RULES PAGE ─────────────────────────────────────────────────────────────────
+function renderRulesTab(){
+  var el=document.getElementById("tab-rules");
+  if(!el) return;
+  function section(title,color){ return '<div class="sec-hdr" style="color:'+color+';">'+title+'</div>'; }
+  function rule(title,body){
+    return '<div class="card" style="margin-bottom:8px;"><div style="font-weight:700;font-size:13px;margin-bottom:4px;">'+title+'</div><div style="color:#8b949e;font-size:12px;line-height:1.5;">'+body+'</div></div>';
+  }
+  var html='<div style="padding:14px;overflow-y:auto;flex:1;">';
+  html+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;"><button class="btn btn-gray" style="width:auto;padding:7px 12px;font-size:13px;" onclick="showTab(\'settings\')">&#x2190; Settings</button><div style="flex:1;font-weight:700;font-size:15px;font-family:Rajdhani,system-ui;">League Rules</div></div>';
+
+  html+=section("&#x1F3DF; Draft Rules","#60a5fa");
+  html+=rule("Squad size", "17 players: 2 goalkeepers, 5 defenders, 5 midfielders, 3 forwards, and 2 Wildcard slots.");
+  html+=rule("Max 3 per club", "You can never have more than 3 players from the same Premier League club - this applies to every pick, including ones that overflow into a Wildcard slot.");
+  html+=rule("Wildcard slots", "Filled either by a real player once your normal slots for their position are full, or by free-typing a player not yet in the Premier League (e.g. a rumoured transfer) - these must later be \"Resolved\" once they actually sign.");
+
+  html+=section("&#x1F4C5; In-Season Rules","#10b981");
+  html+=rule("Captain", "Doubles that player's points while active. Cannot be your first-ever pick (shown as \"Pick #1\" in your squad).");
+  html+=rule("Captain budget: 90 days, for the whole season", "Every player has a 90-day <em>lifetime</em> budget as your captain - not reset each time you re-nominate them. You can split it across separate stints (e.g. captain for 15 days, swap away, captain again later for 45 more, etc). Once a player's 90 days are used up, they can never be your captain again.");
+  html+=rule("Wildcard subs", "Permanently swap a Wildcard player in for an existing squad player. Must be the <b>same position</b> (a GK can only replace a GK, etc). Each of your 2 Wildcard slots can only be used once, and it's irreversible.");
+  html+=rule("Non-PL wildcards", "A free-typed Wildcard player must be \"Resolved\" (assign their real club) before they can be subbed in. The app tries to auto-detect their real position from official FPL data when you resolve them.");
+
+  html+=section("&#x26A0; Pre-Season Special Rule","#f59e0b");
+  html+=rule("Player leaves the Premier League before kickoff", "If a player you've drafted leaves the Premier League (e.g. sold abroad) <b>before</b> the season opener kicks off (Arsenal v Coventry, Friday 21 August 2026, 8pm), you get a free, one-time replacement from the undrafted pool - same position, doesn't use a Wildcard slot.");
+  html+=rule("After kickoff: tough luck", "If a player leaves the Premier League <b>after</b> that kickoff, there's no free replacement. They'll score zero for the rest of the season unless you use one of your 2 Wildcard subs on them.");
+
+  html+=section("&#x1F4CB; Miscellaneous","#8b949e");
+  html+=rule("Scoring accuracy", "All scores are pulled directly from the official FPL API - not AI-guessed. If FPL later revises a score (e.g. bonus points), Manual Score Override in Settings can correct it.");
+  html+=rule("Knockout Cup", "A separate mini-tournament that can run alongside the main league, using the same teams and real gameweek scores. The organiser nominates a gameweek for each round; the app does a random draw (with a random bye if there's an odd number of players). Ties are broken by comparing captains' individual scores, then a coin flip as a last resort.");
+
+  html+="</div>";
+  el.innerHTML=html;
+}
 
 // ── BACKUP & RESTORE ──────────────────────────────────────────────────────────
 function exportBackup(){
@@ -2477,6 +2858,7 @@ function exportBackup(){
     currentGW:S.currentGW,
     lastRefreshed:S.lastRefreshed,
     playerPool:S.playerPool,
+    cups:S.cups,
     clubs:PL_CLUBS
   };
   try{
@@ -2550,6 +2932,7 @@ function doImportBackup(){
     S.currentGW=backup.currentGW||1;
     S.lastRefreshed=backup.lastRefreshed||null;
     S.playerPool=backup.playerPool||[];
+    S.cups=backup.cups||[];
     if(backup.clubs&&backup.clubs.length>0) PL_CLUBS=backup.clubs;
     saveAll();
     pendingBackup=null;
@@ -2917,7 +3300,7 @@ function buildBackupObject(){
     captains:S.captains, captainHistory:S.captainHistory, wildcardSubs:S.wildcardSubs,
     scores:S.scores, scoresFetched:S.scoresFetched, scoreOverrides:S.scoreOverrides,
     currentGW:S.currentGW, lastRefreshed:S.lastRefreshed,
-    playerPool:S.playerPool, clubs:PL_CLUBS
+    playerPool:S.playerPool, cups:S.cups, clubs:PL_CLUBS
   };
 }
 
@@ -2993,7 +3376,7 @@ function showTab(tabId){
   var renderFn = {
     draft: renderDraftTab, myteam: renderMyTeamTab, friends: renderFriendsTab,
     league: renderLeagueTab, advice: renderAdviceTab, settings: renderSettingsTab,
-    pool: renderPoolTab, stats: renderStatsTab
+    pool: renderPoolTab, stats: renderStatsTab, cup: renderCupTab, rules: renderRulesTab
   }[tabId];
   if(!renderFn) return;
   // Show a brief spinner immediately, then defer the actual (synchronous, sometimes
