@@ -416,7 +416,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-08-09.13";
+const APP_VERSION = "2026-08-09.18";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 const TOTAL_PICKS = 17;
 const CHART_COLORS = ["#10b981","#3b82f6","#f59e0b","#ef4444","#8b5cf6","#ec4899","#06b6d4","#84cc16","#f97316","#a855f7","#14b8a6","#eab308"];
@@ -464,7 +464,7 @@ let S = {
   scores:{}, scoresFetched:{}, scoreOverrides:{}, lastRefreshed:null, currentGW:1, history:[],
   cups:[],
   advice:null, adviceLoading:false, defaultTab:"myteam",
-  lastBackup:null
+  lastBackup:null, postDraftSnapshot:null
 };
 
 // Neon button colours - declared early as used by renderWelcomeScreen on boot
@@ -491,6 +491,7 @@ function saveAll(){
   sv("scores",S.scores); sv("scoresFetched",S.scoresFetched); sv("scoreOverrides",S.scoreOverrides);
   sv("meta",{lastRefreshed:S.lastRefreshed,currentGW:S.currentGW});
   sv("cups",S.cups);
+  sv("postDraftSnapshot",S.postDraftSnapshot);
   sv("clubs",PL_CLUBS);
 }
 function loadAll(){
@@ -503,6 +504,7 @@ function loadAll(){
   S.captains=ld("captains",{}); S.captainHistory=ld("captainHistory",{}); S.wildcardSubs=ld("wildcards",{});
   S.scores=ld("scores",{}); S.scoresFetched=ld("scoresFetched",{}); S.scoreOverrides=ld("scoreOverrides",{});
   S.cups=ld("cups",[]);
+  S.postDraftSnapshot=ld("postDraftSnapshot",null);
   var m=ld("meta",{});
   S.lastRefreshed=m.lastRefreshed||null; S.currentGW=m.currentGW||1; S.lastBackup=m.lastBackup||null;
   var savedClubs=ld("clubs",[]);
@@ -1301,11 +1303,6 @@ function capDaysLeft(name){
   var key=cap.player.name+"|"+cap.player.club;
   return Math.ceil(getCaptainBudget(name,key).remainingDays);
 }
-function capTimerHtml(name){
-  var cap=S.captains[name];
-  if(!cap) return "";
-  return captainBudgetBadgeHtml(name, cap.player.name+"|"+cap.player.club);
-}
 
 // ── DRAFT CORE ─────────────────────────────────────────────────────────────────
 function confirmPick(player,picker){
@@ -1718,9 +1715,30 @@ function confirmEndDraft(){
 }
 function endDraft(){
   S.draftDone=true; S.hideDraft=true;
+  // Freeze a deep-cloned snapshot of the draft result right now, separate from S.teams
+  // (which will keep evolving all season via subs, emergency replacements etc). This is
+  // what "Download Master Backup" always exports from - a fixed reference point you can
+  // always get back to, regardless of any future GUI tweaks or in-season changes.
+  S.postDraftSnapshot={
+    capturedAt:new Date().toISOString(),
+    myName:S.myName, draftOrder:S.draftOrder.slice(), clubMax:S.clubMax,
+    teams:JSON.parse(JSON.stringify(S.teams)),
+    pickedMap:JSON.parse(JSON.stringify(S.pickedMap)),
+    snakeOrder:S.snakeOrder.slice(),
+    playerPool:JSON.parse(JSON.stringify(S.playerPool)),
+    clubs:PL_CLUBS.slice()
+  };
   saveAll(); closeModal(); renderTopBar();
   updateDraftNavVisibility();
   showTab(S.defaultTab||"myteam");
+  setTimeout(promptMasterBackup,600);
+}
+function promptMasterBackup(){
+  var msg='<h3>&#x1F3C6; Draft Complete!</h3>';
+  msg+='<p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Download a Master Backup now - a permanent snapshot of every team exactly as drafted. This stays fixed all season, separate from your regular backups, so you can always get back to the original post-draft teams even after future app updates.</p>';
+  msg+='<button class="btn btn-green" style="margin-bottom:8px;" onclick="exportMasterBackup();closeModal();">&#x2B07; Download Master Backup</button>';
+  msg+='<button class="btn btn-gray" onclick="closeModal()">Later (Settings &rarr; Master Backup)</button>';
+  showModal(msg);
 }
 
 // ── RENDER: MY TEAM ────────────────────────────────────────────────────────────
@@ -1825,7 +1843,8 @@ function renderMyTeamTab(){
   var team=S.teams[S.myName]||{};
   var totalPts=getPersonTotalPts(S.myName,vGW);
   var gwPts=getPersonGWPts(S.myName,vGW);
-  var cap=S.captains[S.myName];
+  var capForVGW=getCaptainForGW(S.myName,vGW);
+  var isPastView=vGW!==S.currentGW;
 
   var html='<div style="padding:14px;overflow-y:auto;flex:1;">';
 
@@ -1842,13 +1861,14 @@ function renderMyTeamTab(){
   // Stats row
   html+='<div class="stat-grid"><div class="stat-card"><div class="sv">'+totalPts+'<span style="font-size:13px;color:#484f58;font-weight:400;font-family:Rajdhani,system-ui;margin-left:6px;">+'+gwPts+'</span></div><div class="sl">Pts to GW'+vGW+' &bull; GW'+vGW+'</div></div></div>';
 
-  if(cap){
-    html+='<div class="card" style="border-color:#ec4899;padding:8px 12px;margin-bottom:8px;"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><span style="font-size:12px;color:#8b949e;">Captain:</span><strong style="font-size:13px;">'+cap.player.name+'</strong><span class="cap-badge">C</span>'+capTimerHtml(S.myName)+'<button class="btn btn-gray" style="width:auto;padding:4px 8px;font-size:11px;margin-left:auto;" onclick="openMyCaptainModal()">Change</button></div></div>';
+  if(capForVGW){
+    var capKey=capForVGW.name+"|"+capForVGW.club;
+    html+='<div class="card" style="border-color:#ec4899;padding:8px 12px;margin-bottom:8px;"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><span style="font-size:12px;color:#8b949e;">Captain'+(isPastView?" (GW"+vGW+")":"")+':</span><strong style="font-size:13px;">'+capForVGW.name+'</strong><span class="cap-badge">C</span>'+captainBudgetBadgeHtml(S.myName,capKey)+(isPastView?'':'<button class="btn btn-gray" style="width:auto;padding:4px 8px;font-size:11px;margin-left:auto;" onclick="openMyCaptainModal()">Change</button>')+'</div></div>';
   } else if(S.draftDone){
-    html+='<div class="warn">&#x26A0;&#xFE0F; No captain!<button class="btn btn-blue" style="margin-top:6px;padding:6px;" onclick="openMyCaptainModal()">Nominate</button></div>';
+    html+='<div class="warn">&#x26A0;&#xFE0F; No captain'+(isPastView?" as of GW"+vGW:"")+'!'+(isPastView?'':'<button class="btn btn-blue" style="margin-top:6px;padding:6px;" onclick="openMyCaptainModal()">Nominate</button>')+'</div>';
   }
 
-  html+=renderSquadSection(S.myName, vGW, getCaptainForGW(S.myName,vGW));
+  html+=renderSquadSection(S.myName, vGW, capForVGW);
   html+="</div>";
   el.innerHTML=html;
 }
@@ -1878,7 +1898,8 @@ function renderFriendDetail(el,name){
   var team=S.teams[name]||{};
   var totalPts=getPersonTotalPts(name,vGW);
   var gwPts=getPersonGWPts(name,vGW);
-  var cap=S.captains[name];
+  var capForVGW=getCaptainForGW(name,vGW);
+  var isPastView=vGW!==S.currentGW;
   var safeName=name; // used in closures
 
   var html='<div style="padding:14px;overflow-y:auto;flex:1;">';
@@ -1899,18 +1920,19 @@ function renderFriendDetail(el,name){
     '<span style="font-size:13px;color:#484f58;font-weight:400;font-family:Rajdhani,system-ui;margin-left:6px;">+'+gwPts+'</span></div>'+
     '<div class="sl">Pts to GW'+vGW+' &bull; GW'+vGW+'</div></div></div>';
 
-  if(cap){
+  if(capForVGW){
+    var capKey=capForVGW.name+"|"+capForVGW.club;
     html+='<div class="card" style="border-color:#ec4899;padding:8px 12px;margin-bottom:8px;">'+
       '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">'+
-      '<span style="font-size:12px;color:#8b949e;">Captain:</span>'+
-      '<strong style="font-size:13px;">'+cap.player.name+'</strong>'+
-      '<span class="cap-badge">C</span>'+capTimerHtml(name)+
-      '<button class="btn btn-gray" style="width:auto;padding:4px 8px;font-size:11px;margin-left:auto;" onclick="openCaptainModal(\''+safeName.replace(/'/g,"\\'")+'\')">Change</button></div></div>';
+      '<span style="font-size:12px;color:#8b949e;">Captain'+(isPastView?" (GW"+vGW+")":"")+':</span>'+
+      '<strong style="font-size:13px;">'+capForVGW.name+'</strong>'+
+      '<span class="cap-badge">C</span>'+captainBudgetBadgeHtml(name,capKey)+
+      (isPastView?'':'<button class="btn btn-gray" style="width:auto;padding:4px 8px;font-size:11px;margin-left:auto;" onclick="openCaptainModal(\''+safeName.replace(/'/g,"\\'")+'\')">Change</button>')+'</div></div>';
   } else {
-    html+='<div class="warn">&#x26A0;&#xFE0F; No captain!<button class="btn btn-blue" style="margin-top:6px;padding:6px;" onclick="openCaptainModal(\''+safeName.replace(/'/g,"\\'")+'\')">Nominate</button></div>';
+    html+='<div class="warn">&#x26A0;&#xFE0F; No captain'+(isPastView?" as of GW"+vGW:"")+'!'+(isPastView?'':'<button class="btn btn-blue" style="margin-top:6px;padding:6px;" onclick="openCaptainModal(\''+safeName.replace(/'/g,"\\'")+'\')">Nominate</button>')+'</div>';
   }
 
-  html+=renderSquadSection(name, vGW, getCaptainForGW(name,vGW));
+  html+=renderSquadSection(name, vGW, capForVGW);
   html+="</div>";
   el.innerHTML=html;
   // Store friend name for GW nav
@@ -1929,8 +1951,6 @@ function friendGWFwd(){
 }
 
 // ── CAPTAIN MODAL ──────────────────────────────────────────────────────────────
-function openMySubModal(i){ openSubModal(S.myName, i); }
-function resolveMyWildcard(i){ resolveWildcard(S.myName, i); }
 function openMyCaptainModal(){ openCaptainModal(S.myName); }
 function getPersonalPickOrder(ownerName, key){
   var myPicks=Object.entries(S.pickedMap).filter(function(e){return e[1]===ownerName;}).map(function(e){return e[0];});
@@ -2279,23 +2299,6 @@ function renderLeagueTab(){
   setTimeout(function(){drawCumulChartToGW(viewGW);drawGWChartToGW(viewGW);},150);
 }
 
-function drawCumulChart(){
-  var ctx=document.getElementById("cumul-chart");
-  if(!ctx) return;
-  if(cumulChart) cumulChart.destroy();
-  var gws=Array.from({length:S.currentGW},function(_,i){return i+1;});
-  var datasets=S.draftOrder.map(function(name,i){return {label:name,data:gws.map(function(g){return getPersonTotalPts(name,g);}),borderColor:CHART_COLORS[i%CHART_COLORS.length],backgroundColor:"transparent",borderWidth:name===S.myName?3:1.5,pointRadius:3,tension:0.3};});
-  cumulChart=new Chart(ctx,{type:"line",data:{labels:gws.map(function(g){return "GW"+g;}),datasets:datasets},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:"#8b949e",font:{size:11}}}},scales:{x:{ticks:{color:"#484f58",font:{size:10}}},y:{ticks:{color:"#484f58",font:{size:10}},grid:{color:"#21262d"}}}}});
-}
-function drawGWChart(){
-  var ctx=document.getElementById("gw-chart");
-  if(!ctx) return;
-  if(gwChart) gwChart.destroy();
-  var gws=Array.from({length:S.currentGW},function(_,i){return i+1;});
-  var datasets=S.draftOrder.map(function(name,i){return {label:name,data:gws.map(function(g){return getPersonGWPts(name,g);}),borderColor:CHART_COLORS[i%CHART_COLORS.length],backgroundColor:CHART_COLORS[i%CHART_COLORS.length]+"22",borderWidth:name===S.myName?3:1.5,pointRadius:3,tension:0.3};});
-  gwChart=new Chart(ctx,{type:"line",data:{labels:gws.map(function(g){return "GW"+g;}),datasets:datasets},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:"#8b949e",font:{size:11}}}},scales:{x:{ticks:{color:"#484f58",font:{size:10}}},y:{ticks:{color:"#484f58",font:{size:10}},grid:{color:"#21262d"}}}}});
-}
-
 async function doRefreshScores(){
   var msg='<h3>&#x1F504; Refreshing Scores</h3>';
   msg+='<p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Fetching real data directly from the official FPL API.</p>';
@@ -2446,7 +2449,11 @@ function renderSettingsTab(){
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #6366f1;color:#818cf8;" onclick="showTab(\'rules\')">&#x1F4D6; League Rules</button>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #f59e0b;color:#f59e0b;" onclick="showTab(\'cup\')">&#x1F3C6; Knockout Cup</button>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #10b981;color:#10b981;" onclick="exportBackup()">&#x2B07; Export Backup</button>';
+  if(S.postDraftSnapshot){
+    html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #fbbf24;color:#fbbf24;" onclick="exportMasterBackup()">&#x1F3C6; Download Master Backup (post-draft)</button>';
+  }
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #10b981;color:#10b981;" onclick="importBackup()">&#x2B06; Import Backup</button>';
+  html+='<button class="btn btn-gray" style="margin-bottom:8px;" onclick="restoreAutoBackup()">&#x1F504; Restore Silent Auto-Backup</button>';
   html+='<button class="btn btn-gray" onclick="confirmReset()">&#x26A0; Reset Data</button>';
   html+='</div>';
   html+='</div>';
@@ -2626,7 +2633,19 @@ function doEmergencyReplace(owner,pos,idx,newName,newClub){
   });
   S.pickedMap=rebuilt;
   team[pos][idx]=Object.assign({},newPlayer,{pickNumber:outgoing.pickNumber});
-  sv("teams",S.teams); sv("picked",S.pickedMap);
+  // If the departed player was already nominated captain, transfer captaincy to their
+  // replacement rather than leaving a dangling reference to a player no longer in the
+  // squad - this is pre-season, so captaincy can already be set before a ball's kicked.
+  var newPlayerRef=team[pos][idx];
+  if(S.captains[owner] && S.captains[owner].player.name===outgoing.name && S.captains[owner].player.club===outgoing.club){
+    S.captains[owner]={player:newPlayerRef, dateSet:S.captains[owner].dateSet};
+    var hist=S.captainHistory[owner]||[];
+    var lastEra=hist[hist.length-1];
+    if(lastEra && lastEra.player.name===outgoing.name && lastEra.player.club===outgoing.club){
+      lastEra.player=newPlayerRef;
+    }
+  }
+  sv("teams",S.teams); sv("picked",S.pickedMap); sv("captains",S.captains); sv("captainHistory",S.captainHistory);
   closeModal();
   showToast(outgoing.name+" replaced with "+newName+" - free pre-season swap.");
   renderMyTeamTab(); renderFriendsTab();
@@ -2830,6 +2849,7 @@ function renderRulesTab(){
 
   html+=section("&#x1F4CB; Miscellaneous","#8b949e");
   html+=rule("Scoring accuracy", "All scores are pulled directly from the official FPL API - not AI-guessed. If FPL later revises a score (e.g. bonus points), Manual Score Override in Settings can correct it.");
+  html+=rule("Master Backup", "A permanent, frozen snapshot of every team exactly as drafted, offered automatically the moment the draft is marked complete. Unlike regular backups (which capture live, ever-changing season data), the Master Backup never changes - restoring it only resets teams/picks back to the original draft result and never touches scores, captains, or cups.");
   html+=rule("Knockout Cup", "A separate mini-tournament that can run alongside the main league, using the same teams and real gameweek scores. The organiser nominates a gameweek for each round; the app does a random draw (with a random bye if there's an odd number of players). Ties are broken by comparing captains' individual scores, then a coin flip as a last resort.");
 
   html+="</div>";
@@ -2837,6 +2857,24 @@ function renderRulesTab(){
 }
 
 // ── BACKUP & RESTORE ──────────────────────────────────────────────────────────
+function exportMasterBackup(){
+  if(!S.postDraftSnapshot){ showToast("No master backup available yet - only created once the draft is marked complete."); return; }
+  var backup=Object.assign({version:1, isMasterBackup:true, exportedAt:new Date().toISOString()}, S.postDraftSnapshot);
+  try{
+    var json=JSON.stringify(backup,null,2);
+    var dataUri="data:application/json;charset=utf-8,"+encodeURIComponent(json);
+    var a=document.createElement("a");
+    a.href=dataUri;
+    a.download="draft-advisor-MASTER-postdraft-"+S.postDraftSnapshot.capturedAt.slice(0,10)+".json";
+    a.style.display="none";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function(){document.body.removeChild(a);},100);
+    showToast("Master Backup downloaded! This always reflects your original post-draft teams.");
+  }catch(e){
+    showModal('<h3>Master Backup Data</h3><p style="color:#8b949e;font-size:12px;margin-bottom:10px;">Copy this text and save it somewhere safe.</p><textarea style="width:100%;height:200px;background:#0d1117;border:1px solid #30363d;border-radius:8px;color:#f0f6fc;font-size:11px;padding:8px;font-family:monospace;" onclick="this.select()">'+JSON.stringify(backup)+'</textarea><button class="btn btn-gray" style="margin-top:8px;" onclick="closeModal()">Done</button>');
+  }
+}
 function exportBackup(){
   var backup={
     version:1,
@@ -2845,6 +2883,8 @@ function exportBackup(){
     draftOrder:S.draftOrder,
     clubMax:S.clubMax,
     draftDone:S.draftDone,
+    hideDraft:S.hideDraft,
+    defaultTab:S.defaultTab,
     teams:S.teams,
     pickedMap:S.pickedMap,
     snakeOrder:S.snakeOrder,
@@ -2859,6 +2899,7 @@ function exportBackup(){
     lastRefreshed:S.lastRefreshed,
     playerPool:S.playerPool,
     cups:S.cups,
+    postDraftSnapshot:S.postDraftSnapshot,
     clubs:PL_CLUBS
   };
   try{
@@ -2895,12 +2936,24 @@ function importBackup(){
         var backup=JSON.parse(ev.target.result);
         if(!backup.myName) throw new Error("Invalid backup file - missing player name");
         pendingBackup=backup;
-        var msg='<h3>Restore Backup?</h3>';
-        msg+='<p style="color:#8b949e;font-size:13px;margin-bottom:6px;">Backup from: '+new Date(backup.exportedAt||Date.now()).toLocaleDateString()+'</p>';
-        msg+='<p style="color:#8b949e;font-size:13px;margin-bottom:14px;">For: '+backup.myName+' &middot; '+( backup.draftOrder?backup.draftOrder.length:0)+' players &middot; '+(backup.playerPool?backup.playerPool.length:0)+' in pool</p>';
-        msg+='<p style="color:#f59e0b;font-size:13px;margin-bottom:14px;">This will overwrite your current data.</p>';
-        msg+='<button class="btn btn-blue" style="margin-bottom:8px;" onclick="doImportBackup()">Restore</button>';
-        msg+='<button class="btn btn-gray" onclick="closeModal()">Cancel</button>';
+        var msg;
+        if(backup.isMasterBackup){
+          // Master backups only ever contain draft-result data (teams/picks), never
+          // scores/captains/cups - so restoring one must NOT wipe out season progress.
+          msg='<h3>&#x1F3C6; Restore Master Backup?</h3>';
+          msg+='<p style="color:#8b949e;font-size:13px;margin-bottom:6px;">Captured: '+new Date(backup.capturedAt||backup.exportedAt||Date.now()).toLocaleDateString()+'</p>';
+          msg+='<p style="color:#8b949e;font-size:13px;margin-bottom:14px;">For: '+backup.myName+' &middot; '+(backup.draftOrder?backup.draftOrder.length:0)+' players</p>';
+          msg+='<p style="color:#10b981;font-size:13px;margin-bottom:14px;">This restores teams and draft picks back to exactly how they were right after the draft. Your scores, captains, wildcard subs, and cups are NOT affected.</p>';
+          msg+='<button class="btn btn-blue" style="margin-bottom:8px;" onclick="doImportBackup()">Restore Draft Teams</button>';
+          msg+='<button class="btn btn-gray" onclick="closeModal()">Cancel</button>';
+        } else {
+          msg='<h3>Restore Backup?</h3>';
+          msg+='<p style="color:#8b949e;font-size:13px;margin-bottom:6px;">Backup from: '+new Date(backup.exportedAt||Date.now()).toLocaleDateString()+'</p>';
+          msg+='<p style="color:#8b949e;font-size:13px;margin-bottom:14px;">For: '+backup.myName+' &middot; '+( backup.draftOrder?backup.draftOrder.length:0)+' players &middot; '+(backup.playerPool?backup.playerPool.length:0)+' in pool</p>';
+          msg+='<p style="color:#f59e0b;font-size:13px;margin-bottom:14px;">This will overwrite ALL your current data, including scores, captains, and cups.</p>';
+          msg+='<button class="btn btn-blue" style="margin-bottom:8px;" onclick="doImportBackup()">Restore Everything</button>';
+          msg+='<button class="btn btn-gray" onclick="closeModal()">Cancel</button>';
+        }
         showModal(msg);
       }catch(err){
         showToast("Invalid backup file: "+err.message);
@@ -2915,10 +2968,37 @@ function doImportBackup(){
   if(!pendingBackup){ showToast("No backup data found. Please select a file again."); return; }
   try{
     var backup=pendingBackup;
+    if(backup.isMasterBackup){
+      // Scoped restore: ONLY draft-result fields. Season-progress fields (scores,
+      // captains, wildcardSubs, cups, currentGW etc) are deliberately left untouched.
+      S.myName=backup.myName||S.myName;
+      S.draftOrder=backup.draftOrder||S.draftOrder;
+      S.clubMax=backup.clubMax||S.clubMax;
+      S.teams=backup.teams||S.teams;
+      S.pickedMap=backup.pickedMap||S.pickedMap;
+      S.snakeOrder=backup.snakeOrder||S.snakeOrder;
+      S.playerPool=backup.playerPool||S.playerPool;
+      if(backup.clubs&&backup.clubs.length>0) PL_CLUBS=backup.clubs;
+      // Re-store the imported snapshot itself as the current master reference too.
+      S.postDraftSnapshot={
+        capturedAt:backup.capturedAt||backup.exportedAt||new Date().toISOString(),
+        myName:S.myName, draftOrder:S.draftOrder, clubMax:S.clubMax,
+        teams:S.teams, pickedMap:S.pickedMap, snakeOrder:S.snakeOrder,
+        playerPool:S.playerPool, clubs:PL_CLUBS
+      };
+      saveAll();
+      pendingBackup=null;
+      closeModal();
+      showToast("Draft teams restored to post-draft state. Scores and season progress untouched.");
+      setTimeout(function(){location.reload();},1000);
+      return;
+    }
     S.myName=backup.myName||"";
     S.draftOrder=backup.draftOrder||[];
     S.clubMax=backup.clubMax||3;
     S.draftDone=backup.draftDone||false;
+    S.hideDraft=backup.hideDraft||false;
+    S.defaultTab=backup.defaultTab||"myteam";
     S.teams=backup.teams||{};
     S.pickedMap=backup.pickedMap||{};
     S.snakeOrder=backup.snakeOrder||[];
@@ -2933,6 +3013,7 @@ function doImportBackup(){
     S.lastRefreshed=backup.lastRefreshed||null;
     S.playerPool=backup.playerPool||[];
     S.cups=backup.cups||[];
+    S.postDraftSnapshot=backup.postDraftSnapshot||S.postDraftSnapshot;
     if(backup.clubs&&backup.clubs.length>0) PL_CLUBS=backup.clubs;
     saveAll();
     pendingBackup=null;
@@ -3295,12 +3376,13 @@ function buildBackupObject(){
   return {
     version:1, exportedAt:new Date().toISOString(),
     myName:S.myName, draftOrder:S.draftOrder, clubMax:S.clubMax,
-    draftDone:S.draftDone, teams:S.teams, pickedMap:S.pickedMap,
+    draftDone:S.draftDone, hideDraft:S.hideDraft, defaultTab:S.defaultTab,
+    teams:S.teams, pickedMap:S.pickedMap,
     snakeOrder:S.snakeOrder, pickIdx:S.pickIdx,
     captains:S.captains, captainHistory:S.captainHistory, wildcardSubs:S.wildcardSubs,
     scores:S.scores, scoresFetched:S.scoresFetched, scoreOverrides:S.scoreOverrides,
     currentGW:S.currentGW, lastRefreshed:S.lastRefreshed,
-    playerPool:S.playerPool, cups:S.cups, clubs:PL_CLUBS
+    playerPool:S.playerPool, cups:S.cups, postDraftSnapshot:S.postDraftSnapshot, clubs:PL_CLUBS
   };
 }
 
@@ -3373,6 +3455,13 @@ function showTab(tabId){
   var el=document.getElementById("tab-"+tabId);
   if(el) el.classList.add("active");
   document.querySelectorAll(".nav-btn[data-tab='"+tabId+"']").forEach(function(b){b.classList.add("active");});
+  // Jump back to the true current gameweek on a fresh tab entry - previously teamViewGW
+  // only ever synced to S.currentGW once, on the very first app load, then stayed stuck at
+  // whatever week you'd last browsed to even after leaving and returning to the tab (or
+  // after real gameweeks advanced). This only fires on a genuine tap into the tab, not on
+  // internal re-renders from actions like subs/captain changes, which call the render
+  // functions directly and correctly preserve whatever week you were looking at.
+  if(tabId==="myteam"||tabId==="friends") teamViewGW=S.currentGW;
   var renderFn = {
     draft: renderDraftTab, myteam: renderMyTeamTab, friends: renderFriendsTab,
     league: renderLeagueTab, advice: renderAdviceTab, settings: renderSettingsTab,
@@ -3812,11 +3901,6 @@ function renderStatsSection(standings){
   return html;
 }
 
-function drawExtraCharts(){
-  drawPosChart();
-  drawMonthlyChart();
-}
-
 function chartRangeStart(maxGW,rangeFilter){
   if(rangeFilter==="all") return 1;
   var n=parseInt(rangeFilter,10)||5;
@@ -3844,8 +3928,7 @@ function drawGWChartToGW(maxGW){
   var datasets=S.draftOrder.map(function(name,i){return {label:name,data:gws.map(function(g){return getPersonGWPts(name,g);}),borderColor:CHART_COLORS[i%CHART_COLORS.length],backgroundColor:CHART_COLORS[i%CHART_COLORS.length]+"22",borderWidth:name===S.myName?3:1.5,pointRadius:3,tension:0.3};});
   gwChart=new Chart(ctx,{type:"line",data:{labels:gws.map(function(g){return "GW"+g;}),datasets:datasets},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:"#8b949e",font:{size:11}}}},scales:{x:{ticks:{color:"#484f58",font:{size:10}}},y:{ticks:{color:"#484f58",font:{size:10}},grid:{color:"#21262d"}}}}});
 }
-function drawCumulChart(){ drawCumulChartToGW(S.currentGW); }
-function drawGWChart(){ drawGWChartToGW(S.currentGW); }
+
 
 function drawPosChart(){
   var ctx=document.getElementById("pos-chart");
