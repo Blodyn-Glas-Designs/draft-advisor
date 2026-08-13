@@ -351,6 +351,7 @@ label.lbl{display:block;color:#8b5cf6;font-size:11px;text-transform:uppercase;le
     <div id="tab-stats" class="tab-content"></div>
     <div id="tab-cup" class="tab-content"></div>
     <div id="tab-rules" class="tab-content"></div>
+    <div id="tab-thirdsub" class="tab-content"></div>
     <div id="bottomnav">
       <button class="nav-btn" data-tab="draft" onclick="showTab('draft')"><span class="icon">&#x1F3DF;</span><span>Draft</span></button>
       <button class="nav-btn" data-tab="myteam" onclick="showTab('myteam')"><span class="icon">&#x1F464;</span><span>My Team</span></button>
@@ -416,7 +417,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-08-09.18";
+const APP_VERSION = "2026-08-09.21";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 const TOTAL_PICKS = 17;
 const CHART_COLORS = ["#10b981","#3b82f6","#f59e0b","#ef4444","#8b5cf6","#ec4899","#06b6d4","#84cc16","#f97316","#a855f7","#14b8a6","#eab308"];
@@ -464,7 +465,9 @@ let S = {
   scores:{}, scoresFetched:{}, scoreOverrides:{}, lastRefreshed:null, currentGW:1, history:[],
   cups:[],
   advice:null, adviceLoading:false, defaultTab:"myteam",
-  lastBackup:null, postDraftSnapshot:null
+  lastBackup:null, postDraftSnapshot:null,
+  thirdSubWindow:null, thirdSubPriorityOrder:null, thirdSubTurnIdx:0, thirdSubPicks:{},
+  lateJoiners:{}
 };
 
 // Neon button colours - declared early as used by renderWelcomeScreen on boot
@@ -492,6 +495,8 @@ function saveAll(){
   sv("meta",{lastRefreshed:S.lastRefreshed,currentGW:S.currentGW});
   sv("cups",S.cups);
   sv("postDraftSnapshot",S.postDraftSnapshot);
+  sv("thirdSub",{window:S.thirdSubWindow,priorityOrder:S.thirdSubPriorityOrder,turnIdx:S.thirdSubTurnIdx,picks:S.thirdSubPicks});
+  sv("lateJoiners",S.lateJoiners);
   sv("clubs",PL_CLUBS);
 }
 function loadAll(){
@@ -505,6 +510,10 @@ function loadAll(){
   S.scores=ld("scores",{}); S.scoresFetched=ld("scoresFetched",{}); S.scoreOverrides=ld("scoreOverrides",{});
   S.cups=ld("cups",[]);
   S.postDraftSnapshot=ld("postDraftSnapshot",null);
+  var ts=ld("thirdSub",{});
+  S.thirdSubWindow=ts.window||null; S.thirdSubPriorityOrder=ts.priorityOrder||null;
+  S.thirdSubTurnIdx=ts.turnIdx||0; S.thirdSubPicks=ts.picks||{};
+  S.lateJoiners=ld("lateJoiners",{});
   var m=ld("meta",{});
   S.lastRefreshed=m.lastRefreshed||null; S.currentGW=m.currentGW||1; S.lastBackup=m.lastBackup||null;
   var savedClubs=ld("clubs",[]);
@@ -1167,6 +1176,7 @@ async function autoRefreshIfNeeded(){
   // No API key check needed - refreshScores() now fetches real FPL data directly via
   // the proxy chain and no longer calls the Anthropic API at all.
   checkSeasonEnd();
+  checkThirdSubWindowPrompt();
   var sixHours = 6 * 60 * 60 * 1000;
   var lastRefresh = S.lastRefreshed ? new Date(S.lastRefreshed).getTime() : 0;
   if(Date.now() - lastRefresh < sixHours) return;
@@ -1960,9 +1970,12 @@ function getPersonalPickOrder(ownerName, key){
 function openCaptainModal(personName){
   var team=S.teams[personName]||{};
   var existing=S.captains[personName];
+  var isLateJoiner=!!(S.lateJoiners && S.lateJoiners[personName]);
   var myPicks=Object.entries(S.pickedMap).filter(function(e){return e[1]===personName;}).map(function(e){return e[0];});
-  var firstPickKey=myPicks[0]||null;
-  var html='<h3>Nominate Captain for '+personName+'</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Cannot be their first pick. Each player has a 90-day lifetime budget as captain (can be split across separate stints).</p>';
+  // Late joiners never had a genuine "first pick" - they were choosing from whatever was
+  // left after everyone else already drafted, so the restriction doesn't apply to them.
+  var firstPickKey=isLateJoiner?null:(myPicks[0]||null);
+  var html='<h3>Nominate Captain for '+personName+'</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">'+(isLateJoiner?"Joined late - any player can be captain.":"Cannot be their first pick.")+' Each player has a 90-day lifetime budget as captain (can be split across separate stints).</p>';
   ["GK","DEF","MID","ATT"].forEach(function(pos){
     (team[pos]||[]).forEach(function(p){
       var key=p.name+"|"+p.club;
@@ -2447,7 +2460,11 @@ function renderSettingsTab(){
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #8b5cf6;color:#8b5cf6;" onclick="confirmAutoFill()">&#x1F3B2; Auto-Fill Test Data</button>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;" onclick="openScoreOverride()">&#x270F; Manual Score Override</button>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #6366f1;color:#818cf8;" onclick="showTab(\'rules\')">&#x1F4D6; League Rules</button>';
+  if(S.draftDone){
+    html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #14b8a6;color:#2dd4bf;" onclick="showTab(\'thirdsub\')">&#x1F501; Third Sub Window</button>';
+  }
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #f59e0b;color:#f59e0b;" onclick="showTab(\'cup\')">&#x1F3C6; Knockout Cup</button>';
+  html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #ec4899;color:#f472b6;" onclick="openAddLateTeam()">&#x1F465; Add Late Team</button>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #10b981;color:#10b981;" onclick="exportBackup()">&#x2B07; Export Backup</button>';
   if(S.postDraftSnapshot){
     html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #fbbf24;color:#fbbf24;" onclick="exportMasterBackup()">&#x1F3C6; Download Master Backup (post-draft)</button>';
@@ -2651,6 +2668,260 @@ function doEmergencyReplace(owner,pos,idx,newName,newClub){
   renderMyTeamTab(); renderFriendsTab();
 }
 
+// ── ADD LATE TEAM ──────────────────────────────────────────────────────────────
+// For friends who missed the live draft but want to join by picking a full squad from
+// whatever's left undrafted. Deliberately separate from the live snake-draft mechanism
+// (no snakeOrder/pickIdx involvement) - just walks through the same 17-slot shape
+// (2 GK, 5 DEF, 5 MID, 3 ATT, 2 WC) one at a time, same club-max rule, fully resumable
+// since every pick saves immediately rather than being held in a temporary draft.
+var LATE_TEAM_SLOT_SEQUENCE = ["GK","GK","DEF","DEF","DEF","DEF","DEF","MID","MID","MID","MID","MID","ATT","ATT","ATT","WC","WC"];
+function openAddLateTeam(){
+  var incomplete = S.draftOrder.filter(function(n){
+    var t=S.teams[n]||{};
+    var total=["GK","DEF","MID","ATT","WC"].reduce(function(sum,pos){return sum+(t[pos]||[]).length;},0);
+    return total<17;
+  });
+  var html='<h3>&#x1F465; Add Late Team</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">For friends who missed the draft but still want to pick a full squad from whatever\'s left.</p>';
+  if(incomplete.length>0){
+    html+='<div class="sec-hdr" style="margin-top:0;">Continue an in-progress team</div>';
+    incomplete.forEach(function(n){
+      var t=S.teams[n]||{};
+      var total=["GK","DEF","MID","ATT","WC"].reduce(function(sum,pos){return sum+(t[pos]||[]).length;},0);
+      html+='<div class="player-row" onclick="closeModal();continueLateTeam(\''+n.replace(/'/g,"\\'")+'\')"><div class="pname">'+n+'</div><div class="psub">'+total+'/17 picked</div></div>';
+    });
+  }
+  html+='<label class="lbl" style="margin-top:10px;">New Team Name</label><input class="inp" id="late-team-name" placeholder="e.g. Gareth" style="margin-bottom:10px;">';
+  html+='<button class="btn btn-blue" onclick="startLateTeam()">Start New Team</button>';
+  showModal(html);
+}
+function startLateTeam(){
+  var name=document.getElementById("late-team-name").value.trim();
+  if(!name){ showToast("Enter a name."); return; }
+  if(S.draftOrder.indexOf(name)!==-1){ showToast(name+" is already in the league."); return; }
+  S.draftOrder.push(name);
+  S.teams[name]={GK:[],DEF:[],MID:[],ATT:[],WC:[]};
+  // Flag as a late joiner - they never had a genuine "first pick" (picking from
+  // leftovers after everyone else already drafted), so the captain rule exempts them.
+  S.lateJoiners[name]=true;
+  saveAll();
+  closeModal();
+  continueLateTeam(name);
+}
+function getNextLateTeamSlot(name){
+  var t=S.teams[name]||{};
+  var posCounts={GK:0,DEF:0,MID:0,ATT:0,WC:0};
+  for(var i=0;i<LATE_TEAM_SLOT_SEQUENCE.length;i++){
+    var pos=LATE_TEAM_SLOT_SEQUENCE[i];
+    posCounts[pos]++;
+    if((t[pos]||[]).length < posCounts[pos]){
+      var totalInPos=LATE_TEAM_SLOT_SEQUENCE.filter(function(p){return p===pos;}).length;
+      return {pos:pos, ordinal:posCounts[pos], totalInPos:totalInPos};
+    }
+  }
+  return null;
+}
+function continueLateTeam(name){
+  var next=getNextLateTeamSlot(name);
+  if(!next){
+    showModal('<h3>&#x2705; Team Complete!</h3><p style="color:#8b949e;font-size:13px;">'+name+'\'s squad is fully picked (17/17). They now show up everywhere - League, Friends, Stats.</p><button class="btn btn-blue" onclick="closeModal()">Done</button>');
+    renderSettingsTab();
+    return;
+  }
+  var posLabel={GK:"Goalkeeper",DEF:"Defender",MID:"Midfielder",ATT:"Forward",WC:"Wildcard"}[next.pos];
+  var pickedKeys=Object.keys(S.pickedMap);
+  var pool=S.playerPool.filter(function(p){
+    if(pickedKeys.indexOf(p.name+"|"+p.club)!==-1) return false;
+    if(next.pos!=="WC" && p.position!==next.pos) return false;
+    if(isClubBlocked(name,p.club)) return false;
+    return true;
+  }).sort(function(a,b){return b.lastSeasonPts-a.lastSeasonPts;});
+  var html='<h3>'+name+' &mdash; '+posLabel+' '+next.ordinal+' of '+next.totalInPos+'</h3>';
+  html+='<p style="color:#8b949e;font-size:12px;margin-bottom:12px;">Picking from remaining undrafted players.</p>';
+  if(next.pos==="WC"){
+    html+='<button class="btn btn-gray" style="margin-bottom:10px;border:1px solid #f59e0b;color:#f59e0b;" onclick="openLateTeamNonPL(\''+name.replace(/'/g,"\\'")+'\')">&#x270F; Type a non-PL player instead</button>';
+  }
+  if(pool.length===0) html+='<div class="warn">No eligible players left for this position.</div>';
+  pool.slice(0,80).forEach(function(p){
+    html+='<div class="player-row" onclick="pickLateTeamPlayer(\''+name.replace(/'/g,"\\'")+'\',\''+p.name.replace(/'/g,"\\'")+'\',\''+p.club.replace(/'/g,"\\'")+'\')"><div style="display:flex;align-items:center;gap:10px;"><span class="badge badge-'+p.position+'">'+p.position+'</span><div style="flex:1;"><div class="pname">'+p.name+'</div><div class="psub">'+p.club+' &middot; '+p.lastSeasonPts+'pts</div></div></div></div>';
+  });
+  html+='<button class="btn btn-gray" style="margin-top:10px;" onclick="closeModal()">Pause - Continue Later (Settings &rarr; Add Late Team)</button>';
+  showModal(html);
+}
+function pickLateTeamPlayer(name,pName,pClub){
+  var player=S.playerPool.find(function(p){return p.name===pName&&p.club===pClub;});
+  if(!player){ showToast("Player not found."); return; }
+  var key=pName+"|"+pClub;
+  if(S.pickedMap[key]){ showToast(pName+" has already been picked."); return; }
+  var next=getNextLateTeamSlot(name);
+  if(!next) return;
+  if(isClubBlocked(name,pClub)){ showToast("Club limit reached for "+name+"."); return; }
+  if(!S.teams[name][next.pos]) S.teams[name][next.pos]=[];
+  S.teams[name][next.pos].push(Object.assign({},player,{pickNumber:null}));
+  S.pickedMap[key]=name;
+  saveAll();
+  continueLateTeam(name);
+}
+function openLateTeamNonPL(name){
+  var next=getNextLateTeamSlot(name);
+  if(!next||next.pos!=="WC") return;
+  showModal('<h3>&#x1F0CF; Non-PL Wildcard</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Free-type a player not currently in the Premier League. They won\'t score until subbed in (by which point they must be at a PL club).</p><label class="lbl">Player Name</label><input class="inp" id="late-wc-name" placeholder="e.g. Kylian Mbappe" style="margin-bottom:10px;"><label class="lbl">Position</label><select class="inp" id="late-wc-pos" style="margin-bottom:10px;"><option value="GK">GK</option><option value="DEF">DEF</option><option value="MID">MID</option><option value="ATT" selected>ATT</option></select><label class="lbl">Current Club (non-PL)</label><input class="inp" id="late-wc-club" placeholder="e.g. Real Madrid" style="margin-bottom:14px;"><button class="btn btn-blue" onclick="confirmLateTeamNonPL(\''+name.replace(/'/g,"\\'")+'\')">Add as Wildcard</button>');
+}
+function confirmLateTeamNonPL(name){
+  var pName=document.getElementById("late-wc-name").value.trim();
+  var pos=document.getElementById("late-wc-pos").value;
+  var club=document.getElementById("late-wc-club").value.trim()||"Unknown";
+  if(!pName){ showToast("Please enter a player name."); return; }
+  var key=pName+"|"+club;
+  if(S.pickedMap[key]){ showToast("Already picked."); return; }
+  var player={name:pName,club:club,position:pos,fplPrice:0,lastSeasonPts:0,rating:5,isNonPL:true,pickNumber:null};
+  if(!S.teams[name].WC) S.teams[name].WC=[];
+  S.teams[name].WC.push(player);
+  S.pickedMap[key]=name;
+  saveAll();
+  continueLateTeam(name);
+}
+
+// ── THIRD SUB WINDOW ─────────────────────────────────────────────────────────
+// A 3rd wildcard slot unlocked only during a January/February window (exact dates set
+// by the organiser, entered here once confirmed). Works as a mini one-round draft:
+// priority order is worst-placed-team-first (frozen the moment the window opens), and
+// each person can pick any undrafted player OR any player released via someone's
+// wildcard sub. The pick itself reuses the exact same WC/sub machinery as the normal
+// 2 wildcard slots - it's just a 3rd entry in team.WC, so subbing it in later needs no
+// new code at all.
+var THIRD_SUB_PROMPT_THRESHOLD = new Date("2027-01-01T00:00:00Z").getTime();
+var thirdSubPromptShownThisSession=false;
+function checkThirdSubWindowPrompt(){
+  if(!S.draftDone) return;
+  if(Date.now() < THIRD_SUB_PROMPT_THRESHOLD) return;
+  if(S.thirdSubWindow) return; // already configured - no need to ask again
+  if(thirdSubPromptShownThisSession) return;
+  thirdSubPromptShownThisSession=true;
+  setTimeout(promptThirdSubWindowDates, 800);
+}
+function promptThirdSubWindowDates(){
+  var msg='<h3>&#x1F501; Third Sub Window</h3>';
+  msg+='<p style="color:#8b949e;font-size:13px;margin-bottom:14px;">It\'s January - if your organiser has confirmed the 3rd sub window dates, enter them here. If not yet, just dismiss and you\'ll be asked again next time you open the app.</p>';
+  msg+='<label class="lbl">Window Opens</label><input class="inp" id="ts-open" type="date" style="margin-bottom:10px;">';
+  msg+='<label class="lbl">Window Closes</label><input class="inp" id="ts-close" type="date" style="margin-bottom:14px;">';
+  msg+='<button class="btn btn-blue" style="margin-bottom:8px;" onclick="saveThirdSubWindow()">Save Dates</button>';
+  msg+='<button class="btn btn-gray" onclick="closeModal()">Not yet - ask me again next time</button>';
+  showModal(msg);
+}
+function saveThirdSubWindow(){
+  var openVal=document.getElementById("ts-open").value;
+  var closeVal=document.getElementById("ts-close").value;
+  if(!openVal||!closeVal){ showToast("Please enter both dates."); return; }
+  S.thirdSubWindow={opensAt:openVal+"T00:00:00Z", closesAt:closeVal+"T23:59:59Z"};
+  sv("thirdSub",{window:S.thirdSubWindow,priorityOrder:S.thirdSubPriorityOrder,turnIdx:S.thirdSubTurnIdx,picks:S.thirdSubPicks});
+  closeModal();
+  showToast("Third Sub window saved: "+openVal+" to "+closeVal);
+  renderThirdSubTab();
+}
+// Returns "not-configured" | "upcoming" | "open" | "closed"
+function thirdSubWindowStatus(){
+  if(!S.thirdSubWindow) return "not-configured";
+  var now=Date.now();
+  var opens=new Date(S.thirdSubWindow.opensAt).getTime();
+  var closes=new Date(S.thirdSubWindow.closesAt).getTime();
+  if(now<opens) return "upcoming";
+  if(now>closes) return "closed";
+  // Generate the priority order exactly once, the first time we detect the window is
+  // open - frozen at this moment (based on real standings right now), not continuously
+  // re-ranked as scores change during the window itself.
+  if(!S.thirdSubPriorityOrder){
+    S.thirdSubPriorityOrder=S.draftOrder.slice().sort(function(a,b){return getPersonTotalPts(a)-getPersonTotalPts(b);});
+    S.thirdSubTurnIdx=0;
+    sv("thirdSub",{window:S.thirdSubWindow,priorityOrder:S.thirdSubPriorityOrder,turnIdx:S.thirdSubTurnIdx,picks:S.thirdSubPicks});
+  }
+  return "open";
+}
+function getThirdSubEligiblePool(owner){
+  var pickedKeys=Object.keys(S.pickedMap);
+  var releasedKeys=[];
+  Object.keys(S.wildcardSubs).forEach(function(name){
+    (S.wildcardSubs[name]||[]).forEach(function(s){ releasedKeys.push(s.outPlayer.name+"|"+s.outPlayer.club); });
+  });
+  var claimed=Object.keys(S.thirdSubPicks||{});
+  return S.playerPool.filter(function(p){
+    var key=p.name+"|"+p.club;
+    if(claimed.indexOf(key)!==-1) return false;
+    var undrafted=pickedKeys.indexOf(key)===-1;
+    var released=releasedKeys.indexOf(key)!==-1;
+    if(!undrafted && !released) return false;
+    if(isClubBlocked(owner,p.club)) return false;
+    return true;
+  }).sort(function(a,b){return b.lastSeasonPts-a.lastSeasonPts;});
+}
+function openThirdSubPicker(owner){
+  var pool=getThirdSubEligiblePool(owner);
+  var html='<h3>Third Sub Pick &mdash; '+owner+'</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Any undrafted player, or anyone released via a wildcard sub. Club limit still applies.</p>';
+  if(pool.length===0) html+='<div class="warn">No eligible players right now.</div>';
+  pool.slice(0,80).forEach(function(p){
+    html+='<div class="player-row" onclick="makeThirdSubPick(\''+owner.replace(/'/g,"\\'")+'\',\''+p.name.replace(/'/g,"\\'")+'\',\''+p.club.replace(/'/g,"\\'")+'\')"><div style="display:flex;align-items:center;gap:10px;"><span class="badge badge-'+p.position+'">'+p.position+'</span><div style="flex:1;"><div class="pname">'+p.name+'</div><div class="psub">'+p.club+' &middot; '+p.lastSeasonPts+'pts</div></div></div></div>';
+  });
+  showModal(html);
+}
+function makeThirdSubPick(owner,playerName,playerClub){
+  var player=S.playerPool.find(function(p){return p.name===playerName&&p.club===playerClub;});
+  if(!player){ showToast("Player not found."); return; }
+  var key=playerName+"|"+playerClub;
+  if(S.thirdSubPicks[key]){ showToast("This player has already been picked up by someone else."); return; }
+  if(isClubBlocked(owner,playerClub)){ showToast("Club limit reached for "+owner+"."); return; }
+  var team=S.teams[owner];
+  if(!team.WC) team.WC=[];
+  team.WC.push(Object.assign({},player,{pickNumber:null,thirdSub:true}));
+  S.thirdSubPicks[key]=owner;
+  S.thirdSubTurnIdx++;
+  sv("teams",S.teams);
+  sv("thirdSub",{window:S.thirdSubWindow,priorityOrder:S.thirdSubPriorityOrder,turnIdx:S.thirdSubTurnIdx,picks:S.thirdSubPicks});
+  closeModal();
+  showToast(owner+" picked up "+playerName+" as their 3rd sub!");
+  renderThirdSubTab();
+}
+function skipThirdSubTurn(){
+  S.thirdSubTurnIdx++;
+  sv("thirdSub",{window:S.thirdSubWindow,priorityOrder:S.thirdSubPriorityOrder,turnIdx:S.thirdSubTurnIdx,picks:S.thirdSubPicks});
+  renderThirdSubTab();
+}
+function renderThirdSubTab(){
+  var el=document.getElementById("tab-thirdsub");
+  if(!el) return;
+  var html='<div style="padding:14px;overflow-y:auto;flex:1;">';
+  html+='<div style="display:flex;align-items:center;gap:10px;margin-bottom:14px;"><button class="btn btn-gray" style="width:auto;padding:7px 12px;font-size:13px;" onclick="showTab(\'settings\')">&#x2190; Settings</button><div style="flex:1;font-weight:700;font-size:15px;font-family:Rajdhani,system-ui;">Third Sub Window</div></div>';
+
+  var status=thirdSubWindowStatus();
+  if(status==="not-configured"){
+    html+='<div class="card"><div style="color:#8b949e;font-size:13px;margin-bottom:10px;">Dates not yet set - confirm with your organiser, then enter them here.</div><button class="btn btn-blue" onclick="promptThirdSubWindowDates()">Enter Window Dates</button></div>';
+  } else if(status==="upcoming"){
+    html+='<div class="card"><div style="color:#8b949e;font-size:13px;">Window opens '+new Date(S.thirdSubWindow.opensAt).toLocaleDateString()+' and closes '+new Date(S.thirdSubWindow.closesAt).toLocaleDateString()+'.</div></div>';
+  } else if(status==="closed"){
+    html+='<div class="card" style="border-color:#8b949e;"><div style="color:#8b949e;font-size:13px;">Window closed '+new Date(S.thirdSubWindow.closesAt).toLocaleDateString()+'. Anyone who didn\'t pick missed their 3rd sub for the season.</div></div>';
+    html+='<div class="sec-hdr">Picks Made</div>';
+    var any=false;
+    Object.keys(S.thirdSubPicks).forEach(function(key){
+      any=true;
+      html+='<div class="roster-slot"><div style="font-size:13px;">'+key.split("|")[0]+' &rarr; '+S.thirdSubPicks[key]+'</div></div>';
+    });
+    if(!any) html+='<div style="color:#8b949e;font-size:13px;">Nobody made a pick.</div>';
+  } else if(status==="open"){
+    html+='<div class="card" style="border-color:#10b981;margin-bottom:12px;"><div style="color:#10b981;font-size:13px;font-weight:700;">Window OPEN</div><div style="color:#8b949e;font-size:12px;">Closes '+new Date(S.thirdSubWindow.closesAt).toLocaleDateString()+'</div></div>';
+    html+='<div class="sec-hdr">Priority Order (worst-placed first)</div>';
+    S.thirdSubPriorityOrder.forEach(function(name,i){
+      var done=i<S.thirdSubTurnIdx;
+      var isCurrent=i===S.thirdSubTurnIdx;
+      html+='<div class="roster-slot" style="'+(isCurrent?"border-color:#10b981;":"")+(done?"opacity:0.5;":"")+'"><div style="display:flex;align-items:center;justify-content:space-between;"><div style="font-size:13px;font-weight:700;">'+(i+1)+'. '+name+'</div>'+
+        (done?'<div style="color:#484f58;font-size:11px;">Done</div>':isCurrent?'<div style="display:flex;gap:6px;"><button class="btn btn-blue" style="width:auto;padding:5px 10px;font-size:11px;" onclick="openThirdSubPicker(\''+name.replace(/'/g,"\\'")+'\')">Pick</button><button class="btn btn-gray" style="width:auto;padding:5px 10px;font-size:11px;" onclick="skipThirdSubTurn()">Skip</button></div>':'<div style="color:#484f58;font-size:11px;">Waiting</div>')+
+        '</div></div>';
+    });
+    if(S.thirdSubTurnIdx>=S.thirdSubPriorityOrder.length){
+      html+='<div class="card" style="border-color:#f59e0b;margin-top:8px;"><div style="color:#fbbf24;font-size:13px;">Everyone has had their turn!</div></div>';
+    }
+  }
+  html+="</div>";
+  el.innerHTML=html;
+}
+
 // ── KNOCKOUT CUP ───────────────────────────────────────────────────────────────
 // A cup runs in parallel to the main draft/league - same teams, same real GW scores,
 // just compared head-to-head in a randomly-drawn single-elimination bracket for
@@ -2834,14 +3105,16 @@ function renderRulesTab(){
 
   html+=section("&#x1F3DF; Draft Rules","#60a5fa");
   html+=rule("Squad size", "17 players: 2 goalkeepers, 5 defenders, 5 midfielders, 3 forwards, and 2 Wildcard slots.");
-  html+=rule("Max 3 per club", "You can never have more than 3 players from the same Premier League club - this applies to every pick, including ones that overflow into a Wildcard slot.");
+  html+=rule("Max 3 per club", "You can never draft more than 3 players from the same Premier League club - this applies to every pick, including ones that overflow into a Wildcard slot. If a player later transfers to a club where you already have 3 (e.g. you own 3 Man Utd players and Salah then signs for Man Utd), that's fine - no penalty, no forced changes. This exemption only covers real-world transfers happening after draft day, not deliberate picks (subs, emergency replacements, and 3rd sub picks all still respect the limit).");
   html+=rule("Wildcard slots", "Filled either by a real player once your normal slots for their position are full, or by free-typing a player not yet in the Premier League (e.g. a rumoured transfer) - these must later be \"Resolved\" once they actually sign.");
+  html+=rule("Joining late", "Friends who miss the draft can still join by picking a full squad from whatever's left undrafted - same 17-player structure and club limit as everyone else.");
 
   html+=section("&#x1F4C5; In-Season Rules","#10b981");
-  html+=rule("Captain", "Doubles that player's points while active. Cannot be your first-ever pick (shown as \"Pick #1\" in your squad).");
+  html+=rule("Captain", "Doubles that player's points while active. Cannot be your first-ever pick (shown as \"Pick #1\" in your squad) - except for late joiners, who never had a genuine first pick, so any player can be their captain.");
   html+=rule("Captain budget: 90 days, for the whole season", "Every player has a 90-day <em>lifetime</em> budget as your captain - not reset each time you re-nominate them. You can split it across separate stints (e.g. captain for 15 days, swap away, captain again later for 45 more, etc). Once a player's 90 days are used up, they can never be your captain again.");
   html+=rule("Wildcard subs", "Permanently swap a Wildcard player in for an existing squad player. Must be the <b>same position</b> (a GK can only replace a GK, etc). Each of your 2 Wildcard slots can only be used once, and it's irreversible.");
   html+=rule("Non-PL wildcards", "A free-typed Wildcard player must be \"Resolved\" (assign their real club) before they can be subbed in. The app tries to auto-detect their real position from official FPL data when you resolve them.");
+  html+=rule("Third Sub Window (January/February)", "A 3rd wildcard slot unlocks during a window later in the season (exact dates set by the organiser). Priority order is worst-placed team first, based on standings the moment the window opens. Each person, in turn, can pick any undrafted player OR anyone released via someone else's wildcard sub - club limit still applies. Once picked, it works exactly like the other 2 wildcards: sub it into your squad whenever you like, position-matched.");
 
   html+=section("&#x26A0; Pre-Season Special Rule","#f59e0b");
   html+=rule("Player leaves the Premier League before kickoff", "If a player you've drafted leaves the Premier League (e.g. sold abroad) <b>before</b> the season opener kicks off (Arsenal v Coventry, Friday 21 August 2026, 8pm), you get a free, one-time replacement from the undrafted pool - same position, doesn't use a Wildcard slot.");
@@ -2900,6 +3173,9 @@ function exportBackup(){
     playerPool:S.playerPool,
     cups:S.cups,
     postDraftSnapshot:S.postDraftSnapshot,
+    thirdSubWindow:S.thirdSubWindow, thirdSubPriorityOrder:S.thirdSubPriorityOrder,
+    thirdSubTurnIdx:S.thirdSubTurnIdx, thirdSubPicks:S.thirdSubPicks,
+    lateJoiners:S.lateJoiners,
     clubs:PL_CLUBS
   };
   try{
@@ -3014,6 +3290,11 @@ function doImportBackup(){
     S.playerPool=backup.playerPool||[];
     S.cups=backup.cups||[];
     S.postDraftSnapshot=backup.postDraftSnapshot||S.postDraftSnapshot;
+    S.thirdSubWindow=backup.thirdSubWindow||S.thirdSubWindow;
+    S.thirdSubPriorityOrder=backup.thirdSubPriorityOrder||S.thirdSubPriorityOrder;
+    S.thirdSubTurnIdx=backup.thirdSubTurnIdx||S.thirdSubTurnIdx;
+    S.thirdSubPicks=backup.thirdSubPicks||S.thirdSubPicks;
+    S.lateJoiners=backup.lateJoiners||S.lateJoiners;
     if(backup.clubs&&backup.clubs.length>0) PL_CLUBS=backup.clubs;
     saveAll();
     pendingBackup=null;
@@ -3382,7 +3663,9 @@ function buildBackupObject(){
     captains:S.captains, captainHistory:S.captainHistory, wildcardSubs:S.wildcardSubs,
     scores:S.scores, scoresFetched:S.scoresFetched, scoreOverrides:S.scoreOverrides,
     currentGW:S.currentGW, lastRefreshed:S.lastRefreshed,
-    playerPool:S.playerPool, cups:S.cups, postDraftSnapshot:S.postDraftSnapshot, clubs:PL_CLUBS
+    playerPool:S.playerPool, cups:S.cups, postDraftSnapshot:S.postDraftSnapshot,
+    thirdSubWindow:S.thirdSubWindow, thirdSubPriorityOrder:S.thirdSubPriorityOrder,
+    thirdSubTurnIdx:S.thirdSubTurnIdx, thirdSubPicks:S.thirdSubPicks, lateJoiners:S.lateJoiners, clubs:PL_CLUBS
   };
 }
 
@@ -3465,7 +3748,7 @@ function showTab(tabId){
   var renderFn = {
     draft: renderDraftTab, myteam: renderMyTeamTab, friends: renderFriendsTab,
     league: renderLeagueTab, advice: renderAdviceTab, settings: renderSettingsTab,
-    pool: renderPoolTab, stats: renderStatsTab, cup: renderCupTab, rules: renderRulesTab
+    pool: renderPoolTab, stats: renderStatsTab, cup: renderCupTab, rules: renderRulesTab, thirdsub: renderThirdSubTab
   }[tabId];
   if(!renderFn) return;
   // Show a brief spinner immediately, then defer the actual (synchronous, sometimes
