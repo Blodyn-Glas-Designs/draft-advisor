@@ -417,7 +417,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-08-09.21";
+const APP_VERSION = "2026-08-09.22";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 const TOTAL_PICKS = 17;
 const CHART_COLORS = ["#10b981","#3b82f6","#f59e0b","#ef4444","#8b5cf6","#ec4899","#06b6d4","#84cc16","#f97316","#a855f7","#14b8a6","#eab308"];
@@ -2615,7 +2615,7 @@ function openEmergencyReplaceTarget(owner,pos,idx){
     // they're leaving, so their slot shouldn't count against a same-club replacement.
     var count=clubCountForPicker(owner,p.club) - (outgoing.club===p.club?1:0);
     return count<S.clubMax;
-  }).sort(function(a,b){return b.lastSeasonPts-a.lastSeasonPts;});
+  }).sort(function(a,b){return a.name.localeCompare(b.name);});
   var html='<h3>Replace '+outgoing.name+'</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Select a '+outgoing.position+' from undrafted players.</p>';
   if(avail.length===0) html+='<div class="warn">No eligible undrafted '+outgoing.position+' available.</div>';
   avail.slice(0,60).forEach(function(p){
@@ -2734,7 +2734,7 @@ function continueLateTeam(name){
     if(next.pos!=="WC" && p.position!==next.pos) return false;
     if(isClubBlocked(name,p.club)) return false;
     return true;
-  }).sort(function(a,b){return b.lastSeasonPts-a.lastSeasonPts;});
+  }).sort(function(a,b){return a.name.localeCompare(b.name);});
   var html='<h3>'+name+' &mdash; '+posLabel+' '+next.ordinal+' of '+next.totalInPos+'</h3>';
   html+='<p style="color:#8b949e;font-size:12px;margin-bottom:12px;">Picking from remaining undrafted players.</p>';
   if(next.pos==="WC"){
@@ -2851,7 +2851,7 @@ function getThirdSubEligiblePool(owner){
     if(!undrafted && !released) return false;
     if(isClubBlocked(owner,p.club)) return false;
     return true;
-  }).sort(function(a,b){return b.lastSeasonPts-a.lastSeasonPts;});
+  }).sort(function(a,b){return a.name.localeCompare(b.name);});
 }
 function openThirdSubPicker(owner){
   var pool=getThirdSubEligiblePool(owner);
