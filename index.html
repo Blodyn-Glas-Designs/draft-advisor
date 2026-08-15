@@ -417,7 +417,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-08-09.22";
+const APP_VERSION = "2026-08-09.23";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 const TOTAL_PICKS = 17;
 const CHART_COLORS = ["#10b981","#3b82f6","#f59e0b","#ef4444","#8b5cf6","#ec4899","#06b6d4","#84cc16","#f97316","#a855f7","#14b8a6","#eab308"];
@@ -1366,6 +1366,31 @@ async function generateAdvice(){
   var slotsLeft={};
   Object.keys(SLOTS).forEach(function(pos){ slotsLeft[pos]=SLOTS[pos]-(myTeam[pos]||[]).length; });
   var totalLeft=Object.values(slotsLeft).reduce(function(a,b){return a+b;},0);
+  // Positions still needed - computed here (not just later for the deterministic Safe
+  // Pick) so it can immediately narrow what everything downstream even considers. This is
+  // the actual fix for a real bug: a fully-filled position (e.g. both GKs already picked)
+  // could still dominate the AI's candidate list, since nothing filtered position
+  // relevance until much later, and even then only for the Safe Pick calculation - never
+  // for what the AI itself was shown when reasoning about the Strategic Pick.
+  // Special case: once every main position is genuinely full and ONLY Wildcard slots
+  // remain, any position becomes valid again (a pick overflows into the WC slot, per the
+  // normal draft rule) - without this, neededPositions would go empty and break advice
+  // entirely for the last picks of the draft. But this must NOT trigger just because WC
+  // slots happen to still be open while other positions are still empty (e.g. both GKs
+  // picked but DEF/MID/ATT are still 0/5/0/3) - a full position stays excluded until
+  // everything else is actually filled too, otherwise a 3rd GK could keep getting
+  // recommended over genuinely-needed positions the whole rest of the draft.
+  var mainPositionsRemaining = Object.keys(SLOTS).filter(function(pos){return pos!=="WC";})
+    .reduce(function(sum,pos){return sum+slotsLeft[pos];},0);
+  var neededPositions = (mainPositionsRemaining===0 && slotsLeft.WC>0)
+    ? ["GK","DEF","MID","ATT"]
+    : Object.keys(SLOTS).filter(function(pos){ return pos!=="WC" && slotsLeft[pos]>0; });
+  // available() returns players in raw pool order (not sorted by quality at all), so also
+  // sort by rating then points here - everything downstream (injury checks, news/decline
+  // enrichment, the final AI candidate list) should see genuinely relevant, genuinely
+  // good players, not just whatever happened to load first.
+  avail=avail.filter(function(p){ return neededPositions.includes(p.position); })
+    .sort(function(a,b){ return (b.rating||0)-(a.rating||0) || b.lastSeasonPts-a.lastSeasonPts; });
   var topGKs=avail.filter(function(p){return p.position==="GK"&&p.rating>=7;}).length;
   var upcoming=S.snakeOrder.slice(S.pickIdx+1);
   var nextTurn=upcoming.findIndex(function(n){return n===S.myName;});
@@ -1471,7 +1496,6 @@ async function generateAdvice(){
     var currentRound = Math.floor(picksMadeSoFar/draftersCount)+1;
     var totalRounds = Math.ceil(S.snakeOrder.length/draftersCount);
 
-    var neededPositions = Object.keys(slotsLeft).filter(function(pos){ return pos!=="WC" && slotsLeft[pos]>0; });
     var safePickCandidates = filteredAvail.filter(function(p){
       return neededPositions.includes(p.position) && !blockedClubs.includes(p.club);
     }).sort(function(a,b){ return b.lastSeasonPts - a.lastSeasonPts; });
