@@ -308,6 +308,7 @@ label.lbl{display:block;color:#8b5cf6;font-size:11px;text-transform:uppercase;le
       <!-- Bottom info -->
       <div style="position:relative;z-index:1;padding:12px 16px;text-align:center;flex-shrink:0;">
         <div style="color:#484f58;font-size:11px;" id="welcome-footer"></div>
+        <div style="color:#30363d;font-size:10px;margin-top:4px;" id="welcome-version"></div>
       </div>
     </div>
   </div>
@@ -417,7 +418,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-08-09.23";
+const APP_VERSION = "2026-08-09.24";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 const TOTAL_PICKS = 17;
 const CHART_COLORS = ["#10b981","#3b82f6","#f59e0b","#ef4444","#8b5cf6","#ec4899","#06b6d4","#84cc16","#f97316","#a855f7","#14b8a6","#eab308"];
@@ -3910,8 +3911,9 @@ function renderWelcomeScreen(){
     footer = S.playerPool.length+' players loaded';
     if(S.lastRefreshed) footer += ' • Last refresh: '+new Date(S.lastRefreshed).toLocaleDateString();
   }
-  footer += (footer?' • ':'')+'v'+APP_VERSION;
   document.getElementById('welcome-footer').textContent = footer;
+  var vEl = document.getElementById('welcome-version');
+  if(vEl) vEl.textContent = 'v'+APP_VERSION;
   // Show backup prompt after a short delay so welcome screen renders first
   setTimeout(checkBackupPrompt, 300);
 
