@@ -418,8 +418,12 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-08-09.24";
+const APP_VERSION = "2026-08-17.2";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
+// Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
+// BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
+// the captain budget clock from ticking during pre-season nominations - see getCaptainBudget.
+const SEASON_KICKOFF_MS = new Date("2026-08-21T19:00:00Z").getTime();
 const TOTAL_PICKS = 17;
 const CHART_COLORS = ["#10b981","#3b82f6","#f59e0b","#ef4444","#8b5cf6","#ec4899","#06b6d4","#84cc16","#f97316","#a855f7","#14b8a6","#eab308"];
 const POS_COLORS = {GK:{bg:"#f59e0b",text:"#000"},DEF:{bg:"#3b82f6",text:"#fff"},MID:{bg:"#10b981",text:"#fff"},ATT:{bg:"#ef4444",text:"#fff"},WC:{bg:"#8b5cf6",text:"#fff"}};
@@ -463,6 +467,7 @@ let S = {
   apiKey:"", myName:"", draftOrder:[], clubMax:3,
   playerPool:[], pickedMap:{}, teams:{}, snakeOrder:[], pickIdx:0,
   draftDone:false, hideDraft:false, captains:{}, captainHistory:{}, wildcardSubs:{},
+  captainMonths:{}, gwMonthMap:{},
   scores:{}, scoresFetched:{}, scoreOverrides:{}, lastRefreshed:null, currentGW:1, history:[],
   cups:[],
   advice:null, adviceLoading:false, defaultTab:"myteam",
@@ -492,6 +497,7 @@ function saveAll(){
   sv("pool",S.playerPool); sv("picked",S.pickedMap); sv("teams",S.teams);
   sv("snake",{snakeOrder:S.snakeOrder,pickIdx:S.pickIdx});
   sv("captains",S.captains); sv("captainHistory",S.captainHistory); sv("wildcards",S.wildcardSubs);
+  sv("captainMonths",S.captainMonths); sv("gwMonthMap",S.gwMonthMap);
   sv("scores",S.scores); sv("scoresFetched",S.scoresFetched); sv("scoreOverrides",S.scoreOverrides);
   sv("meta",{lastRefreshed:S.lastRefreshed,currentGW:S.currentGW});
   sv("cups",S.cups);
@@ -508,6 +514,16 @@ function loadAll(){
   S.playerPool=ld("pool",[]); S.pickedMap=ld("picked",{}); S.teams=ld("teams",{});
   var sn=ld("snake",{}); S.snakeOrder=sn.snakeOrder||[]; S.pickIdx=sn.pickIdx||0;
   S.captains=ld("captains",{}); S.captainHistory=ld("captainHistory",{}); S.wildcardSubs=ld("wildcards",{});
+  S.captainMonths=ld("captainMonths",{}); S.gwMonthMap=ld("gwMonthMap",{});
+  // One-time migration to the new monthly captain system (real rule: nominations happen
+  // per calendar month, not a continuously-ticking real-time budget). Clears any
+  // nominations made under the old system - confirmed safe with the user since no real
+  // games had been played yet and only one nomination existed.
+  if(!ld("captainSystemV2Migrated",false)){
+    S.captains={}; S.captainHistory={}; S.captainMonths={};
+    sv("captains",S.captains); sv("captainHistory",S.captainHistory); sv("captainMonths",S.captainMonths);
+    sv("captainSystemV2Migrated",true);
+  }
   S.scores=ld("scores",{}); S.scoresFetched=ld("scoresFetched",{}); S.scoreOverrides=ld("scoreOverrides",{});
   S.cups=ld("cups",[]);
   S.postDraftSnapshot=ld("postDraftSnapshot",null);
@@ -1118,6 +1134,17 @@ async function refreshScores(){
       function(){} // silent background refresh - no UI to report progress into
     );
     var events = bootstrap.events||[];
+    // Populate the gameweek -> calendar-month map from real FPL data, used by the monthly
+    // captain system to decide which month's nomination a given gameweek's doubling counts
+    // toward. deadline_time is shortly before kickoff of the gameweek's first game, which is
+    // what the rule is actually keyed on (even if later games in the same GW spill into the
+    // next calendar month).
+    events.forEach(function(e){
+      if(e.deadline_time){
+        S.gwMonthMap[e.id] = e.deadline_time.slice(0,7); // "YYYY-MM"
+      }
+    });
+    sv("gwMonthMap", S.gwMonthMap);
     var currentEvt = events.find(function(e){ return e.is_current; });
     var finishedIds = events.filter(function(e){ return e.finished; }).map(function(e){ return e.id; });
     var currentGW = currentEvt ? currentEvt.id : (finishedIds.length ? Math.max.apply(null,finishedIds) : 1);
@@ -1249,70 +1276,78 @@ function getPersonGWPts(name,gw){
   return total;
 }
 
-// ── CAPTAIN ────────────────────────────────────────────────────────────────────
-// Returns whichever player was actually captain during a SPECIFIC gameweek, based on
-// S.captainHistory (a chronological list of {player,startGW} eras per drafter). This is
-// what makes captain doubling correctly time-bound: nominating a new captain now only
-// doubles their points from this point forward, and preserves the previous captain's
-// doubled points for the weeks they actually held the armband - rather than the old
-// behaviour of always applying whichever captain is CURRENT to every historical week.
+// ── CAPTAIN (monthly nomination system) ─────────────────────────────────────────
+// Real rule: the organiser takes captain nominations once per calendar month. Doubling
+// applies to an ENTIRE gameweek based on which month it STARTS in - e.g. if a gameweek's
+// first game is the last Friday of November, every game in that gameweek doubles for
+// November's captain, even if some of its games (Sun/Mon) fall on calendar dates in
+// December. A given player can be captain for at most 3 total months across the season,
+// not necessarily consecutive.
+var CAPTAIN_BUDGET_MONTHS = 3;
+function currentMonthKey(){
+  var d=new Date();
+  return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0");
+}
+function getNextMonthKey(monthKey){
+  var parts=monthKey.split("-").map(Number);
+  var y=parts[0], m=parts[1]+1;
+  if(m>12){ m=1; y++; }
+  return y+"-"+String(m).padStart(2,"0");
+}
+function daysRemainingInCurrentMonth(){
+  var now=new Date();
+  var lastDay=new Date(now.getFullYear(), now.getMonth()+1, 0).getDate();
+  return lastDay-now.getDate();
+}
+var MONTH_NAMES={"01":"January","02":"February","03":"March","04":"April","05":"May","06":"June","07":"July","08":"August","09":"September","10":"October","11":"November","12":"December"};
+function monthLabel(monthKey){
+  var parts=monthKey.split("-");
+  return MONTH_NAMES[parts[1]]+" "+parts[0];
+}
+// Standard Premier League season span - used to populate the month-selector dropdown.
+function getSeasonMonthsList(){
+  return ["2026-08","2026-09","2026-10","2026-11","2026-12","2027-01","2027-02","2027-03","2027-04","2027-05"];
+}
+// Which calendar month a given gameweek is attributed to, per the "counted for the month
+// it starts" rule - populated from real FPL fixture/deadline data (see refreshGWMonthMap).
 function getCaptainForGW(name, gw){
-  var hist = S.captainHistory[name];
-  if(hist && hist.length>0){
-    var active=null;
-    for(var i=0;i<hist.length;i++){
-      if(hist[i].startGW<=gw) active=hist[i]; else break;
-    }
-    return active ? active.player : null;
-  }
-  // Backward compatibility: data saved before this fix existed has no history array yet.
-  // Fall back to whatever is currently set, applied from the start - this preserves
-  // existing users' already-seen totals exactly as they were, rather than retroactively
-  // changing points they've already counted on.
-  var cur = S.captains[name];
-  return cur ? cur.player : null;
+  var month = S.gwMonthMap[gw];
+  if(!month) return null; // month mapping not yet known for this gameweek - no captain determinable yet
+  var entry = (S.captainMonths[name]||[]).find(function(e){ return e.month===month; });
+  return entry ? entry.player : null;
 }
-var CAPTAIN_BUDGET_DAYS = 90;
-// Sums real elapsed time across every era this specific player has held the captaincy for
-// this owner (potentially several separate, non-contiguous stints - e.g. captained, swapped
-// out due to injury, re-nominated weeks later). This is a TRUE lifetime budget: time only
-// accrues while they're actually captain, and stays frozen (banked) while they're not.
+// Sums how many total months this specific player has been nominated captain for this
+// owner (across the whole season, not necessarily consecutive) - a true lifetime budget.
 function getCaptainBudget(ownerName, playerKey){
-  var hist = S.captainHistory[ownerName]||[];
-  var usedMs = 0, hasEverBeenCaptain = false, isCurrentlyActive = false;
-  var nowMs = Date.now();
-  hist.forEach(function(era){
-    var eraKey = era.player.name+"|"+era.player.club;
-    if(eraKey!==playerKey) return;
-    hasEverBeenCaptain = true;
-    if(!era.startDate) return; // pre-fix data with no real date recorded - can't count it
-    var startMs = new Date(era.startDate).getTime();
-    var endMs = era.endDate ? new Date(era.endDate).getTime() : nowMs;
-    if(era.endDate==null) isCurrentlyActive = true;
-    usedMs += Math.max(0, endMs-startMs);
+  var months = (S.captainMonths[ownerName]||[]).filter(function(e){
+    return (e.player.name+"|"+e.player.club)===playerKey;
   });
-  var usedDays = usedMs/(1000*60*60*24);
-  var remainingDays = Math.max(0, CAPTAIN_BUDGET_DAYS-usedDays);
-  return {usedDays:usedDays, remainingDays:remainingDays, hasEverBeenCaptain:hasEverBeenCaptain, isCurrentlyActive:isCurrentlyActive};
+  var usedMonths = months.length;
+  var remainingMonths = Math.max(0, CAPTAIN_BUDGET_MONTHS-usedMonths);
+  var hasEverBeenCaptain = usedMonths>0;
+  var nowKey = currentMonthKey();
+  var isCurrentlyActive = months.some(function(e){ return e.month===nowKey; });
+  return {usedMonths:usedMonths, remainingMonths:remainingMonths, hasEverBeenCaptain:hasEverBeenCaptain, isCurrentlyActive:isCurrentlyActive};
 }
-// Small badge shown next to a player - active countdown while they're captain now, a
-// frozen "banked" balance while they held the armband before but aren't currently captain,
-// or an explicit "budget used" flag once their full 90 days is spent (they can never be
-// re-nominated once this shows).
+// Small badge shown next to a player - shows months remaining, distinguishing "currently
+// active this month" from "banked for a future/past month", or BUDGET USED once all 3 of
+// their months are spent (they can never be re-nominated after that).
 function captainBudgetBadgeHtml(ownerName, playerKey){
   var b=getCaptainBudget(ownerName,playerKey);
   if(!b.hasEverBeenCaptain) return "";
-  var d=Math.ceil(b.remainingDays);
-  if(d<=0) return '<span class="cap-timer red">BUDGET USED</span>';
-  var cls=d<=7?"amber":"green";
-  var label=b.isCurrentlyActive?d+"d left":d+"d banked";
+  if(b.remainingMonths<=0) return '<span class="cap-timer red">BUDGET USED</span>';
+  var cls=b.remainingMonths<=1?"amber":"green";
+  var label=b.isCurrentlyActive?b.remainingMonths+"mo left":b.remainingMonths+"mo banked";
   return '<span class="cap-timer '+cls+'">'+label+'</span>';
 }
-function capDaysLeft(name){
-  var cap=S.captains[name];
-  if(!cap) return null;
-  var key=cap.player.name+"|"+cap.player.club;
-  return Math.ceil(getCaptainBudget(name,key).remainingDays);
+// Months remaining for whoever is CURRENTLY nominated captain (for the current real
+// month) - used by the "nominate soon" reminder banner.
+function capMonthsLeft(name){
+  var monthKey=currentMonthKey();
+  var entry=(S.captainMonths[name]||[]).find(function(e){return e.month===monthKey;});
+  if(!entry) return null;
+  var key=entry.player.name+"|"+entry.player.club;
+  return getCaptainBudget(name,key).remainingMonths;
 }
 
 // ── DRAFT CORE ─────────────────────────────────────────────────────────────────
@@ -1329,10 +1364,36 @@ function confirmPick(player,picker){
   team[slot].push(playerWithPick);
   S.pickIdx++;
   saveAll();
+  autoBackupOnRoundEnd();
   renderTopBar();
   checkAdviceBanner();
   checkCaptainBanner();
   renderDraftTab();
+}
+// Fires a genuine downloadable backup the instant a full round completes (every N picks,
+// where N = number of drafters) - a real file, not just the silent in-browser copy, since
+// only an actual downloaded file survives something like clearing browser site data.
+function autoBackupOnRoundEnd(){
+  var n=S.draftOrder.length;
+  if(!n || S.pickIdx===0 || S.pickIdx%n!==0) return;
+  var roundNum=S.pickIdx/n;
+  try{
+    var backup=buildBackupObject();
+    var json=JSON.stringify(backup,null,2);
+    var uri="data:application/json;charset=utf-8,"+encodeURIComponent(json);
+    var a=document.createElement("a");
+    a.href=uri;
+    a.download="draft-advisor-round"+roundNum+"-backup-"+new Date().toISOString().slice(0,10)+".json";
+    a.style.display="none";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function(){document.body.removeChild(a);},100);
+    S.lastBackup=new Date().toISOString();
+    sv("meta",{lastRefreshed:S.lastRefreshed,currentGW:S.currentGW,lastBackup:S.lastBackup});
+    showToast("\u2705 Round "+roundNum+" complete \u2014 backup saved automatically");
+  }catch(e){
+    showToast("Round "+roundNum+" auto-backup failed - consider a manual backup via Settings.");
+  }
 }
 function undoPick(){
   if(S.history.length===0) return;
@@ -1351,6 +1412,12 @@ function undoPick(){
 function withTimeout(promise,ms,label){var t=new Promise(function(_,reject){setTimeout(function(){reject(new Error((label||"Call")+" timed out after "+(ms/1000)+"s"));},ms);});return Promise.race([promise,t]);}
 async function generateAdvice(){
   S.adviceLoading=true; S.advice=null;
+  // Snapshot exactly where the draft is right now - this multi-step AI pipeline (with real
+  // web search) can take 60-100+ seconds. If several picks happen in that window (e.g.
+  // someone rapidly re-entering picks after a data-loss recovery, manually overriding
+  // advice to move fast), the eventual result could recommend players who've since been
+  // legitimately drafted by someone else. Checked again right before committing below.
+  var generationStartPickIdx = S.pickIdx;
   // Restore API key if missing
   if(!S.apiKey){ var cfg=ld("cfg",{}); S.apiKey=cfg.apiKey||""; }
   if(!S.apiKey){
@@ -1598,6 +1665,22 @@ async function generateAdvice(){
     };
   }
 
+  // Staleness check: has the draft moved on since this generation started, or have the
+  // specific recommended players since been picked by someone else? Either means this
+  // result is out of date and must not be shown as if it were current.
+  var draftMovedOn = S.pickIdx !== generationStartPickIdx;
+  var safeStillAvailable = !S.advice || !S.advice.safePick || !S.pickedMap[S.advice.safePick.name+"|"+S.advice.safePick.club];
+  var stratStillAvailable = !S.advice || !S.advice.strategicPick || !S.pickedMap[S.advice.strategicPick.name+"|"+S.advice.strategicPick.club];
+  if(draftMovedOn || !safeStillAvailable || !stratStillAvailable){
+    S.advice=null;
+    S.adviceLoading=false;
+    // If it's genuinely the user's turn now, get fresh advice instead of leaving them
+    // with nothing - otherwise just quietly stop, no stale recommendation shown either way.
+    if(isMyTurn() && !S.draftDone){ generateAdvice(); return; }
+    renderAdviceTab();
+    return;
+  }
+
   S.adviceLoading=false;
   renderAdviceTab();
 }
@@ -1624,10 +1707,13 @@ function checkAdviceBanner(){
   if(show&&!S.advice&&!S.adviceLoading) generateAdvice();
 }
 function checkCaptainBanner(){
-  var d=capDaysLeft(S.myName);
   var banner=document.getElementById("captain-banner");
-  if(d!==null&&d<=7){
-    document.getElementById("captain-banner-text").textContent=d<=0?"&#x26A0;&#xFE0F; Your captain has expired - change them now!":"&#x26A0;&#xFE0F; Captain expires in "+d+" days";
+  if(!banner) return;
+  var nextMonth=getNextMonthKey(currentMonthKey());
+  var hasNominationForNextMonth=(S.captainMonths[S.myName]||[]).some(function(e){return e.month===nextMonth;});
+  var daysLeft=daysRemainingInCurrentMonth();
+  if(!hasNominationForNextMonth && daysLeft<=7){
+    document.getElementById("captain-banner-text").textContent="\u26A0\uFE0F Nominate your captain for "+monthLabel(nextMonth)+" - "+daysLeft+" day"+(daysLeft===1?"":"s")+" left this month!";
     banner.style.display="block";
   } else banner.style.display="none";
 }
@@ -1819,6 +1905,8 @@ function renderSquadSection(owner, vGW, capForVGW){
         var gwScore=getPlayerGWPts(displayKey,owner,vGW);
         var subNote=swapActive?'<span style="font-size:9px;color:#a78bfa;font-weight:normal;"> &middot; WC sub GW'+subOut.gameweek+'</span>':"";
         var pickOrder=getPersonalPickOrder(owner,displayKey);
+        var resolveBtn = (displayPlayer.isNonPL && !swapActive) ?
+          '<button class="btn btn-gray" style="margin-top:4px;font-size:11px;padding:5px;border-color:#f59e0b;color:#f59e0b;" onclick="resolveWildcard(\''+owner.replace(/'/g,"\\'")+'\',\''+pos+'\','+i+')">&#x26A0; Resolve (Non-PL)</button>' : '';
         html+='<div class="roster-slot filled">'+
           '<div style="display:flex;align-items:center;justify-content:space-between;">'+
           '<div style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+
@@ -1828,7 +1916,7 @@ function renderSquadSection(owner, vGW, capForVGW){
           '<div style="text-align:right;flex-shrink:0;padding-left:8px;">'+
           '<span style="color:#10b981;font-size:14px;font-weight:700;font-family:Bangers,cursive;letter-spacing:0.5px;">'+cumPts+'</span>'+
           '<span style="color:#484f58;font-size:11px;margin-left:4px;">+'+gwScore+'</span>'+
-          '</div></div></div>';
+          '</div></div>'+resolveBtn+'</div>';
       } else {
         html+='<div class="roster-slot"><div style="color:#484f58;font-size:12px;">Empty slot</div></div>';
       }
@@ -1845,7 +1933,7 @@ function renderSquadSection(owner, vGW, capForVGW){
     if(subIn) return;
     var ownerEsc=owner.replace(/'/g,"\\'");
     if(p.isNonPL){
-      wcRows+='<button class="btn btn-gray" style="margin-top:4px;font-size:12px;padding:7px;border-color:#f59e0b;" onclick="resolveWildcard(\''+ownerEsc+'\','+i+')">&#x26A0; Resolve '+p.name+' (Non-PL)</button>';
+      wcRows+='<button class="btn btn-gray" style="margin-top:4px;font-size:12px;padding:7px;border-color:#f59e0b;" onclick="resolveWildcard(\''+ownerEsc+'\',\'WC\','+i+')">&#x26A0; Resolve '+p.name+' (Non-PL)</button>';
     } else {
       wcRows+='<button class="btn btn-gray" style="margin-top:4px;font-size:12px;padding:7px;" onclick="openSubModal(\''+ownerEsc+'\','+i+')">Sub in '+p.name+' ('+(p.position||"position unconfirmed")+')</button>';
     }
@@ -1920,8 +2008,8 @@ function renderFriendsTab(){
     var team=S.teams[name]||{};
     var total=Object.values(team).reduce(function(a,arr){return a+arr.length;},0);
     var pts=getPersonTotalPts(name);
-    var cap=S.captains[name];
-    html+='<button onclick="viewingFriend=\''+name.replace(/'/g,"\\'")+'\';renderFriendsTab();" style="display:flex;align-items:center;width:100%;background:#161b22;border:1px solid #30363d;border-radius:12px;padding:14px 16px;margin-bottom:8px;cursor:pointer;text-align:left;font-family:inherit;"><div style="flex:1;"><div style="color:#f0f6fc;font-weight:700;font-size:15px;">'+name+'</div><div style="color:#8b949e;font-size:12px;margin-top:2px;">'+total+"/"+TOTAL_PICKS+" players &middot; "+pts+"pts"+(cap?" &middot; C: "+cap.player.name:"")+'</div></div><div style="color:#8b949e;font-size:18px;">&#x203A;</div></button>';
+    var cap=getCaptainForGW(name,S.currentGW);
+    html+='<button onclick="viewingFriend=\''+name.replace(/'/g,"\\'")+'\';renderFriendsTab();" style="display:flex;align-items:center;width:100%;background:#161b22;border:1px solid #30363d;border-radius:12px;padding:14px 16px;margin-bottom:8px;cursor:pointer;text-align:left;font-family:inherit;"><div style="flex:1;"><div style="color:#f0f6fc;font-weight:700;font-size:15px;">'+name+'</div><div style="color:#8b949e;font-size:12px;margin-top:2px;">'+total+"/"+TOTAL_PICKS+" players &middot; "+pts+"pts"+(cap?" &middot; C: "+cap.name:"")+'</div></div><div style="color:#8b949e;font-size:18px;">&#x203A;</div></button>';
   });
   html+="</div>";
   el.innerHTML=html;
@@ -1992,65 +2080,60 @@ function getPersonalPickOrder(ownerName, key){
   var idx=myPicks.indexOf(key);
   return idx>=0?idx+1:null;
 }
-function openCaptainModal(personName){
+function openCaptainModal(personName, month){
+  var months=getSeasonMonthsList();
+  if(!month){
+    // Default to the next month (from now) that doesn't have a nomination yet.
+    var existingMonths=(S.captainMonths[personName]||[]).map(function(e){return e.month;});
+    var nowKey=currentMonthKey();
+    month = months.find(function(m){ return m>=nowKey && existingMonths.indexOf(m)===-1; })
+      || months.find(function(m){ return m>=nowKey; }) || months[0];
+  }
   var team=S.teams[personName]||{};
-  var existing=S.captains[personName];
+  var existingForMonth=(S.captainMonths[personName]||[]).find(function(e){return e.month===month;});
   var isLateJoiner=!!(S.lateJoiners && S.lateJoiners[personName]);
   var myPicks=Object.entries(S.pickedMap).filter(function(e){return e[1]===personName;}).map(function(e){return e[0];});
   // Late joiners never had a genuine "first pick" - they were choosing from whatever was
   // left after everyone else already drafted, so the restriction doesn't apply to them.
   var firstPickKey=isLateJoiner?null:(myPicks[0]||null);
-  var html='<h3>Nominate Captain for '+personName+'</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">'+(isLateJoiner?"Joined late - any player can be captain.":"Cannot be their first pick.")+' Each player has a 90-day lifetime budget as captain (can be split across separate stints).</p>';
+  var html='<h3>Nominate Captain for '+personName+'</h3>';
+  html+='<label class="lbl">Month</label><select class="inp" id="cap-month-select" style="margin-bottom:12px;" onchange="openCaptainModal(\''+personName.replace(/'/g,"\\'")+'\',this.value)">'+
+    months.map(function(m){return '<option value="'+m+'"'+(m===month?" selected":"")+'>'+monthLabel(m)+'</option>';}).join("")+
+    '</select>';
+  html+='<p style="color:#8b949e;font-size:13px;margin-bottom:14px;">'+(isLateJoiner?"Joined late - any player can be captain.":"Cannot be their first pick.")+' Each player can be captain for at most 3 total months this season (needn\'t be consecutive). Doubles every gameweek that starts in '+monthLabel(month)+'.</p>';
   ["GK","DEF","MID","ATT"].forEach(function(pos){
     (team[pos]||[]).forEach(function(p){
       var key=p.name+"|"+p.club;
       if(key===firstPickKey) return;
-      var isCur=existing&&(existing.player.name+"|"+existing.player.club)===key;
+      var isCurForMonth=existingForMonth&&(existingForMonth.player.name+"|"+existingForMonth.player.club)===key;
       var budget=getCaptainBudget(personName,key);
-      var exhausted=budget.hasEverBeenCaptain && budget.remainingDays<=0 && !isCur;
+      var exhausted=budget.hasEverBeenCaptain && budget.remainingMonths<=0 && !isCurForMonth;
       var order=getPersonalPickOrder(personName,key);
-      var rowCls="player-row"+(isCur?" tapped":"")+(exhausted?" grayed":"");
-      var rowClick=exhausted?"":"onclick=\"setCaptain('"+personName.replace(/'/g,"\\'")+"','"+p.name.replace(/'/g,"\\'")+"','"+p.club.replace(/'/g,"\\'")+"')\"";
-      html+='<div class="'+rowCls+'" '+rowClick+'><div style="display:flex;align-items:center;gap:10px;"><span class="badge badge-'+p.position+'">'+p.position+'</span><div style="flex:1;"><div class="pname">'+p.name+(isCur?' <span class="cap-badge">Current C</span>':"")+captainBudgetBadgeHtml(personName,key)+' <span style="font-size:10px;color:#484f58;font-weight:normal;">'+(order?"Pick #"+order:"")+"</span></div><div class='psub'>"+p.club+(exhausted?" &middot; can't be re-nominated":"")+"</div></div></div></div>";
+      var rowCls="player-row"+(isCurForMonth?" tapped":"")+(exhausted?" grayed":"");
+      var rowClick=exhausted?"":"onclick=\"setCaptainForMonth('"+personName.replace(/'/g,"\\'")+"','"+month+"','"+p.name.replace(/'/g,"\\'")+"','"+p.club.replace(/'/g,"\\'")+"')\"";
+      html+='<div class="'+rowCls+'" '+rowClick+'><div style="display:flex;align-items:center;gap:10px;"><span class="badge badge-'+p.position+'">'+p.position+'</span><div style="flex:1;"><div class="pname">'+p.name+(isCurForMonth?' <span class="cap-badge">'+monthLabel(month)+'</span>':"")+captainBudgetBadgeHtml(personName,key)+' <span style="font-size:10px;color:#484f58;font-weight:normal;">'+(order?"Pick #"+order:"")+"</span></div><div class='psub'>"+p.club+(exhausted?" &middot; budget used - can't be re-nominated":"")+"</div></div></div></div>";
     });
   });
   showModal(html);
 }
-function setCaptain(personName,pName,pClub){
+function setCaptainForMonth(personName,month,pName,pClub){
   var team=S.teams[personName]||{},player=null;
   ["GK","DEF","MID","ATT"].forEach(function(pos){(team[pos]||[]).forEach(function(p){if(p.name===pName&&p.club===pClub)player=p;});});
   if(!player) return;
   var key=pName+"|"+pClub;
+  if(!S.captainMonths[personName]) S.captainMonths[personName]=[];
+  var existingForMonth=S.captainMonths[personName].find(function(e){return e.month===month;});
+  var alreadyThisPlayerThisMonth=existingForMonth&&existingForMonth.player.name===pName&&existingForMonth.player.club===pClub;
   var budget=getCaptainBudget(personName,key);
-  if(budget.remainingDays<=0 && budget.hasEverBeenCaptain){
-    showToast(pName+" has used their full 90 days as captain and can't be nominated again.");
+  if(!alreadyThisPlayerThisMonth && budget.remainingMonths<=0 && budget.hasEverBeenCaptain){
+    showToast(pName+" has already used all 3 of their captain months.");
     return;
   }
-  var startGW = S.currentGW||1;
-  var nowIso = new Date().toISOString();
-  if(!S.captainHistory[personName]) S.captainHistory[personName]=[];
-  // Seed history for pre-existing data that had a captain set before this fix existed -
-  // treat that earlier captain as having applied from GW1/their original dateSet, so their
-  // already-seen totals and accrued budget usage don't silently change or reset.
-  if(S.captainHistory[personName].length===0 && S.captains[personName]){
-    S.captainHistory[personName].push({
-      player:S.captains[personName].player, startGW:1,
-      startDate:S.captains[personName].dateSet||nowIso, endDate:null
-    });
-  }
-  var histArr=S.captainHistory[personName];
-  var lastEntry=histArr[histArr.length-1];
-  var isSamePlayer=lastEntry && lastEntry.player.name===player.name && lastEntry.player.club===player.club;
-  // Only open a new era if this is genuinely a different captain - avoids a redundant
-  // zero-length entry if the same player is re-confirmed as captain.
-  if(!isSamePlayer){
-    // Close out whichever era was previously open (it stops accruing budget usage now).
-    if(lastEntry && lastEntry.endDate==null) lastEntry.endDate=nowIso;
-    histArr.push({player:player, startGW:startGW, startDate:nowIso, endDate:null});
-  }
-  S.captains[personName]={player:player,dateSet:nowIso};
-  sv("captains",S.captains); sv("captainHistory",S.captainHistory);
+  if(existingForMonth) existingForMonth.player=player;
+  else S.captainMonths[personName].push({month:month, player:player});
+  sv("captainMonths",S.captainMonths);
   closeModal(); checkCaptainBanner();
+  showToast(pName+" nominated as captain for "+monthLabel(month)+".");
   renderMyTeamTab(); renderFriendsTab();
 }
 
@@ -2105,23 +2188,23 @@ function executeSub(personName,wcIdx,outName,outClub,outPos,outIdx){
   closeModal(); renderMyTeamTab();
   if(viewingFriend===personName) renderFriendDetail(document.getElementById("tab-friends"),personName);
 }
-function resolveWildcard(personName,wcIdx){
+function resolveWildcard(personName,pos,idx){
   var team=S.teams[personName]||{};
-  var wcPlayer=(team.WC||[])[wcIdx];
-  var guessedPos=(wcPlayer&&wcPlayer.position)||"";
+  var player=(team[pos]||[])[idx];
+  var guessedPos=(player&&player.position)||"";
   var posOptions=[["","Not sure - try to detect automatically"],["GK","Goalkeeper"],["DEF","Defender"],["MID","Midfielder"],["ATT","Forward"]];
-  showModal('<h3>Resolve Wildcard</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">This player is now at a PL club. Select their club to link FPL scoring.</p><label class="lbl">Premier League Club</label><select class="inp" id="resolve-club" style="margin-bottom:14px;">'+PL_CLUBS.map(function(c){return '<option>'+c+'</option>';}).join("")+'</select>'+
+  showModal('<h3>Resolve Player</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">This player is now at a PL club. Select their club to link FPL scoring.</p><label class="lbl">Premier League Club</label><select class="inp" id="resolve-club" style="margin-bottom:14px;">'+PL_CLUBS.map(function(c){return '<option>'+c+'</option>';}).join("")+'</select>'+
     '<label class="lbl">Position (only used if we can\'t confirm one automatically from official FPL data)</label><select class="inp" id="resolve-pos-manual" style="margin-bottom:14px;">'+posOptions.map(function(o){return '<option value="'+o[0]+'"'+(o[0]===guessedPos?" selected":"")+'>'+o[1]+'</option>';}).join("")+'</select>'+
-    '<button class="btn btn-blue" onclick="doResolveWildcard(\''+personName.replace(/'/g,"\\'")+'\','+wcIdx+')">Resolve</button>');
+    '<button class="btn btn-blue" onclick="doResolveWildcard(\''+personName.replace(/'/g,"\\'")+'\',\''+pos+'\','+idx+')">Resolve</button>');
 }
 var FPL_ELEMENT_TYPE_MAP={1:"GK",2:"DEF",3:"MID",4:"ATT"};
-async function doResolveWildcard(personName,wcIdx){
+async function doResolveWildcard(personName,pos,idx){
   var club=document.getElementById("resolve-club").value;
   var manualPos=document.getElementById("resolve-pos-manual").value;
   var team=S.teams[personName];
-  if(!team||!team.WC[wcIdx]) return;
-  var playerName=team.WC[wcIdx].name;
-  document.getElementById("modal-content").innerHTML='<h3>Resolve Wildcard</h3><div style="color:#10b981;font-size:13px;margin-bottom:14px;">Looking up '+playerName+' in official FPL data...</div><div class="spinner"><div class="dot"></div><div class="dot" style="animation-delay:0.2s"></div><div class="dot" style="animation-delay:0.4s"></div></div>';
+  if(!team||!team[pos]||!team[pos][idx]) return;
+  var playerName=team[pos][idx].name;
+  document.getElementById("modal-content").innerHTML='<h3>Resolve Player</h3><div style="color:#10b981;font-size:13px;margin-bottom:14px;">Looking up '+playerName+' in official FPL data...</div><div class="spinner"><div class="dot"></div><div class="dot" style="animation-delay:0.2s"></div><div class="dot" style="animation-delay:0.4s"></div></div>';
   // Attempt to find this player's REAL FPL element id so they receive live scoring like
   // every other player, instead of the previous behaviour where a resolved non-PL wildcard
   // never got an fplId at all and would silently score 0 forever with no warning - a direct
@@ -2155,14 +2238,14 @@ async function doResolveWildcard(personName,wcIdx){
     matchWarning="Couldn't reach official FPL data to confirm "+playerName+" ("+e.message+"). Live scoring isn't linked yet - use Manual Score Override in Settings, or try resolving again later.";
   }
   // Fall back to the manually-selected position only if we couldn't confidently detect one.
-  var finalPos = resolvedPos || manualPos || team.WC[wcIdx].position || null;
+  var finalPos = resolvedPos || manualPos || team[pos][idx].position || null;
   if(!finalPos){
     closeModal();
     showToast("Couldn't confirm a position for "+playerName+" - please try Resolve again and select a position manually so subbing works correctly.");
     return;
   }
-  team.WC[wcIdx].club=club; team.WC[wcIdx].isNonPL=false; team.WC[wcIdx].position=finalPos;
-  if(fplId!=null) team.WC[wcIdx].fplId=fplId;
+  team[pos][idx].club=club; team[pos][idx].isNonPL=false; team[pos][idx].position=finalPos;
+  if(fplId!=null) team[pos][idx].fplId=fplId;
   sv("teams",S.teams);
   closeModal();
   if(matchWarning) showToast(matchWarning);
@@ -2285,8 +2368,9 @@ function renderLeagueTab(){
   if(totwGW===null) totwGW=S.currentGW;
   var viewGW=totwGW;
   var standings=S.draftOrder.map(function(name){
+    var cap=getCaptainForGW(name,viewGW);
     return {name:name,total:getPersonTotalPts(name,viewGW),gw:getPersonGWPts(name,viewGW),
-      cap:(S.captains[name]&&S.captains[name].player.name)||"None",capDays:capDaysLeft(name)};
+      cap:(cap&&cap.name)||"None"};
   }).sort(function(a,b){return b.total-a.total;});
   var html='<div style="padding:14px;overflow-y:auto;flex:1;">';
   html+='<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;background:rgba(15,20,30,0.9);border:1px solid rgba(139,92,246,0.2);border-radius:12px;padding:10px 14px;">';
@@ -2307,12 +2391,11 @@ function renderLeagueTab(){
   html+='</tr></thead><tbody>';
   standings.forEach(function(s,i){
     var me=s.name===S.myName?'background:rgba(16,185,129,0.05);':'';
-    var ct=s.capDays!==null&&s.capDays<=7?'<span class="cap-timer '+(s.capDays<=0?'red':'amber')+'" style="margin-left:4px;">'+(s.capDays<=0?'EXP':s.capDays+'d')+'</span>':'';
     html+='<tr style="'+me+'"><td style="font-weight:700;">'+(i+1)+'</td>';
     html+='<td style="font-weight:700;">'+s.name+(s.name===S.myName?' &#x1F464;':'')+'</td>';
     html+='<td style="color:#10b981;font-weight:700;">'+s.total+'</td>';
     html+='<td>'+s.gw+'</td>';
-    html+='<td style="font-size:12px;">'+s.cap+ct+'</td></tr>';
+    html+='<td style="font-size:12px;">'+s.cap+'</td></tr>';
   });
   html+='</tbody></table></div>';
   html+='<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;">';
@@ -2357,6 +2440,17 @@ async function doRefreshScores(){
       modalProgress
     );
     var events = bootstrap.events||[];
+    // Populate the gameweek -> calendar-month map from real FPL data, used by the monthly
+    // captain system to decide which month's nomination a given gameweek's doubling counts
+    // toward. deadline_time is shortly before kickoff of the gameweek's first game, which is
+    // what the rule is actually keyed on (even if later games in the same GW spill into the
+    // next calendar month).
+    events.forEach(function(e){
+      if(e.deadline_time){
+        S.gwMonthMap[e.id] = e.deadline_time.slice(0,7); // "YYYY-MM"
+      }
+    });
+    sv("gwMonthMap", S.gwMonthMap);
     var currentEvt = events.find(function(e){ return e.is_current; });
     var finishedIds = events.filter(function(e){ return e.finished; }).map(function(e){ return e.id; });
     var cgw = currentEvt ? currentEvt.id : (finishedIds.length ? Math.max.apply(null,finishedIds) : 1);
@@ -2490,6 +2584,9 @@ function renderSettingsTab(){
   }
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #f59e0b;color:#f59e0b;" onclick="showTab(\'cup\')">&#x1F3C6; Knockout Cup</button>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #ec4899;color:#f472b6;" onclick="openAddLateTeam()">&#x1F465; Add Late Team</button>';
+  if(S.draftDone && emergencyReplaceWindowOpen()){
+    html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #14b8a6;color:#2dd4bf;" onclick="openAdminRepositionTeamSelect()">&#x1F504; Admin Reposition (pre-season only)</button>';
+  }
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #10b981;color:#10b981;" onclick="exportBackup()">&#x2B07; Export Backup</button>';
   if(S.postDraftSnapshot){
     html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #fbbf24;color:#fbbf24;" onclick="exportMasterBackup()">&#x1F3C6; Download Master Backup (post-draft)</button>';
@@ -2580,11 +2677,12 @@ function autoFillDraft(){
     var t=S.teams[name]||{},players=[];
     ["GK","DEF","MID","ATT"].forEach(function(pos){(t[pos]||[]).forEach(function(p){players.push(p);});});
     if(players.length>=2){
-      var startDate=new Date(Date.now()-numGWs*7*24*60*60*1000).toISOString();
-      S.captains[name]={player:players[1],dateSet:startDate};
-      S.captainHistory[name]=[{player:players[1],startGW:1,startDate:startDate,endDate:null}];
+      S.captainMonths[name]=[{month:currentMonthKey(), player:players[1]}];
     }
   });
+  // Map all simulated test gameweeks to the current real month, so captain doubling is
+  // visible/testable in generated data (real gwMonthMap data comes from live FPL fixtures).
+  for(var mg=1; mg<=numGWs; mg++){ S.gwMonthMap[mg]=currentMonthKey(); }
   for(var gw=1;gw<=numGWs;gw++){
     var gwScores={};
     Object.keys(S.pickedMap).forEach(function(key){
@@ -2605,6 +2703,57 @@ function autoFillDraft(){
   showTab("myteam");
 }
 
+
+// ── ADMIN REPOSITION ─────────────────────────────────────────────────────────
+// Lets James freely swap which slot two of a team's players occupy - e.g. moving a
+// non-PL "punt" pick (like a friend backing an imminent transfer that hasn't happened
+// yet) out of a Wildcard slot into a main position slot, demoting whoever was there into
+// the Wildcard slot instead. Pure relabeling: the same two players stay on the roster
+// either way, so no club-max or pickedMap changes are needed - just the slot swap itself.
+// Pre-season only (same cutoff as the emergency replacement feature) since repositioning
+// after real gameweeks have been played could create confusing retroactive scoring.
+function openAdminRepositionTeamSelect(){
+  var html='<h3>&#x1F504; Admin Reposition</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Swap which slot two of a team\'s players occupy - e.g. moving a non-PL "punt" pick into a main slot before their transfer completes. Only available before kickoff. Select a team:</p>';
+  S.draftOrder.forEach(function(n){
+    html+='<div class="player-row" onclick="openAdminReposition(\''+n.replace(/'/g,"\\'")+'\')"><div class="pname">'+n+'</div></div>';
+  });
+  showModal(html);
+}
+function openAdminReposition(owner){
+  var team=S.teams[owner]||{};
+  var html='<h3>'+owner+' &mdash; Select First Player</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Tap the player whose slot you want to change.</p>';
+  ["GK","DEF","MID","ATT","WC"].forEach(function(pos){
+    (team[pos]||[]).forEach(function(p,i){
+      html+='<div class="player-row" onclick="selectAdminRepositionFirst(\''+owner.replace(/'/g,"\\'")+'\',\''+pos+'\','+i+')"><div style="display:flex;align-items:center;gap:10px;"><span class="badge badge-'+p.position+'">'+p.position+'</span><div style="flex:1;"><div class="pname">'+p.name+(p.isNonPL?' <span style="color:#f59e0b;font-size:10px;">(Non-PL)</span>':"")+'</div><div class="psub">'+p.club+' &middot; currently '+pos+'</div></div></div></div>';
+    });
+  });
+  showModal(html);
+}
+function selectAdminRepositionFirst(owner,pos,idx){
+  var team=S.teams[owner]||{};
+  var first=(team[pos]||[])[idx];
+  if(!first) return;
+  var html='<h3>Swap '+first.name+' With...</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Select who takes their place - '+first.name+' moves into that slot instead.</p>';
+  ["GK","DEF","MID","ATT","WC"].forEach(function(pos2){
+    (team[pos2]||[]).forEach(function(p,i){
+      if(pos2===pos && i===idx) return;
+      html+='<div class="player-row" onclick="doAdminReposition(\''+owner.replace(/'/g,"\\'")+'\',\''+pos+'\','+idx+',\''+pos2+'\','+i+')"><div style="display:flex;align-items:center;gap:10px;"><span class="badge badge-'+p.position+'">'+p.position+'</span><div style="flex:1;"><div class="pname">'+p.name+(p.isNonPL?' <span style="color:#f59e0b;font-size:10px;">(Non-PL)</span>':"")+'</div><div class="psub">'+p.club+' &middot; currently '+pos2+'</div></div></div></div>';
+    });
+  });
+  showModal(html);
+}
+function doAdminReposition(owner,posA,idxA,posB,idxB){
+  var team=S.teams[owner];
+  if(!team||!team[posA]||!team[posA][idxA]||!team[posB]||!team[posB][idxB]) return;
+  var nameA=team[posA][idxA].name, nameB=team[posB][idxB].name;
+  var tmp=team[posA][idxA];
+  team[posA][idxA]=team[posB][idxB];
+  team[posB][idxB]=tmp;
+  sv("teams",S.teams);
+  closeModal();
+  showToast("Swapped: "+nameA+" \u2194 "+nameB);
+  renderMyTeamTab(); renderFriendsTab();
+}
 
 // ── PRE-SEASON EMERGENCY REPLACEMENT ────────────────────────────────────────────
 // Free, one-time-per-player replacement for a drafted player who leaves the Premier
@@ -2643,7 +2792,7 @@ function openEmergencyReplaceTarget(owner,pos,idx){
   }).sort(function(a,b){return a.name.localeCompare(b.name);});
   var html='<h3>Replace '+outgoing.name+'</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Select a '+outgoing.position+' from undrafted players.</p>';
   if(avail.length===0) html+='<div class="warn">No eligible undrafted '+outgoing.position+' available.</div>';
-  avail.slice(0,60).forEach(function(p){
+  avail.forEach(function(p){
     html+='<div class="player-row" onclick="doEmergencyReplace(\''+owner.replace(/'/g,"\\'")+'\',\''+pos+'\','+idx+',\''+p.name.replace(/'/g,"\\'")+'\',\''+p.club.replace(/'/g,"\\'")+'\')"><div style="display:flex;align-items:center;gap:10px;"><span class="badge badge-'+p.position+'">'+p.position+'</span><div style="flex:1;"><div class="pname">'+p.name+'</div><div class="psub">'+p.club+' &middot; '+p.lastSeasonPts+'pts</div></div></div></div>';
   });
   showModal(html);
@@ -2675,19 +2824,19 @@ function doEmergencyReplace(owner,pos,idx,newName,newClub){
   });
   S.pickedMap=rebuilt;
   team[pos][idx]=Object.assign({},newPlayer,{pickNumber:outgoing.pickNumber});
-  // If the departed player was already nominated captain, transfer captaincy to their
-  // replacement rather than leaving a dangling reference to a player no longer in the
-  // squad - this is pre-season, so captaincy can already be set before a ball's kicked.
+  // If the departed player was already nominated captain for any month(s), transfer
+  // ALL of those nominations to their replacement rather than leaving a dangling
+  // reference to a player no longer in the squad - this is pre-season, so captaincy can
+  // already be nominated for upcoming months before a ball's kicked.
   var newPlayerRef=team[pos][idx];
-  if(S.captains[owner] && S.captains[owner].player.name===outgoing.name && S.captains[owner].player.club===outgoing.club){
-    S.captains[owner]={player:newPlayerRef, dateSet:S.captains[owner].dateSet};
-    var hist=S.captainHistory[owner]||[];
-    var lastEra=hist[hist.length-1];
-    if(lastEra && lastEra.player.name===outgoing.name && lastEra.player.club===outgoing.club){
-      lastEra.player=newPlayerRef;
-    }
+  if(S.captainMonths[owner]){
+    S.captainMonths[owner].forEach(function(entry){
+      if(entry.player.name===outgoing.name && entry.player.club===outgoing.club){
+        entry.player=newPlayerRef;
+      }
+    });
   }
-  sv("teams",S.teams); sv("picked",S.pickedMap); sv("captains",S.captains); sv("captainHistory",S.captainHistory);
+  sv("teams",S.teams); sv("picked",S.pickedMap); sv("captainMonths",S.captainMonths);
   closeModal();
   showToast(outgoing.name+" replaced with "+newName+" - free pre-season swap.");
   renderMyTeamTab(); renderFriendsTab();
@@ -2766,7 +2915,7 @@ function continueLateTeam(name){
     html+='<button class="btn btn-gray" style="margin-bottom:10px;border:1px solid #f59e0b;color:#f59e0b;" onclick="openLateTeamNonPL(\''+name.replace(/'/g,"\\'")+'\')">&#x270F; Type a non-PL player instead</button>';
   }
   if(pool.length===0) html+='<div class="warn">No eligible players left for this position.</div>';
-  pool.slice(0,80).forEach(function(p){
+  pool.forEach(function(p){
     html+='<div class="player-row" onclick="pickLateTeamPlayer(\''+name.replace(/'/g,"\\'")+'\',\''+p.name.replace(/'/g,"\\'")+'\',\''+p.club.replace(/'/g,"\\'")+'\')"><div style="display:flex;align-items:center;gap:10px;"><span class="badge badge-'+p.position+'">'+p.position+'</span><div style="flex:1;"><div class="pname">'+p.name+'</div><div class="psub">'+p.club+' &middot; '+p.lastSeasonPts+'pts</div></div></div></div>';
   });
   html+='<button class="btn btn-gray" style="margin-top:10px;" onclick="closeModal()">Pause - Continue Later (Settings &rarr; Add Late Team)</button>';
@@ -2882,7 +3031,7 @@ function openThirdSubPicker(owner){
   var pool=getThirdSubEligiblePool(owner);
   var html='<h3>Third Sub Pick &mdash; '+owner+'</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Any undrafted player, or anyone released via a wildcard sub. Club limit still applies.</p>';
   if(pool.length===0) html+='<div class="warn">No eligible players right now.</div>';
-  pool.slice(0,80).forEach(function(p){
+  pool.forEach(function(p){
     html+='<div class="player-row" onclick="makeThirdSubPick(\''+owner.replace(/'/g,"\\'")+'\',\''+p.name.replace(/'/g,"\\'")+'\',\''+p.club.replace(/'/g,"\\'")+'\')"><div style="display:flex;align-items:center;gap:10px;"><span class="badge badge-'+p.position+'">'+p.position+'</span><div style="flex:1;"><div class="pname">'+p.name+'</div><div class="psub">'+p.club+' &middot; '+p.lastSeasonPts+'pts</div></div></div></div>';
   });
   showModal(html);
@@ -3135,8 +3284,8 @@ function renderRulesTab(){
   html+=rule("Joining late", "Friends who miss the draft can still join by picking a full squad from whatever's left undrafted - same 17-player structure and club limit as everyone else.");
 
   html+=section("&#x1F4C5; In-Season Rules","#10b981");
-  html+=rule("Captain", "Doubles that player's points while active. Cannot be your first-ever pick (shown as \"Pick #1\" in your squad) - except for late joiners, who never had a genuine first pick, so any player can be their captain.");
-  html+=rule("Captain budget: 90 days, for the whole season", "Every player has a 90-day <em>lifetime</em> budget as your captain - not reset each time you re-nominate them. You can split it across separate stints (e.g. captain for 15 days, swap away, captain again later for 45 more, etc). Once a player's 90 days are used up, they can never be your captain again.");
+  html+=rule("Captain: nominated once a month", "Once a calendar month, nominate a captain for the month ahead. That player's points are doubled for every gameweek whose first game falls within that month - even if later games in the same gameweek spill into the next month, the whole gameweek still counts for the month it started in. Cannot be your first-ever pick (shown as \"Pick #1\" in your squad) - except for late joiners, who never had a genuine first pick, so any player can be their captain.");
+  html+=rule("Captain budget: 3 months per player, for the whole season", "Every player can be nominated captain for at most 3 total calendar months this season - they don't need to be consecutive (e.g. captain in September, someone else in October, captain again in December still only uses 2 of their 3). Once a player's 3 months are used up, they can never be re-nominated.");
   html+=rule("Wildcard subs", "Permanently swap a Wildcard player in for an existing squad player. Must be the <b>same position</b> (a GK can only replace a GK, etc). Each of your 2 Wildcard slots can only be used once, and it's irreversible.");
   html+=rule("Non-PL wildcards", "A free-typed Wildcard player must be \"Resolved\" (assign their real club) before they can be subbed in. The app tries to auto-detect their real position from official FPL data when you resolve them.");
   html+=rule("Third Sub Window (January/February)", "A 3rd wildcard slot unlocks during a window later in the season (exact dates set by the organiser). Priority order is worst-placed team first, based on standings the moment the window opens. Each person, in turn, can pick any undrafted player OR anyone released via someone else's wildcard sub - club limit still applies. Once picked, it works exactly like the other 2 wildcards: sub it into your squad whenever you like, position-matched.");
@@ -3147,6 +3296,8 @@ function renderRulesTab(){
 
   html+=section("&#x1F4CB; Miscellaneous","#8b949e");
   html+=rule("Scoring accuracy", "All scores are pulled directly from the official FPL API - not AI-guessed. If FPL later revises a score (e.g. bonus points), Manual Score Override in Settings can correct it.");
+  html+=rule("Draft auto-backup", "A real backup file downloads automatically at the end of every round during the live draft (once everyone's picked once, then again after the next full round, etc) - protects against data loss without needing to remember to do it manually.");
+  html+=rule("Admin Reposition (pre-season only)", "Before kickoff, James can freely swap which slot two of a player's team occupy - e.g. moving a non-PL \"punt\" pick (someone backing an imminent transfer) into a main squad slot, demoting a real player into Wildcard instead. If the transfer hasn't completed by kickoff, that team effectively plays with one fewer scoring player until it's resolved or swapped back.");
   html+=rule("Master Backup", "A permanent, frozen snapshot of every team exactly as drafted, offered automatically the moment the draft is marked complete. Unlike regular backups (which capture live, ever-changing season data), the Master Backup never changes - restoring it only resets teams/picks back to the original draft result and never touches scores, captains, or cups.");
   html+=rule("Knockout Cup", "A separate mini-tournament that can run alongside the main league, using the same teams and real gameweek scores. The organiser nominates a gameweek for each round; the app does a random draw (with a random bye if there's an odd number of players). Ties are broken by comparing captains' individual scores, then a coin flip as a last resort.");
 
@@ -3189,6 +3340,8 @@ function exportBackup(){
     pickIdx:S.pickIdx,
     captains:S.captains,
     captainHistory:S.captainHistory,
+    captainMonths:S.captainMonths,
+    gwMonthMap:S.gwMonthMap,
     wildcardSubs:S.wildcardSubs,
     scores:S.scores,
     scoresFetched:S.scoresFetched,
@@ -3306,6 +3459,8 @@ function doImportBackup(){
     S.pickIdx=backup.pickIdx||0;
     S.captains=backup.captains||{};
     S.captainHistory=backup.captainHistory||{};
+    S.captainMonths=backup.captainMonths||{};
+    S.gwMonthMap=backup.gwMonthMap||{};
     S.wildcardSubs=backup.wildcardSubs||{};
     S.scores=backup.scores||{};
     S.scoresFetched=backup.scoresFetched||{};
@@ -3459,8 +3614,7 @@ function renderStatsTab(){
   var el=document.getElementById("tab-stats");
   if(!el) return;
   var standings=S.draftOrder.map(function(name){
-    return {name:name,total:getPersonTotalPts(name),gw:getPersonGWPts(name,S.currentGW),
-      cap:(S.captains[name]&&S.captains[name].player.name)||"None",capDays:capDaysLeft(name)};
+    return {name:name,total:getPersonTotalPts(name),gw:getPersonGWPts(name,S.currentGW)};
   }).sort(function(a,b){return b.total-a.total;});
   var html='<div style="padding:14px;overflow-y:auto;flex:1;">';
   html+='<div class="sec-hdr">&#x1F3C6; Team of the Year</div>';
@@ -3685,7 +3839,7 @@ function buildBackupObject(){
     draftDone:S.draftDone, hideDraft:S.hideDraft, defaultTab:S.defaultTab,
     teams:S.teams, pickedMap:S.pickedMap,
     snakeOrder:S.snakeOrder, pickIdx:S.pickIdx,
-    captains:S.captains, captainHistory:S.captainHistory, wildcardSubs:S.wildcardSubs,
+    captains:S.captains, captainHistory:S.captainHistory, captainMonths:S.captainMonths, gwMonthMap:S.gwMonthMap, wildcardSubs:S.wildcardSubs,
     scores:S.scores, scoresFetched:S.scoresFetched, scoreOverrides:S.scoreOverrides,
     currentGW:S.currentGW, lastRefreshed:S.lastRefreshed,
     playerPool:S.playerPool, cups:S.cups, postDraftSnapshot:S.postDraftSnapshot,
@@ -4182,9 +4336,9 @@ function renderStatsSection(standings){
   html+='<div class="sec-hdr">Captain Efficiency</div>';
   html+='<table class="tbl" style="margin-bottom:16px;"><thead><tr><th>Name</th><th>Captain</th><th>Cap Pts</th><th>Best Player</th><th>Best Pts</th><th>Efficiency</th></tr></thead><tbody>';
   S.draftOrder.forEach(function(name){
-    var cap=S.captains[name];
+    var cap=getCaptainForGW(name,S.currentGW);
     if(!cap) return;
-    var capKey=cap.player.name+"|"+cap.player.club;
+    var capKey=cap.name+"|"+cap.club;
     var capPts=getPlayerPts(capKey,name);
     // Find best non-captain player
     var team=S.teams[name]||{},bestPts=0,bestName="";
@@ -4203,7 +4357,7 @@ function renderStatsSection(standings){
       rawCapPts+=(S.scores[cg]||{})[capKey]||0;
     }
     var efficient=rawCapPts>=bestPts;
-    html+='<tr><td style="font-weight:700;">'+name+'</td><td style="font-size:12px;">'+cap.player.name+'</td><td style="color:#10b981;">'+rawCapPts+' <span style="color:#484f58;font-size:10px;">('+rawCapPts*2+' x2)</span></td><td style="font-size:12px;">'+bestName+'</td><td>'+bestPts+'</td><td>'+(efficient?'<span style="color:#10b981;">&#x2713; Good</span>':'<span style="color:#ef4444;">&#x2717; Sub-optimal</span>')+'</td></tr>';
+    html+='<tr><td style="font-weight:700;">'+name+'</td><td style="font-size:12px;">'+cap.name+'</td><td style="color:#10b981;">'+rawCapPts+' <span style="color:#484f58;font-size:10px;">('+rawCapPts*2+' x2)</span></td><td style="font-size:12px;">'+bestName+'</td><td>'+bestPts+'</td><td>'+(efficient?'<span style="color:#10b981;">&#x2713; Good</span>':'<span style="color:#ef4444;">&#x2717; Sub-optimal</span>')+'</td></tr>';
   });
   html+='</tbody></table>';
 
