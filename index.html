@@ -418,7 +418,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-08-17.3";
+const APP_VERSION = "2026-08-19.1";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -1880,8 +1880,8 @@ function getPlayerGWPts(key, ownerName, gw){
 function renderSquadSection(owner, vGW, capForVGW){
   var team=S.teams[owner]||{};
   var html='';
-  if(S.draftDone && emergencyReplaceWindowOpen()){
-    html+='<button class="btn btn-gray" style="margin-bottom:12px;border:1px solid #f59e0b;color:#f59e0b;font-size:12px;padding:8px;" onclick="openEmergencyReplaceSelect(\''+owner.replace(/'/g,"\\'")+'\')">&#x26A0; Player left the Premier League? Free replacement (before Fri 21 Aug kickoff)</button>';
+  if(emergencyReplaceWindowOpen()){
+    html+='<button class="btn btn-gray" style="margin-bottom:12px;border:1px solid #f59e0b;color:#f59e0b;font-size:12px;padding:8px;" onclick="openEmergencyReplaceSelect(\''+owner.replace(/'/g,"\\'")+'\')">&#x26A0; Change a pick / player left the Premier League? Free replacement (before Fri 21 Aug kickoff)</button>';
   }
   html+='<div class="sec-hdr">Squad</div>';
   var usedForThisView=[];
@@ -2590,7 +2590,7 @@ function renderSettingsTab(){
   }
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #f59e0b;color:#f59e0b;" onclick="showTab(\'cup\')">&#x1F3C6; Knockout Cup</button>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #ec4899;color:#f472b6;" onclick="openAddLateTeam()">&#x1F465; Add Late Team</button>';
-  if(S.draftDone && emergencyReplaceWindowOpen()){
+  if(emergencyReplaceWindowOpen()){
     html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #14b8a6;color:#2dd4bf;" onclick="openAdminRepositionTeamSelect()">&#x1F504; Admin Reposition (pre-season only)</button>';
   }
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #22d3ee;color:#22d3ee;" onclick="openEditPositionTeamSelect()">&#x270F; Edit Player Position</button>';
