@@ -418,7 +418,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-08-19.1";
+const APP_VERSION = "2026-08-21.1";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -1880,9 +1880,7 @@ function getPlayerGWPts(key, ownerName, gw){
 function renderSquadSection(owner, vGW, capForVGW){
   var team=S.teams[owner]||{};
   var html='';
-  if(emergencyReplaceWindowOpen()){
-    html+='<button class="btn btn-gray" style="margin-bottom:12px;border:1px solid #f59e0b;color:#f59e0b;font-size:12px;padding:8px;" onclick="openEmergencyReplaceSelect(\''+owner.replace(/'/g,"\\'")+'\')">&#x26A0; Change a pick / player left the Premier League? Free replacement (before Fri 21 Aug kickoff)</button>';
-  }
+  html+='<button class="btn btn-gray" style="margin-bottom:12px;border:1px solid #f59e0b;color:#f59e0b;font-size:12px;padding:8px;" onclick="openEmergencyReplaceSelect(\''+owner.replace(/'/g,"\\'")+'\')">&#x26A0; Change a pick / player left the Premier League? Free replacement</button>';
   html+='<div class="sec-hdr">Squad</div>';
   var usedForThisView=[];
   ["GK","DEF","MID","ATT"].forEach(function(pos){
@@ -2829,11 +2827,18 @@ function doEditPlayerPosition(owner,pos,idx,newPos){
 // slot, no permanent-swap limit). Only available before the real season-opener kickoff:
 // Arsenal v Coventry City, Friday 21 August 2026, 20:00 BST (19:00 UTC) - confirmed via
 // the official Premier League fixture release, not guessed.
+// No longer a hard lock (James is the only one who can trigger this, so it's left to his
+// judgment) - emergencyReplaceWindowOpen() is kept only to decide whether to show a
+// past-kickoff warning in the modal below, e.g. for a transfer that completed right at
+// the wire and the swap itself happens a few minutes after a ball's already been kicked.
 var EMERGENCY_REPLACE_CUTOFF = new Date("2026-08-21T19:00:00Z").getTime();
 function emergencyReplaceWindowOpen(){ return Date.now() < EMERGENCY_REPLACE_CUTOFF; }
 function openEmergencyReplaceSelect(owner){
   var team=S.teams[owner]||{};
-  var html='<h3>&#x26A0; Player Left the Premier League?</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Free replacement from the undrafted pool, only available before kickoff of the season opener (Fri 21 Aug, 8pm). Select who left.</p>';
+  var html='<h3>&#x26A0; Player Left the Premier League?</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Free replacement from the undrafted pool - swap a drafted player out for anyone still undrafted (same position, respects club limit). Select who\'s leaving the squad.</p>';
+  if(!emergencyReplaceWindowOpen()){
+    html+='<p style="color:#f59e0b;font-size:12px;margin-bottom:14px;background:rgba(245,158,11,0.1);border:1px solid rgba(245,158,11,0.3);border-radius:8px;padding:8px 10px;">&#x26A0; This is past the season-opener kickoff cutoff. Only use this for a genuinely legitimate reason (e.g. a transfer that completed right before kickoff) - swapping now affects live scoring for the outgoing/incoming player going forward.</p>';
+  }
   var any=false;
   ["GK","DEF","MID","ATT"].forEach(function(pos){
     (team[pos]||[]).forEach(function(p,i){
