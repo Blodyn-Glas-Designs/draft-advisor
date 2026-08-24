@@ -418,7 +418,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-08-22.1";
+const APP_VERSION = "2026-08-24.1";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -1124,6 +1124,23 @@ function proceedToApp(){
 }
 
 // ── FPL SCORE REFRESH ──────────────────────────────────────────────────────────
+// Marks every drafted player's `leftPL` flag from the real FPL status field, so squad
+// views can show a simple warning badge. Deliberately does NOT remove, swap, or otherwise
+// touch the player - per James's call, departed players just stay in the squad as a
+// flagged non-scoring player unless/until someone chooses to wildcard-sub them out.
+// Re-evaluated on every refresh (not set-once) so it self-corrects if FPL's data changes.
+function flagDepartedPlayers(bootstrap){
+  var idStatus={};
+  (bootstrap.elements||[]).forEach(function(el){ idStatus[el.id]=el.status; });
+  var changed=false;
+  getAllPlayers().forEach(function(p){
+    if(p.fplId==null) return; // non-PL free-typed entries have no fplId - not applicable
+    var left = idStatus[p.fplId]==="u";
+    if(p.leftPL !== left){ p.leftPL=left; changed=true; }
+  });
+  if(changed) sv("teams", S.teams);
+}
+
 async function refreshScores(){
   try{
     // Get the REAL current gameweek from FPL's own bootstrap-static events array
@@ -1133,6 +1150,7 @@ async function refreshScores(){
       function(data){ return data && Array.isArray(data.elements) && Array.isArray(data.teams); },
       function(){} // silent background refresh - no UI to report progress into
     );
+    flagDepartedPlayers(bootstrap);
     var events = bootstrap.events||[];
     // Populate the gameweek -> calendar-month map from real FPL data, used by the monthly
     // captain system to decide which month's nomination a given gameweek's doubling counts
@@ -1917,7 +1935,7 @@ function renderSquadSection(owner, vGW, capForVGW){
         html+='<div class="roster-slot filled">'+
           '<div style="display:flex;align-items:center;justify-content:space-between;">'+
           '<div style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+
-          displayPlayer.name+(isCap?'<span class="cap-badge">C&times;2</span>':"")+captainBudgetBadgeHtml(owner,displayKey)+subNote+
+          displayPlayer.name+(isCap?'<span class="cap-badge">C&times;2</span>':"")+captainBudgetBadgeHtml(owner,displayKey)+(displayPlayer.leftPL?' <span style="color:#ef4444;font-size:10px;font-weight:700;">&#x26A0; LEFT PL</span>':"")+subNote+
           ' <span style="font-size:10px;color:#484f58;font-weight:normal;">'+(pickOrder?"Pick #"+pickOrder:"")+'</span></div>'+
           '<div style="font-size:11px;color:#8b949e;">'+displayPlayer.club+' &middot; &pound;'+(displayPlayer.fplPrice||0)+'m</div></div>'+
           '<div style="text-align:right;flex-shrink:0;padding-left:8px;">'+
@@ -1939,10 +1957,11 @@ function renderSquadSection(owner, vGW, capForVGW){
     var subIn=(S.wildcardSubs[owner]||[]).find(function(s){return (s.inPlayer.name+"|"+s.inPlayer.club)===key;});
     if(subIn) return;
     var ownerEsc=owner.replace(/'/g,"\\'");
+    var leftBadge=p.leftPL?' <span style="color:#ef4444;font-size:10px;font-weight:700;">&#x26A0; LEFT PL</span>':"";
     if(p.isNonPL){
-      wcRows+='<button class="btn btn-gray" style="margin-top:4px;font-size:12px;padding:7px;border-color:#f59e0b;" onclick="resolveWildcard(\''+ownerEsc+'\',\'WC\','+i+')">&#x26A0; Resolve '+p.name+' (Non-PL)</button>';
+      wcRows+='<div style="margin-top:4px;"><button class="btn btn-gray" style="font-size:12px;padding:7px;border-color:#f59e0b;" onclick="resolveWildcard(\''+ownerEsc+'\',\'WC\','+i+')">&#x26A0; Resolve '+p.name+' (Non-PL)</button>'+leftBadge+'</div>';
     } else {
-      wcRows+='<button class="btn btn-gray" style="margin-top:4px;font-size:12px;padding:7px;" onclick="openSubModal(\''+ownerEsc+'\','+i+')">Sub in '+p.name+' ('+(p.position||"position unconfirmed")+')</button>';
+      wcRows+='<div style="margin-top:4px;"><button class="btn btn-gray" style="font-size:12px;padding:7px;" onclick="openSubModal(\''+ownerEsc+'\','+i+')">Sub in '+p.name+' ('+(p.position||"position unconfirmed")+')</button>'+leftBadge+'</div>';
     }
   });
   if(wcRows && S.draftDone){
@@ -2446,6 +2465,7 @@ async function doRefreshScores(){
       function(data){ return data && Array.isArray(data.elements) && Array.isArray(data.teams); },
       modalProgress
     );
+    flagDepartedPlayers(bootstrap);
     var events = bootstrap.events||[];
     // Populate the gameweek -> calendar-month map from real FPL data, used by the monthly
     // captain system to decide which month's nomination a given gameweek's doubling counts
@@ -2515,6 +2535,89 @@ async function doRefreshScores(){
     sv("scores",S.scores); sv("scoresFetched",S.scoresFetched); sv("meta",{lastRefreshed:S.lastRefreshed,currentGW:S.currentGW});
     upd("Done! GW"+S.currentGW+" loaded from official FPL data.","#10b981");
     setTimeout(closeModal,1500); renderLeagueTab(); renderSettingsTab();
+  }catch(e){
+    upd("Failed: "+e.message,"#ef4444");
+    var mc=document.getElementById("modal-content");
+    if(mc) mc.innerHTML+='<button class="btn btn-gray" style="margin-top:14px;" onclick="closeModal()">Close</button>';
+  }
+}
+
+// ── REFRESH PLAYER POOL ──────────────────────────────────────────────────────
+// Player loading (loadFromFPLApi) was built as a one-time preseason wizard - it fully
+// replaces S.playerPool and drives the user through the club confirmation stage-gate,
+// neither of which is appropriate to run mid-season. This is a narrower, additive-only
+// mid-season action: pull the current FPL bootstrap-static data and add any player who
+// isn't already in the pool (matched by fplId) - covers a new signing, a promoted-club
+// player FPL has only just registered, or anyone else who's become eligible since the
+// pool was last loaded. Deliberately does NOT touch or remove any existing pool entry,
+// so it can't disturb already-drafted players' name/club keys.
+async function doRefreshPlayerPool(){
+  var msg='<h3>&#x1F195; Check for New Players</h3>';
+  msg+='<p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Adds any player not already in the pool (new signings, recent promotions, etc). Existing players are left untouched.</p>';
+  msg+='<div id="rppprog" style="color:#10b981;font-size:13px;margin-bottom:14px;">Starting...</div>';
+  msg+='<div class="spinner"><div class="dot"></div><div class="dot" style="animation-delay:0.2s"></div><div class="dot" style="animation-delay:0.4s"></div></div>';
+  showModal(msg);
+  function upd(t,col){ var el=document.getElementById("rppprog"); if(el){el.textContent=t; if(col)el.style.color=col;} }
+  function modalProgress(label){ upd("Connecting via "+label+"..."); }
+  try{
+    upd("Fetching current FPL player data...");
+    var bootstrap = await fetchWithFallback(
+      "https://fantasy.premierleague.com/api/bootstrap-static/",
+      function(data){ return data && Array.isArray(data.elements) && Array.isArray(data.teams); },
+      modalProgress
+    );
+    var teamNameById={};
+    bootstrap.teams.forEach(function(t){ teamNameById[t.id]=FPL_TEAM_NAME_MAP[t.name]||t.name; });
+
+    var existingIds={};
+    S.playerPool.forEach(function(p){ if(p.fplId!=null) existingIds[p.fplId]=true; });
+
+    var posMap={1:"GK",2:"DEF",3:"MID",4:"ATT"};
+    var added=[];
+    bootstrap.elements.forEach(function(el){
+      if(existingIds[el.id]) return; // already have this player
+      var pos=posMap[el.element_type];
+      if(!pos) return;
+      if(el.status==="u") return; // no longer registered anywhere
+      var club=teamNameById[el.team];
+      if(!club) return;
+      if(PL_CLUBS.indexOf(club)===-1) return; // not one of this season's confirmed clubs
+      added.push({
+        name:((el.web_name||"")+"").trim(),
+        club:club,
+        position:pos,
+        fplPrice: Math.round((el.now_cost/10)*10)/10,
+        lastSeasonPts: el.total_points||0,
+        rating: 5,
+        fplId: el.id
+      });
+    });
+
+    if(added.length===0){
+      upd("No new players found — pool already up to date.","#10b981");
+      setTimeout(closeModal,1500);
+      return;
+    }
+
+    S.playerPool = S.playerPool.concat(added);
+
+    // Re-scale the 1-10 rating for every player (existing + new) within each position,
+    // same relative-to-the-field approach used on initial load, so newly added players
+    // slot in on a comparable footing rather than sitting at a flat default of 5 forever.
+    ["GK","DEF","MID","ATT"].forEach(function(pos){
+      var group=S.playerPool.filter(function(p){ return p.position===pos; });
+      if(group.length===0) return;
+      var pts=group.map(function(p){ return p.lastSeasonPts; });
+      var min=Math.min.apply(null,pts), max=Math.max.apply(null,pts);
+      group.forEach(function(p){
+        p.rating = max>min ? Math.round((1 + 9*(p.lastSeasonPts-min)/(max-min))*10)/10 : 5;
+      });
+    });
+
+    sv("pool", S.playerPool);
+    upd("Added "+added.length+" new player(s): "+added.map(function(p){return p.name+" ("+p.club+")";}).join(", "),"#10b981");
+    setTimeout(closeModal,2500);
+    renderSettingsTab();
   }catch(e){
     upd("Failed: "+e.message,"#ef4444");
     var mc=document.getElementById("modal-content");
@@ -2593,6 +2696,7 @@ function renderSettingsTab(){
   html+='<div class="card">';
   html+='<div style="color:#8b949e;font-size:12px;margin-bottom:12px;">Players: '+S.playerPool.length+' &middot; Scores through GW'+S.currentGW+(S.scores[S.currentGW]?'':' (not yet fetched)')+' &middot; Last refresh: '+(S.lastRefreshed?new Date(S.lastRefreshed).toLocaleString():"Never")+'</div>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;" onclick="doRefreshScores()">&#x1F504; Refresh Scores</button>';
+  html+='<button class="btn btn-gray" style="margin-bottom:8px;" onclick="doRefreshPlayerPool()">&#x1F195; Check for New Players</button>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;" onclick="openScoreOverride()">&#x270F; Manual Score Override</button>';
   html+='</div>';
 
