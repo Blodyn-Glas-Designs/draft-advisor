@@ -418,7 +418,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-09-01.1";
+const APP_VERSION = "2026-09-01.2";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -693,15 +693,24 @@ async function fetchPLClubs(){
 // The FPL API blocks direct browser calls with a hard CORS policy, so requests
 // are routed through a chain of CORS proxies, tried in order until one works.
 async function fetchWithFallback(url, validateFn, onProgress){
+  // Cache-bust every call: without this, either the browser's own HTTP cache or the
+  // CORS proxy itself (both Corsfix and AllOrigins are generic pass-through proxies that
+  // may cache an upstream response by URL) can silently hand back the exact same stale
+  // response on a later call to the same URL - which looks identical to "the refresh
+  // didn't work" even though the app correctly decided to re-fetch (e.g. live scores
+  // appearing stuck at the same value refresh after refresh). Appending a unique
+  // timestamp query param makes every request's URL unique so nothing upstream can
+  // serve a cached copy, and cache:"no-store" stops the browser's own cache too.
+  var bustedUrl = url + (url.indexOf("?")===-1 ? "?" : "&") + "_cb=" + Date.now();
   // Corsfix is tried first: it's a real commercial CORS-proxy service (now registered
   // for this domain at app.corsfix.com), which has proven more reliable than AllOrigins
   // for a payload this size (~2-4MB) - AllOrigins was consistently failing with a
   // missing-CORS-header signature on the FPL bootstrap-static response. AllOrigins is
   // kept as a fallback in case Corsfix's trial period lapses or its quota is hit.
   var attempts = [
-    {label:"Corsfix", fn:function(){ return fetch("https://proxy.corsfix.com/?"+url,{headers:{"Accept":"application/json"}}); }},
-    {label:"AllOrigins", fn:function(){ return fetch("https://api.allorigins.win/raw?url="+encodeURIComponent(url),{headers:{"Accept":"application/json"}}); }},
-    {label:"direct", fn:function(){ return fetch(url,{headers:{"Accept":"application/json"}}); }}
+    {label:"Corsfix", fn:function(){ return fetch("https://proxy.corsfix.com/?"+bustedUrl,{headers:{"Accept":"application/json"},cache:"no-store"}); }},
+    {label:"AllOrigins", fn:function(){ return fetch("https://api.allorigins.win/raw?url="+encodeURIComponent(bustedUrl),{headers:{"Accept":"application/json"},cache:"no-store"}); }},
+    {label:"direct", fn:function(){ return fetch(bustedUrl,{headers:{"Accept":"application/json"},cache:"no-store"}); }}
   ];
   // validateFn lets callers check the shape of THEIR endpoint's response - bootstrap-static
   // (elements+teams) and the live-scores endpoint (elements only, different inner shape) are
