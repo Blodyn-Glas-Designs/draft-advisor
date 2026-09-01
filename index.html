@@ -418,7 +418,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-09-01.2";
+const APP_VERSION = "2026-09-01.3";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -525,6 +525,17 @@ function loadAll(){
     sv("captainSystemV2Migrated",true);
   }
   S.scores=ld("scores",{}); S.scoresFetched=ld("scoresFetched",{}); S.scoreOverrides=ld("scoreOverrides",{});
+  // One-time repair: early gameweeks fetched before the finished/data_checked caching
+  // fixes existed can be permanently stuck holding stale or all-zero scores (fetched too
+  // early, then never re-checked once marked "finished"/"scoresFetched"). Clearing the
+  // fetched-flags once forces every played gameweek to be freshly re-pulled from FPL on
+  // the very next refresh, so cumulative totals stop under-counting early gameweeks like
+  // GW1. Only runs once per device, tracked the same way the captain system migration is.
+  if(!ld("scoresRefetchMigrationV1",false)){
+    S.scoresFetched={};
+    sv("scoresFetched",S.scoresFetched);
+    sv("scoresRefetchMigrationV1",true);
+  }
   S.cups=ld("cups",[]);
   S.postDraftSnapshot=ld("postDraftSnapshot",null);
   var ts=ld("thirdSub",{});
