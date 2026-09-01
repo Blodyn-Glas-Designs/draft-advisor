@@ -418,7 +418,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-08-24.1";
+const APP_VERSION = "2026-08-24.2";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -1167,19 +1167,20 @@ async function refreshScores(){
     var finishedIds = events.filter(function(e){ return e.finished; }).map(function(e){ return e.id; });
     var currentGW = currentEvt ? currentEvt.id : (finishedIds.length ? Math.max.apply(null,finishedIds) : 1);
     S.currentGW = currentGW;
-    var finishedSet = {}; finishedIds.forEach(function(id){ finishedSet[id]=true; });
+    // IMPORTANT: use data_checked, not finished, to decide whether a gameweek's scores
+    // are safe to stop re-fetching. FPL flips `finished` very soon after the last match
+    // ends, but bonus points (and any other stat corrections) aren't locked in until FPL
+    // separately marks the gameweek `data_checked` - which can be a day or more later.
+    // Caching on `finished` alone permanently freezes a pre-bonus score the moment it's
+    // first fetched, which is exactly what caused GW2 scores to stop matching the real
+    // FPL site even after multiple refreshes.
+    var dataCheckedSet = {};
+    events.forEach(function(e){ if(e.data_checked) dataCheckedSet[e.id]=true; });
 
-    // A gameweek that FPL hasn't marked "finished" yet (i.e. matches are still being
-    // played, live scores are still changing) must ALWAYS be re-fetched, even if we
-    // already successfully fetched it once before - otherwise the first refresh during
-    // a live gameweek (which could even be a pre-kickoff check that only sees all-zero
-    // scores) permanently marks it "fetched" and every later refresh silently skips it,
-    // reporting "up to date" while real scores never come through. Only genuinely
-    // finished past gameweeks are safe to skip re-fetching.
     var needed = [];
     for(var g = currentGW; g >= 1; g--){
-      var isFinished = !!finishedSet[g];
-      if(!isFinished || !S.scoresFetched[g]) needed.push(g);
+      var isFinalized = !!dataCheckedSet[g];
+      if(!isFinalized || !S.scoresFetched[g]) needed.push(g);
       // Only fetch up to 3 gameweeks per refresh to keep cost/time reasonable
       if(needed.length >= 3) break;
     }
@@ -2482,15 +2483,17 @@ async function doRefreshScores(){
     var finishedIds = events.filter(function(e){ return e.finished; }).map(function(e){ return e.id; });
     var cgw = currentEvt ? currentEvt.id : (finishedIds.length ? Math.max.apply(null,finishedIds) : 1);
     S.currentGW=cgw;
-    var finishedSet = {}; finishedIds.forEach(function(id){ finishedSet[id]=true; });
+    // Same fix as the silent auto-refresh: cache on data_checked (FPL's real "fully
+    // final, bonus points settled" signal), not finished (which flips well before
+    // bonus points/stat corrections are locked in). Otherwise a refresh done shortly
+    // after full-time permanently freezes a pre-bonus score.
+    var dataCheckedSet = {};
+    events.forEach(function(e){ if(e.data_checked) dataCheckedSet[e.id]=true; });
 
-    // Same fix as the silent auto-refresh: never treat an in-progress (not yet
-    // "finished" per FPL) gameweek as done just because we fetched it once before -
-    // otherwise live scores stop updating the moment the first refresh succeeds.
     var needed=[];
     for(var g=cgw;g>=1;g--){
-      var isFinished = !!finishedSet[g];
-      if(!isFinished || !S.scoresFetched[g]) needed.push(g);
+      var isFinalized = !!dataCheckedSet[g];
+      if(!isFinalized || !S.scoresFetched[g]) needed.push(g);
       if(needed.length>=3) break;
     }
     if(needed.length===0){
