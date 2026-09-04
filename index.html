@@ -418,7 +418,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-09-04.1";
+const APP_VERSION = "2026-09-04.4";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -542,6 +542,21 @@ function loadAll(){
     });
     sv("captainMonths",S.captainMonths);
     sv("captainMonthsDedupeV1",true);
+  }
+  // One-off repair, confirmed with James: Ollie's Rice picked up 2026-10 and 2026-11
+  // nominations by accident (via the auto-advancing month-default bug fixed above,
+  // before it was fixed) - neither month has happened yet, and only 2026-09 was ever
+  // actually intended. Remove just those two future entries, leaving September intact.
+  if(!ld("riceOctNovCleanupV1",false)){
+    if(S.captainMonths.Ollie){
+      S.captainMonths.Ollie = S.captainMonths.Ollie.filter(function(e){
+        var isRice = e.player && e.player.name==="Rice" && e.player.club==="Arsenal";
+        var isAccidentalMonth = e.month==="2026-10" || e.month==="2026-11";
+        return !(isRice && isAccidentalMonth);
+      });
+      sv("captainMonths",S.captainMonths);
+    }
+    sv("riceOctNovCleanupV1",true);
   }
   S.scores=ld("scores",{}); S.scoresFetched=ld("scoresFetched",{}); S.scoreOverrides=ld("scoreOverrides",{});
   // One-time repair: early gameweeks fetched before the finished/data_checked caching
@@ -1953,9 +1968,56 @@ function getPlayerGWPts(key, ownerName, gw){
   var pts=(S.scores[gw]||{})[key]||0;
   return isCap?pts*2:pts;
 }
+// Shared source of truth for "this person's current 17 players, reflecting any
+// wildcard subs that have taken effect" - used by both the WhatsApp team share and the
+// full-league CSV export, so they always agree with what renderSquadSection itself shows.
+// Fixed 17-row shape (2 GK, 5 DEF, 5 MID, 3 ATT, 2 WC) even if a slot is still empty
+// pre-draft, or a WC slot has already been used (shown blank - that player now appears
+// in their new position row instead, exactly as the on-screen squad view does).
+function getCurrentSquadList(owner){
+  var team=S.teams[owner]||{};
+  var cap=getCaptainForGW(owner,S.currentGW);
+  var capKey=cap?(cap.name+"|"+cap.club):null;
+  var rows=[];
+  ["GK","DEF","MID","ATT"].forEach(function(pos){
+    var needed=SLOTS[pos];
+    for(var i=0;i<needed;i++){
+      var p=(team[pos]||[])[i];
+      if(!p){ rows.push({pos:pos,name:"",club:"",isCaptain:false}); continue; }
+      var key=p.name+"|"+p.club;
+      var subOut=(S.wildcardSubs[owner]||[]).find(function(s){return (s.outPlayer.name+"|"+s.outPlayer.club)===key;});
+      var swapActive=subOut && S.currentGW>=subOut.gameweek;
+      var displayPlayer=swapActive?subOut.inPlayer:p;
+      var displayKey=displayPlayer.name+"|"+displayPlayer.club;
+      rows.push({pos:pos,name:displayPlayer.name,club:displayPlayer.club,isCaptain:capKey===displayKey});
+    }
+  });
+  var wcEntries=(team.WC||[]).filter(function(p){
+    if(!p) return false;
+    var key=p.name+"|"+p.club;
+    return !(S.wildcardSubs[owner]||[]).some(function(s){return (s.inPlayer.name+"|"+s.inPlayer.club)===key;});
+  });
+  for(var wi=0;wi<SLOTS.WC;wi++){
+    var wp=wcEntries[wi];
+    if(!wp){ rows.push({pos:"WC",name:"",club:"",isCaptain:false}); continue; }
+    var wkey=wp.name+"|"+wp.club;
+    rows.push({pos:"WC",name:wp.name,club:wp.club,isCaptain:capKey===wkey});
+  }
+  return rows;
+}
+function shareTeamWhatsApp(owner){
+  var rows=getCurrentSquadList(owner);
+  var lines=rows.map(function(r){
+    return r.pos+": "+(r.name?r.name+(r.isCaptain?" (C)":""):"-");
+  });
+  var text="\u26BD "+owner+"'s Team\n\n"+lines.join("\n")+"\n\n\u{1F916} Draft Advisor App";
+  window.open("https://wa.me/?text="+encodeURIComponent(text),"_blank");
+}
+
 function renderSquadSection(owner, vGW, capForVGW){
   var team=S.teams[owner]||{};
   var html='';
+  html+='<button class="btn btn-gray" style="margin-bottom:8px;" onclick="shareTeamWhatsApp(\''+owner.replace(/'/g,"\\'")+'\')">&#x1F4F2; Share Team</button>';
   html+='<button class="btn btn-gray" style="margin-bottom:12px;border:1px solid #f59e0b;color:#f59e0b;font-size:12px;padding:8px;" onclick="openEmergencyReplaceSelect(\''+owner.replace(/'/g,"\\'")+'\')">&#x26A0; Change a pick / player left the Premier League? Free replacement</button>';
   html+='<div class="sec-hdr">Squad</div>';
   var usedForThisView=[];
@@ -2158,11 +2220,14 @@ function getPersonalPickOrder(ownerName, key){
 function openCaptainModal(personName, month){
   var months=getSeasonMonthsList();
   if(!month){
-    // Default to the next month (from now) that doesn't have a nomination yet.
-    var existingMonths=(S.captainMonths[personName]||[]).map(function(e){return e.month;});
-    var nowKey=currentMonthKey();
-    month = months.find(function(m){ return m>=nowKey && existingMonths.indexOf(m)===-1; })
-      || months.find(function(m){ return m>=nowKey; }) || months[0];
+    // Always default to the actual current real-world month, not "the next month without
+    // a nomination yet". That auto-advancing default meant simply reopening this modal
+    // again after already nominating someone for the current month would silently jump
+    // ahead to a future month - so clicking the same player again (e.g. just to check, or
+    // out of habit) could bank a month you never intended to commit yet, quietly burning
+    // through their 3-month season budget without any clear warning. You can still
+    // deliberately pick a future month yourself via the dropdown to bank one on purpose.
+    month = currentMonthKey();
   }
   var team=S.teams[personName]||{};
   var existingForMonth=(S.captainMonths[personName]||[]).find(function(e){return e.month===month;});
@@ -2675,6 +2740,69 @@ async function doRefreshPlayerPool(){
     if(mc) mc.innerHTML+='<button class="btn btn-gray" style="margin-top:14px;" onclick="closeModal()">Close</button>';
   }
 }
+
+// ── SYNC PLAYER CLUBS ─────────────────────────────────────────────────────────
+// Pure display-accuracy sync, not a squad-management tool: with the transfer window now
+// closed, every drafted player stays on whichever team picked them regardless of which
+// real club they're now registered at - nobody gets moved, swapped, or removed here. This
+// only updates the `club` label shown next to a player (in S.playerPool AND every team's
+// own roster copy, matched by fplId) so it reflects reality after real-world transfers
+// that happened since the pool was first loaded or last synced. Name and position are
+// deliberately left untouched - use Edit Player Position for a genuine position fix.
+async function doSyncPlayerClubs(){
+  var msg='<h3>&#x1F504; Sync Player Clubs</h3>';
+  msg+='<p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Updates the club shown for each player to match reality after real-world transfers. Nobody is moved, swapped, or removed from any squad - this is display-only.</p>';
+  msg+='<div id="scprog" style="color:#10b981;font-size:13px;margin-bottom:14px;">Starting...</div>';
+  msg+='<div class="spinner"><div class="dot"></div><div class="dot" style="animation-delay:0.2s"></div><div class="dot" style="animation-delay:0.4s"></div></div>';
+  showModal(msg);
+  function upd(t,col){ var el=document.getElementById("scprog"); if(el){el.textContent=t; if(col)el.style.color=col;} }
+  function modalProgress(label){ upd("Connecting via "+label+"..."); }
+  try{
+    upd("Fetching current FPL club data...");
+    var bootstrap = await fetchWithFallback(
+      "https://fantasy.premierleague.com/api/bootstrap-static/",
+      function(data){ return data && Array.isArray(data.elements) && Array.isArray(data.teams); },
+      modalProgress
+    );
+    var teamNameById={};
+    bootstrap.teams.forEach(function(t){ teamNameById[t.id]=FPL_TEAM_NAME_MAP[t.name]||t.name; });
+    var clubById={};
+    bootstrap.elements.forEach(function(el){ clubById[el.id]=teamNameById[el.team]; });
+
+    var changes=[];
+    function syncPlayer(p, ownerLabel){
+      if(p.fplId==null) return; // non-PL free-typed entries have no fplId - not applicable
+      var realClub=clubById[p.fplId];
+      if(!realClub || realClub===p.club) return;
+      changes.push(ownerLabel+": "+p.name+" ("+p.club+" \u2192 "+realClub+")");
+      p.club=realClub;
+    }
+    S.playerPool.forEach(function(p){ syncPlayer(p,"Pool"); });
+    S.draftOrder.forEach(function(owner){
+      var team=S.teams[owner]||{};
+      ["GK","DEF","MID","ATT","WC"].forEach(function(pos){
+        (team[pos]||[]).forEach(function(p){ syncPlayer(p,owner); });
+      });
+    });
+
+    if(changes.length===0){
+      upd("All clubs already up to date - no changes needed.","#10b981");
+      setTimeout(closeModal,1500);
+      return;
+    }
+
+    sv("pool",S.playerPool); sv("teams",S.teams);
+    upd("Updated "+changes.length+" club record(s):","#10b981");
+    var mc=document.getElementById("modal-content");
+    if(mc) mc.innerHTML+='<div style="max-height:220px;overflow-y:auto;background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:8px 10px;margin-bottom:10px;font-size:12px;color:#8b949e;">'+changes.map(function(c){return '<div style="padding:2px 0;">'+c+'</div>';}).join("")+'</div><button class="btn btn-gray" onclick="closeModal()">Close</button>';
+    renderMyTeamTab(); renderFriendsTab(); renderSettingsTab();
+  }catch(e){
+    upd("Failed: "+e.message,"#ef4444");
+    var mc=document.getElementById("modal-content");
+    if(mc) mc.innerHTML+='<button class="btn btn-gray" style="margin-top:14px;" onclick="closeModal()">Close</button>';
+  }
+}
+
 function shareWhatsApp(){
   var standings=S.draftOrder.map(function(n){return {name:n,total:getPersonTotalPts(n)};}).sort(function(a,b){return b.total-a.total;});
   var text="⚽ Fantasy Draft Leaderboard — GW"+S.currentGW+"\n\n"+standings.map(function(s,i){return (i+1)+". "+s.name+": "+s.total+"pts";}).join("\n")+"\n\n🤖 Draft Advisor App";
@@ -2710,6 +2838,46 @@ function shareCupFinal(cupId){
   if(!cup||cup.status!=="completed") return;
   var text="🏆 "+cup.name+" — WINNER: "+cup.winner+"! 🎉\n\n🤖 Draft Advisor App";
   window.open("https://wa.me/?text="+encodeURIComponent(text),"_blank");
+}
+
+// ── EXPORT ALL TEAMS (CSV) ──────────────────────────────────────────────────────
+// A grid export - one column per drafter, one row per squad slot (positions down the
+// left, same fixed 17-row shape as getCurrentSquadList) - for pasting into Excel/Sheets
+// or just eyeballing everyone's squads side by side. CSV rather than a true .xlsx file:
+// opens natively in Excel/Sheets/Numbers with the same layout, no extra library needed.
+function csvEscapeField(v){
+  v=String(v==null?"":v);
+  if(v.indexOf(",")!==-1||v.indexOf('"')!==-1||v.indexOf("\n")!==-1){
+    v='"'+v.replace(/"/g,'""')+'"';
+  }
+  return v;
+}
+function exportTeamsCSV(){
+  var positionLabels=["GK","GK","DEF","DEF","DEF","DEF","DEF","MID","MID","MID","MID","MID","ATT","ATT","ATT","WC","WC"];
+  var owners=S.draftOrder.slice();
+  var squadLists={};
+  owners.forEach(function(o){ squadLists[o]=getCurrentSquadList(o); });
+
+  var rows=[];
+  rows.push(["Position"].concat(owners).map(csvEscapeField).join(","));
+  for(var i=0;i<positionLabels.length;i++){
+    var row=[positionLabels[i]];
+    owners.forEach(function(o){
+      var entry=squadLists[o][i];
+      row.push(entry&&entry.name?entry.name+(entry.isCaptain?" (C)":""):"");
+    });
+    rows.push(row.map(csvEscapeField).join(","));
+  }
+  var csv=rows.join("\r\n");
+  var uri="data:text/csv;charset=utf-8,"+encodeURIComponent(csv);
+  var a=document.createElement("a");
+  a.href=uri;
+  a.download="draft-advisor-teams-"+new Date().toISOString().slice(0,10)+".csv";
+  a.style.display="none";
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function(){document.body.removeChild(a);},100);
+  showToast("Teams exported! Opens directly in Excel/Sheets.");
 }
 
 // ── RENDER: SETTINGS ───────────────────────────────────────────────────────────
@@ -2748,6 +2916,7 @@ function renderSettingsTab(){
   html+='<div style="color:#8b949e;font-size:12px;margin-bottom:12px;">Players: '+S.playerPool.length+' &middot; Scores through GW'+S.currentGW+(S.scores[S.currentGW]?'':' (not yet fetched)')+' &middot; Last refresh: '+(S.lastRefreshed?new Date(S.lastRefreshed).toLocaleString():"Never")+'</div>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;" onclick="doRefreshScores()">&#x1F504; Refresh Scores</button>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;" onclick="doRefreshPlayerPool()">&#x1F195; Check for New Players</button>';
+  html+='<button class="btn btn-gray" style="margin-bottom:8px;" onclick="doSyncPlayerClubs()">&#x1F504; Sync Player Clubs</button>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;" onclick="openScoreOverride()">&#x270F; Manual Score Override</button>';
   html+='</div>';
 
@@ -2775,6 +2944,7 @@ function renderSettingsTab(){
   }
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #10b981;color:#10b981;" onclick="importBackup()">&#x2B06; Import Backup</button>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;" onclick="restoreAutoBackup()">&#x1F504; Restore Silent Auto-Backup</button>';
+  html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #22c55e;color:#4ade80;" onclick="exportTeamsCSV()">&#x1F4CA; Export All Teams (CSV/Excel)</button>';
   html+='</div>';
 
   // ── Testing & Reset ──
