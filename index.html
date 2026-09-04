@@ -418,7 +418,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-09-01.3";
+const APP_VERSION = "2026-09-04.1";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -523,6 +523,25 @@ function loadAll(){
     S.captains={}; S.captainHistory={}; S.captainMonths={};
     sv("captains",S.captains); sv("captainHistory",S.captainHistory); sv("captainMonths",S.captainMonths);
     sv("captainSystemV2Migrated",true);
+  }
+  // One-time repair: a device that retried a "stuck-looking" nomination while still
+  // running an older, pre-fix build (from before the service-worker caching bug was
+  // fixed) could have saved multiple entries for the exact same owner+month - each retry
+  // silently burning another month of that player's budget. Collapse any existing
+  // duplicate month entries down to one per month now (keeping the last one, since that
+  // reflects whatever the final actual choice was), so any already-affected budget goes
+  // back to counting correctly. Only runs once per device.
+  if(!ld("captainMonthsDedupeV1",false)){
+    Object.keys(S.captainMonths).forEach(function(owner){
+      var seen={}, deduped=[];
+      (S.captainMonths[owner]||[]).forEach(function(e){
+        if(seen[e.month]!=null) deduped[seen[e.month]]=e; // later entry for same month wins
+        else { seen[e.month]=deduped.length; deduped.push(e); }
+      });
+      S.captainMonths[owner]=deduped;
+    });
+    sv("captainMonths",S.captainMonths);
+    sv("captainMonthsDedupeV1",true);
   }
   S.scores=ld("scores",{}); S.scoresFetched=ld("scoresFetched",{}); S.scoreOverrides=ld("scoreOverrides",{});
   // One-time repair: early gameweeks fetched before the finished/data_checked caching
@@ -1370,7 +1389,16 @@ function getCaptainBudget(ownerName, playerKey){
   var months = (S.captainMonths[ownerName]||[]).filter(function(e){
     return (e.player.name+"|"+e.player.club)===playerKey;
   });
-  var usedMonths = months.length;
+  // Count DISTINCT months, not raw entry count. Each nomination should only ever produce
+  // one entry per month (setCaptainForMonth updates an existing month's entry in place),
+  // but count-by-distinct-month here is a deliberate second line of defense - a device
+  // that was still running an older, pre-fix build (e.g. stuck on a stale cached copy
+  // via the service worker bug) could have written genuine duplicate entries for the same
+  // month before that fix ever reached it, and this stops any leftover duplicates from
+  // ever miscounting someone's budget as used up early.
+  var uniqueMonths = {};
+  months.forEach(function(e){ uniqueMonths[e.month]=true; });
+  var usedMonths = Object.keys(uniqueMonths).length;
   var remainingMonths = Math.max(0, CAPTAIN_BUDGET_MONTHS-usedMonths);
   var hasEverBeenCaptain = usedMonths>0;
   var nowKey = currentMonthKey();
