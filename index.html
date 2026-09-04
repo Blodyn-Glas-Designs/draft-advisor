@@ -418,7 +418,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-09-04.5";
+const APP_VERSION = "2026-09-04.6";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -558,6 +558,10 @@ function loadAll(){
     }
     sv("riceOctNovCleanupV1",true);
   }
+  // Not a one-time migration - runs on every load, since it needs to catch each new
+  // calendar month as it starts. Auto-continues last month's captain into the new month
+  // so nobody has to re-tap the same player again just to keep them captaining.
+  performCaptainRollover();
   S.scores=ld("scores",{}); S.scoresFetched=ld("scoresFetched",{}); S.scoreOverrides=ld("scoreOverrides",{});
   // One-time repair: early gameweeks fetched before the finished/data_checked caching
   // fixes existed can be permanently stuck holding stale or all-zero scores (fetched too
@@ -1420,6 +1424,44 @@ function getCaptainBudget(ownerName, playerKey){
   var isCurrentlyActive = months.some(function(e){ return e.month===nowKey; });
   return {usedMonths:usedMonths, remainingMonths:remainingMonths, hasEverBeenCaptain:hasEverBeenCaptain, isCurrentlyActive:isCurrentlyActive};
 }
+// Auto-continues last month's captain into a new month, so the SAME player doesn't have to
+// be re-tapped just to keep them captaining - a rolled-over month still counts against
+// their 3-month budget exactly like an explicit pick would. Only skips the roll (leaving
+// the month unfilled) once that player's budget is already fully used up, at which point a
+// genuinely new choice is required - the existing "No captain!" warning then prompts for
+// it (see noCaptainReason below for the more specific message). Runs on every load rather
+// than as a one-time migration, since it needs to catch every new calendar month.
+function performCaptainRollover(){
+  var curMonth=currentMonthKey();
+  var changed=false;
+  (S.draftOrder||[]).forEach(function(owner){
+    var arr=S.captainMonths[owner];
+    if(!arr||!arr.length) return;
+    if(arr.some(function(e){return e.month===curMonth;})) return; // already has a pick this month
+    var priorEntries=arr.filter(function(e){return e.month<curMonth;}).sort(function(a,b){return a.month<b.month?1:-1;});
+    if(!priorEntries.length) return; // never nominated anyone before now - nothing to roll forward
+    var lastPlayer=priorEntries[0].player;
+    var key=lastPlayer.name+"|"+lastPlayer.club;
+    var budget=getCaptainBudget(owner,key); // only counts months before curMonth, since curMonth has no entry yet
+    if(budget.remainingMonths<=0) return; // budget's used up - do not roll, a new choice is needed
+    arr.push({month:curMonth,player:lastPlayer,autoRolled:true});
+    changed=true;
+  });
+  if(changed) sv("captainMonths",S.captainMonths);
+}
+// For the "No captain!" warning: if the reason is that a rolled-over captain's budget just
+// ran out (rather than nobody ever picking anyone), say so plainly instead of a generic
+// message, so it's clear WHY a fresh choice is needed this month.
+function noCaptainReason(owner,vGW){
+  var viewMonth=S.gwMonthMap[vGW];
+  if(!viewMonth) return null;
+  var past=(S.captainMonths[owner]||[]).filter(function(e){return e.month<viewMonth;}).sort(function(a,b){return a.month<b.month?1:-1;});
+  if(!past.length) return null;
+  var lastPlayer=past[0].player;
+  var budget=getCaptainBudget(owner,lastPlayer.name+"|"+lastPlayer.club);
+  if(budget.remainingMonths<=0) return lastPlayer.name+"'s 3 captain months are used up";
+  return null;
+}
 // Small badge shown next to a player - shows months remaining, distinguishing "currently
 // active this month" from "banked for a future/past month", or BUDGET USED once all 3 of
 // their months are spent (they can never be re-nominated after that).
@@ -2082,7 +2124,7 @@ function renderSquadSection(owner, vGW, capForVGW){
         html+='<div class="roster-slot filled">'+
           '<div style="display:flex;align-items:center;justify-content:space-between;">'+
           '<div style="flex:1;min-width:0;"><div style="font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">'+
-          displayPlayer.name+(isCap?'<span class="cap-badge">C&times;2</span>':"")+captainBudgetBadgeHtml(owner,displayKey)+(displayPlayer.leftPL?' <span style="color:#ef4444;font-size:10px;font-weight:700;">&#x26A0; LEFT PL</span>':"")+subNote+
+          displayPlayer.name+(isCap?'<span class="cap-badge">C&times;2</span>':"")+captainBudgetBadgeHtml(owner,displayKey)+(displayPlayer.leftPL?' <span style="color:#ef4444;font-size:10px;font-weight:700;">&#x26A0; NOT IN PL SQUAD</span>':"")+subNote+
           ' <span style="font-size:10px;color:#484f58;font-weight:normal;">'+(pickOrder?"Pick #"+pickOrder:"")+'</span></div>'+
           '<div style="font-size:11px;color:#8b949e;">'+displayPlayer.club+' &middot; &pound;'+(displayPlayer.fplPrice||0)+'m</div></div>'+
           '<div style="text-align:right;flex-shrink:0;padding-left:8px;">'+
@@ -2104,7 +2146,7 @@ function renderSquadSection(owner, vGW, capForVGW){
     var subIn=(S.wildcardSubs[owner]||[]).find(function(s){return (s.inPlayer.name+"|"+s.inPlayer.club)===key;});
     if(subIn) return;
     var ownerEsc=owner.replace(/'/g,"\\'");
-    var leftBadge=p.leftPL?' <span style="color:#ef4444;font-size:10px;font-weight:700;">&#x26A0; LEFT PL</span>':"";
+    var leftBadge=p.leftPL?' <span style="color:#ef4444;font-size:10px;font-weight:700;">&#x26A0; NOT IN PL SQUAD</span>':"";
     if(p.isNonPL){
       wcRows+='<div style="margin-top:4px;"><button class="btn btn-gray" style="font-size:12px;padding:7px;border-color:#f59e0b;" onclick="resolveWildcard(\''+ownerEsc+'\',\'WC\','+i+')">&#x26A0; Resolve '+p.name+' (Non-PL)</button>'+leftBadge+'</div>';
     } else {
@@ -2161,7 +2203,8 @@ function renderMyTeamTab(){
     var capKey=capForVGW.name+"|"+capForVGW.club;
     html+='<div class="card" style="border-color:#ec4899;padding:8px 12px;margin-bottom:8px;"><div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;"><span style="font-size:12px;color:#8b949e;">Captain'+(isPastView?" (GW"+vGW+")":"")+':</span><strong style="font-size:13px;">'+capForVGW.name+'</strong><span class="cap-badge">C</span>'+captainBudgetBadgeHtml(S.myName,capKey)+(isPastView?'':'<button class="btn btn-gray" style="width:auto;padding:4px 8px;font-size:11px;margin-left:auto;" onclick="openMyCaptainModal()">Change</button>')+'</div></div>';
   } else if(S.draftDone){
-    html+='<div class="warn">&#x26A0;&#xFE0F; No captain'+(isPastView?" as of GW"+vGW:"")+'!'+(isPastView?'':'<button class="btn btn-blue" style="margin-top:6px;padding:6px;" onclick="openMyCaptainModal()">Nominate</button>')+'</div>';
+    var myReason=noCaptainReason(S.myName,vGW);
+    html+='<div class="warn">&#x26A0;&#xFE0F; '+(myReason?myReason+" - choose a new captain":"No captain"+(isPastView?" as of GW"+vGW:""))+'!'+(isPastView?'':'<button class="btn btn-blue" style="margin-top:6px;padding:6px;" onclick="openMyCaptainModal()">Nominate</button>')+'</div>';
   }
 
   html+=renderSquadSection(S.myName, vGW, capForVGW);
@@ -2225,7 +2268,8 @@ function renderFriendDetail(el,name){
       '<span class="cap-badge">C</span>'+captainBudgetBadgeHtml(name,capKey)+
       (isPastView?'':'<button class="btn btn-gray" style="width:auto;padding:4px 8px;font-size:11px;margin-left:auto;" onclick="openCaptainModal(\''+safeName.replace(/'/g,"\\'")+'\')">Change</button>')+'</div></div>';
   } else {
-    html+='<div class="warn">&#x26A0;&#xFE0F; No captain'+(isPastView?" as of GW"+vGW:"")+'!'+(isPastView?'':'<button class="btn btn-blue" style="margin-top:6px;padding:6px;" onclick="openCaptainModal(\''+safeName.replace(/'/g,"\\'")+'\')">Nominate</button>')+'</div>';
+    var friendReason=noCaptainReason(name,vGW);
+    html+='<div class="warn">&#x26A0;&#xFE0F; '+(friendReason?friendReason+" - choose a new captain":"No captain"+(isPastView?" as of GW"+vGW:""))+'!'+(isPastView?'':'<button class="btn btn-blue" style="margin-top:6px;padding:6px;" onclick="openCaptainModal(\''+safeName.replace(/'/g,"\\'")+'\')">Nominate</button>')+'</div>';
   }
 
   html+=renderSquadSection(name, vGW, capForVGW);
@@ -2895,14 +2939,28 @@ function exportTeamsCSV(){
   var squadLists={};
   owners.forEach(function(o){ squadLists[o]=getCurrentSquadList(o); });
 
+  // Tag for a squad-list entry: marks the current captain (C), shows remaining budget for
+  // ANYONE who's ever been captain (even if not currently), and flags a used WC pick -
+  // combined if more than one applies, e.g. "Mbeumo (C, 2 left)" or "Salah (BUDGET USED)".
+  function entryTag(owner,entry){
+    if(!entry||!entry.name) return "";
+    var parts=[];
+    if(entry.isCaptain) parts.push("C");
+    var budget=getCaptainBudget(owner,entry.name+"|"+entry.club);
+    if(budget.hasEverBeenCaptain){
+      parts.push(budget.remainingMonths<=0?"BUDGET USED":(budget.remainingMonths+" left"));
+    }
+    if(entry.note==="used") parts.push("used");
+    return parts.length?" ("+parts.join(", ")+")":"";
+  }
+
   var rows=[];
   rows.push(["Position"].concat(owners).map(csvEscapeField).join(","));
   for(var i=0;i<positionLabels.length;i++){
     var row=[positionLabels[i]];
     owners.forEach(function(o){
       var entry=squadLists[o][i];
-      var tag=entry&&entry.isCaptain?" (C)":(entry&&entry.note==="used"?" (used)":"");
-      row.push(entry&&entry.name?entry.name+tag:"");
+      row.push(entry&&entry.name?entry.name+entryTag(o,entry):"");
     });
     rows.push(row.map(csvEscapeField).join(","));
   }
@@ -3738,7 +3796,7 @@ function renderRulesTab(){
   html+=rule("Joining late", "Friends who miss the draft can still join by picking a full squad from whatever's left undrafted - same 17-player structure and club limit as everyone else.");
 
   html+=section("&#x1F4C5; In-Season Rules","#10b981");
-  html+=rule("Captain: nominated once a month", "Once a calendar month, nominate a captain for the month ahead. That player's points are doubled for every gameweek whose first game falls within that month - even if later games in the same gameweek spill into the next month, the whole gameweek still counts for the month it started in. Cannot be your first-ever pick (shown as \"Pick #1\" in your squad) - except for late joiners, who never had a genuine first pick, so any player can be their captain.");
+  html+=rule("Captain: nominated once a month", "Once a calendar month, nominate a captain for the month ahead. That player's points are doubled for every gameweek whose first game falls within that month - even if later games in the same gameweek spill into the next month, the whole gameweek still counts for the month it started in. Cannot be your first-ever pick (shown as \"Pick #1\" in your squad) - except for late joiners, who never had a genuine first pick, so any player can be their captain. If you don't make a new choice, your existing captain automatically carries over into the new month (still using up one of their 3 months) - you only need to actively pick someone new if you want a change, or if your captain's budget has run out.");
   html+=rule("Captain budget: 3 months per player, for the whole season", "Every player can be nominated captain for at most 3 total calendar months this season - they don't need to be consecutive (e.g. captain in September, someone else in October, captain again in December still only uses 2 of their 3). Once a player's 3 months are used up, they can never be re-nominated.");
   html+=rule("Wildcard subs", "Permanently swap a Wildcard player in for an existing squad player. Must be the <b>same position</b> (a GK can only replace a GK, etc). Each of your 2 Wildcard slots can only be used once, and it's irreversible.");
   html+=rule("Non-PL wildcards", "A free-typed Wildcard player must be \"Resolved\" (assign their real club) before they can be subbed in. The app tries to auto-detect their real position from official FPL data when you resolve them.");
