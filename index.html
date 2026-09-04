@@ -418,7 +418,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-09-04.4";
+const APP_VERSION = "2026-09-04.5";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -1971,9 +1971,10 @@ function getPlayerGWPts(key, ownerName, gw){
 // Shared source of truth for "this person's current 17 players, reflecting any
 // wildcard subs that have taken effect" - used by both the WhatsApp team share and the
 // full-league CSV export, so they always agree with what renderSquadSection itself shows.
-// Fixed 17-row shape (2 GK, 5 DEF, 5 MID, 3 ATT, 2 WC) even if a slot is still empty
-// pre-draft, or a WC slot has already been used (shown blank - that player now appears
-// in their new position row instead, exactly as the on-screen squad view does).
+// Fixed 17-row shape (2 GK, 5 DEF, 5 MID, 3 ATT, 2 WC), always full. If a WC pick has been
+// subbed into the main squad, that WC slot is NOT left blank - it instead shows the player
+// who was removed from the main squad to make room, tagged note:"used", so the export/share
+// always reflects that all 17 original picks are still accounted for somewhere.
 function getCurrentSquadList(owner){
   var team=S.teams[owner]||{};
   var cap=getCaptainForGW(owner,S.currentGW);
@@ -1983,34 +1984,69 @@ function getCurrentSquadList(owner){
     var needed=SLOTS[pos];
     for(var i=0;i<needed;i++){
       var p=(team[pos]||[])[i];
-      if(!p){ rows.push({pos:pos,name:"",club:"",isCaptain:false}); continue; }
+      if(!p){ rows.push({pos:pos,name:"",club:"",isCaptain:false,note:""}); continue; }
       var key=p.name+"|"+p.club;
       var subOut=(S.wildcardSubs[owner]||[]).find(function(s){return (s.outPlayer.name+"|"+s.outPlayer.club)===key;});
       var swapActive=subOut && S.currentGW>=subOut.gameweek;
       var displayPlayer=swapActive?subOut.inPlayer:p;
       var displayKey=displayPlayer.name+"|"+displayPlayer.club;
-      rows.push({pos:pos,name:displayPlayer.name,club:displayPlayer.club,isCaptain:capKey===displayKey});
+      rows.push({pos:pos,name:displayPlayer.name,club:displayPlayer.club,isCaptain:capKey===displayKey,note:""});
     }
   });
-  var wcEntries=(team.WC||[]).filter(function(p){
-    if(!p) return false;
-    var key=p.name+"|"+p.club;
-    return !(S.wildcardSubs[owner]||[]).some(function(s){return (s.inPlayer.name+"|"+s.inPlayer.club)===key;});
-  });
   for(var wi=0;wi<SLOTS.WC;wi++){
-    var wp=wcEntries[wi];
-    if(!wp){ rows.push({pos:"WC",name:"",club:"",isCaptain:false}); continue; }
+    var wp=(team.WC||[])[wi];
+    if(!wp){ rows.push({pos:"WC",name:"",club:"",isCaptain:false,note:""}); continue; }
     var wkey=wp.name+"|"+wp.club;
-    rows.push({pos:"WC",name:wp.name,club:wp.club,isCaptain:capKey===wkey});
+    var subUsingThis=(S.wildcardSubs[owner]||[]).find(function(s){return (s.inPlayer.name+"|"+s.inPlayer.club)===wkey;});
+    var swapUsed=subUsingThis && S.currentGW>=subUsingThis.gameweek;
+    if(swapUsed){
+      var outP=subUsingThis.outPlayer;
+      rows.push({pos:"WC",name:outP.name,club:outP.club,isCaptain:false,note:"used"});
+    } else {
+      rows.push({pos:"WC",name:wp.name,club:wp.club,isCaptain:capKey===wkey,note:""});
+    }
   }
   return rows;
+}
+// Builds readable lines for an owner's full captain history: every month they've ever
+// nominated someone, in month order, tagged current/past/upcoming, plus how many of that
+// player's 3 lifetime months are left. Shared by the per-team WhatsApp share and the
+// all-friends Captains share.
+function captainHistoryLines(owner){
+  var entries=(S.captainMonths[owner]||[]).slice().sort(function(a,b){return a.month<b.month?-1:(a.month>b.month?1:0);});
+  if(!entries.length) return ["No captain nominated yet"];
+  var curMonth=currentMonthKey();
+  return entries.map(function(e){
+    var key=e.player.name+"|"+e.player.club;
+    var budget=getCaptainBudget(owner,key);
+    var tag=e.month===curMonth?"current":(e.month<curMonth?"past":"upcoming");
+    return monthLabel(e.month)+": "+e.player.name+" ("+tag+", "+budget.remainingMonths+" month"+(budget.remainingMonths===1?"":"s")+" left)";
+  });
 }
 function shareTeamWhatsApp(owner){
   var rows=getCurrentSquadList(owner);
   var lines=rows.map(function(r){
-    return r.pos+": "+(r.name?r.name+(r.isCaptain?" (C)":""):"-");
+    if(!r.name) return r.pos+": -";
+    var tag=r.isCaptain?" (C)":(r.note==="used"?" (used)":"");
+    return r.pos+": "+r.name+tag;
   });
-  var text="\u26BD "+owner+"'s Team\n\n"+lines.join("\n")+"\n\n\u{1F916} Draft Advisor App";
+  var text="\u26BD "+owner+"'s Team\n\n"+lines.join("\n");
+  text+="\n\n\u{1F451} Captain history:\n"+captainHistoryLines(owner).join("\n");
+  text+="\n\n\u{1F916} Draft Advisor App";
+  window.open("https://wa.me/?text="+encodeURIComponent(text),"_blank");
+}
+// All-friends captain snapshot for the current month - who's captain now and how many
+// months they (and each owner) have left, in one shareable message.
+function shareCaptainsWhatsApp(){
+  var curMonth=currentMonthKey();
+  var lines=S.draftOrder.map(function(owner){
+    var cap=getCaptainForGW(owner,S.currentGW);
+    if(!cap) return owner+": no captain nominated";
+    var key=cap.name+"|"+cap.club;
+    var budget=getCaptainBudget(owner,key);
+    return owner+": "+cap.name+" ("+budget.remainingMonths+" month"+(budget.remainingMonths===1?"":"s")+" left)";
+  });
+  var text="\u{1F451} Captains - "+monthLabel(curMonth)+"\n\n"+lines.join("\n")+"\n\n\u{1F916} Draft Advisor App";
   window.open("https://wa.me/?text="+encodeURIComponent(text),"_blank");
 }
 
@@ -2524,6 +2560,7 @@ function renderLeagueTab(){
   html+='<div style="display:flex;gap:6px;">';
   html+='<button class="btn btn-gray" style="width:auto;padding:7px 10px;font-size:12px;" onclick="doRefreshScores()">&#x1F504; Refresh</button>';
   html+='<button class="btn btn-gray" style="width:auto;padding:7px 10px;font-size:12px;" onclick="shareWhatsApp()">&#x1F4F2; Share All</button>';
+  html+='<button class="btn btn-gray" style="width:auto;padding:7px 10px;font-size:12px;" onclick="shareCaptainsWhatsApp()">&#x1F451; Share Captains</button>';
   html+='</div></div>';
   if(S.lastRefreshed) html+='<div style="color:#484f58;font-size:11px;margin-bottom:10px;">Last refreshed: '+new Date(S.lastRefreshed).toLocaleString()+'</div>';
   html+='<div style="overflow-x:auto;margin-bottom:16px;"><table class="tbl"><thead><tr>';
@@ -2864,7 +2901,8 @@ function exportTeamsCSV(){
     var row=[positionLabels[i]];
     owners.forEach(function(o){
       var entry=squadLists[o][i];
-      row.push(entry&&entry.name?entry.name+(entry.isCaptain?" (C)":""):"");
+      var tag=entry&&entry.isCaptain?" (C)":(entry&&entry.note==="used"?" (used)":"");
+      row.push(entry&&entry.name?entry.name+tag:"");
     });
     rows.push(row.map(csvEscapeField).join(","));
   }
@@ -2933,6 +2971,7 @@ function renderSettingsTab(){
     html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #14b8a6;color:#2dd4bf;" onclick="openAdminRepositionTeamSelect()">&#x1F504; Admin Reposition (pre-season only)</button>';
   }
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #22d3ee;color:#22d3ee;" onclick="openEditPositionTeamSelect()">&#x270F; Edit Player Position</button>';
+  html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #fbbf24;color:#fbbf24;" onclick="shareCaptainsWhatsApp()">&#x1F451; Share Captains (WhatsApp)</button>';
   html+='</div>';
 
   // ── Backup & Restore ──
@@ -4561,6 +4600,35 @@ document.addEventListener("DOMContentLoaded",function(){
   renderWelcomeScreen();
   showScreen("welcome");
 });
+
+// ── SERVICE WORKER ─────────────────────────────────────────────────────────────
+// sw.js existed in the repo but was never actually being registered anywhere in this
+// file - meaning the whole caching layer (and every earlier fix made to it) was dead
+// code, never installed on any device. This is very likely the real, ongoing cause of
+// "still have to clear cache to see the new version": with no registration at all, the
+// browser was falling back to its own default HTTP caching of index.html, which only
+// clears on a manual cache-clear or hard refresh. This registers the SW properly, and
+// on top of the normal browser update checks (which can be slow/inconsistent, especially
+// for an iOS "Add to Home Screen" app that only checks when reopened) actively asks for
+// an update check every time the app is opened or brought to the foreground, and does a
+// single automatic reload the moment a new version takes control - so a fresh deploy
+// should now show up within a normal app open/close, no manual cache-clearing needed.
+if("serviceWorker" in navigator){
+  window.addEventListener("load",function(){
+    navigator.serviceWorker.register("/draft-advisor/sw.js").then(function(reg){
+      reg.update();
+      document.addEventListener("visibilitychange",function(){
+        if(document.visibilityState==="visible") reg.update();
+      });
+    }).catch(function(err){ console.log("SW registration failed:",err); });
+  });
+  var swRefreshing=false;
+  navigator.serviceWorker.addEventListener("controllerchange",function(){
+    if(swRefreshing) return;
+    swRefreshing=true;
+    window.location.reload();
+  });
+}
 
 // ── POOL TAB ───────────────────────────────────────────────────────────────────
 var poolClubFilter="ALL",poolPosFilter="ALL",poolSort="pts_desc",poolShow="all";
