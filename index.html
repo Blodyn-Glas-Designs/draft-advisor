@@ -418,7 +418,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-09-04.6";
+const APP_VERSION = "2026-09-07.3";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -515,6 +515,48 @@ function loadAll(){
   var sn=ld("snake",{}); S.snakeOrder=sn.snakeOrder||[]; S.pickIdx=sn.pickIdx||0;
   S.captains=ld("captains",{}); S.captainHistory=ld("captainHistory",{}); S.wildcardSubs=ld("wildcards",{});
   S.captainMonths=ld("captainMonths",{}); S.gwMonthMap=ld("gwMonthMap",{});
+  // One-off repair, confirmed with James: Gareth's Odegaard-for-Sarr wildcard sub was made
+  // in the gap between GW2 and GW3 (after GW2 had already been played), but got stamped
+  // gameweek:2 by the off-by-one bug described at nextEffectiveWildcardGW() below - which
+  // retroactively credited Odegaard with Sarr's already-earned GW2 points (3) instead of
+  // starting him from GW3, while also wrongly stripping Sarr's own GW2 points. Correcting
+  // just this one confirmed record to gameweek:3.
+  if(!ld("wcSubOffByOneOdegaardV1",false)){
+    var garethSubs=S.wildcardSubs.Gareth;
+    if(garethSubs){
+      garethSubs.forEach(function(s){
+        if(s.gameweek===2 && s.inPlayer && s.inPlayer.name==="Ødegaard" && s.outPlayer && s.outPlayer.name==="Sarr"){
+          s.gameweek=3;
+        }
+      });
+      sv("wildcards",S.wildcardSubs);
+    }
+    sv("wcSubOffByOneOdegaardV1",true);
+  }
+  // Same off-by-one repair, confirmed with James: three more wildcard subs were also made
+  // in the GW2/GW3 gap and share the identical gameweek:2 mis-stamp - Joe's Madjo-for-
+  // Woltemade, Gareth's Kostoulas-for-Wright, and Stuart's Jensen-for-Martinelli. All three
+  // corrected to gameweek:3.
+  if(!ld("wcSubOffByOneBatch2V1",false)){
+    var fixes=[
+      {owner:"Joe",inName:"Madjo",outName:"Woltemade"},
+      {owner:"Gareth",inName:"Kostoulas",outName:"Wright"},
+      {owner:"Stuart",inName:"Jensen",outName:"Martinelli"}
+    ];
+    var anyChanged=false;
+    fixes.forEach(function(fix){
+      var subs=S.wildcardSubs[fix.owner];
+      if(!subs) return;
+      subs.forEach(function(s){
+        if(s.gameweek===2 && s.inPlayer && s.inPlayer.name===fix.inName && s.outPlayer && s.outPlayer.name===fix.outName){
+          s.gameweek=3;
+          anyChanged=true;
+        }
+      });
+    });
+    if(anyChanged) sv("wildcards",S.wildcardSubs);
+    sv("wcSubOffByOneBatch2V1",true);
+  }
   // One-time migration to the new monthly captain system (real rule: nominations happen
   // per calendar month, not a continuously-ticking real-time budget). Clears any
   // nominations made under the old system - confirmed safe with the user since no real
@@ -563,6 +605,39 @@ function loadAll(){
   // so nobody has to re-tap the same player again just to keep them captaining.
   performCaptainRollover();
   S.scores=ld("scores",{}); S.scoresFetched=ld("scoresFetched",{}); S.scoreOverrides=ld("scoreOverrides",{});
+  // One-off repair, confirmed with James: Adam drafted Barcola as a rumoured-transfer
+  // non-PL wildcard (still showing club "Psg", isNonPL:true, no fplId) - he has since
+  // genuinely signed for Liverpool and started scoring, but was never "Resolved" in-app to
+  // link him to his real FPL record, so his real points were invisible. Applying exactly
+  // what the in-app Resolve action does, using his confirmed real FPL id.
+  if(!ld("barcolaResolveV1",false)){
+    var barcolaFix={club:"Liverpool",fplId:627,position:"MID"};
+    Object.keys(S.teams).forEach(function(owner){
+      var team=S.teams[owner];
+      ["GK","DEF","MID","ATT","WC"].forEach(function(pos){
+        (team[pos]||[]).forEach(function(p){
+          if(p && p.name==="Barcola" && p.isNonPL){
+            p.club=barcolaFix.club; p.isNonPL=false; p.position=barcolaFix.position; p.fplId=barcolaFix.fplId;
+          }
+        });
+      });
+    });
+    (S.playerPool||[]).forEach(function(p){
+      if(p && p.name==="Barcola" && p.isNonPL){
+        p.club=barcolaFix.club; p.isNonPL=false; p.position=barcolaFix.position; p.fplId=barcolaFix.fplId;
+      }
+    });
+    sv("teams",S.teams); sv("pool",S.playerPool);
+    // GW3 is already finalized (data_checked) so a normal refresh won't re-fetch it - his
+    // real GW3 score (confirmed via official FPL data: 1 point, 26 minutes played) has to be
+    // written in directly under his new "Barcola|Liverpool" key, or it would stay invisible
+    // the same way his club change alone would be (the exact key-mismatch issue Sync
+    // Player Clubs was built to avoid for already-cached gameweeks).
+    if(!S.scores[3]) S.scores[3]={};
+    S.scores[3]["Barcola|Liverpool"]=1;
+    sv("scores",S.scores);
+    sv("barcolaResolveV1",true);
+  }
   // One-time repair: early gameweeks fetched before the finished/data_checked caching
   // fixes existed can be permanently stuck holding stale or all-zero scores (fetched too
   // early, then never re-checked once marked "finished"/"scoresFetched"). Clearing the
@@ -2393,9 +2468,19 @@ function confirmSub(personName,wcIdx,outName,outClub,outPos,outIdx){
   html+='<div class="pname" style="margin-bottom:10px;">'+outPlayer.name+' <span style="color:#8b949e;font-size:12px;">('+outPlayer.club+')</span></div>';
   html+='<div style="color:#10b981;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px;">In</div>';
   html+='<div class="pname">'+wcPlayer.name+'</div>';
+  html+='<div style="color:#8b949e;font-size:11px;margin-top:4px;">Starts scoring from GW'+nextEffectiveWildcardGW()+'</div>';
   html+='</div>';
   html+='<div class="confirm-btns"><button class="cb-yes" onclick="executeSub(\''+personName.replace(/'/g,"\\'")+'\','+wcIdx+',\''+outName.replace(/'/g,"\\'")+'\',\''+outClub.replace(/'/g,"\\'")+'\',\''+outPos+'\','+outIdx+')">&#x2713; Confirm Swap</button><button class="cb-no" onclick="closeModal()">Cancel</button></div>';
   showModal(html);
+}
+// The gameweek a NEW wildcard sub should start counting from. S.currentGW alone isn't
+// enough: if that gameweek's matches have already been played (scores already fetched for
+// it), a sub made "now" can't retroactively change who scored those points - the outgoing
+// player genuinely earned them, and the incoming player genuinely didn't. In that case the
+// swap can only take effect from the NEXT gameweek. If the current gameweek hasn't been
+// played yet, the swap takes effect immediately, from the current gameweek itself.
+function nextEffectiveWildcardGW(){
+  return S.scoresFetched[S.currentGW] ? S.currentGW+1 : S.currentGW;
 }
 function executeSub(personName,wcIdx,outName,outClub,outPos,outIdx){
   var team=S.teams[personName]||{};
@@ -2403,7 +2488,7 @@ function executeSub(personName,wcIdx,outName,outClub,outPos,outIdx){
   var outPlayer=(team[outPos]||[])[outIdx];
   if(!wcPlayer||!outPlayer){closeModal();return;}
   if(!S.wildcardSubs[personName]) S.wildcardSubs[personName]=[];
-  S.wildcardSubs[personName].push({inPlayer:wcPlayer,outPlayer:outPlayer,gameweek:S.currentGW,wcIdx:wcIdx,outPos:outPos,outIdx:outIdx});
+  S.wildcardSubs[personName].push({inPlayer:wcPlayer,outPlayer:outPlayer,gameweek:nextEffectiveWildcardGW(),wcIdx:wcIdx,outPos:outPos,outIdx:outIdx});
   sv("wildcards",S.wildcardSubs);
   closeModal(); renderMyTeamTab();
   if(viewingFriend===personName) renderFriendDetail(document.getElementById("tab-friends"),personName);
