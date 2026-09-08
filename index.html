@@ -418,7 +418,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-09-07.3";
+const APP_VERSION = "2026-09-07.4";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -3958,7 +3958,7 @@ function exportBackup(){
     var dataUri="data:application/json;charset=utf-8,"+encodeURIComponent(json);
     var a=document.createElement("a");
     a.href=dataUri;
-    a.download="draft-advisor-backup-"+new Date().toISOString().slice(0,10)+".json";
+    a.download=backupFilename("json");
     a.style.display="none";
     document.body.appendChild(a);
     a.click();
@@ -4429,6 +4429,12 @@ function checkBackupPrompt(){
     '</div></div>';
 }
 
+// Short, sortable filename for a regular in-season backup - "DA - Backup - GW3 - 2026-09-07"
+// instead of the old "draft-advisor-backup-2026-09-07", so different versions from the
+// same day (or different gameweeks) are easy to tell apart at a glance in a downloads list.
+function backupFilename(ext){
+  return "DA - Backup - GW"+(S.currentGW||0)+" - "+new Date().toISOString().slice(0,10)+"."+ext;
+}
 function buildBackupObject(){
   return {
     version:1, exportedAt:new Date().toISOString(),
@@ -4452,7 +4458,7 @@ function doWelcomeBackup(){
     var uri = "data:application/json;charset=utf-8," + encodeURIComponent(json);
     var a = document.createElement("a");
     a.href = uri;
-    a.download = "draft-advisor-backup-" + new Date().toISOString().slice(0,10) + ".json";
+    a.download = backupFilename("json");
     a.style.display = "none";
     document.body.appendChild(a);
     a.click();
