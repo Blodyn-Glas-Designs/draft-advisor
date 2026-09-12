@@ -518,8 +518,29 @@ function fbBoot(){
       }
       CLOUD.ready=true;
       fbStartListening();
+      fbPushAllLocalDataIfNeeded();
     }).catch(function(e){ console.log("fb role lookup failed",e); });
   });
+}
+
+// One-time only: the very first time THIS device is recognised as admin, push everything
+// already sitting in local storage up to the cloud. Without this, a brand-new admin device
+// only ever mirrors data going forward (the next captain change, score refresh, etc) and a
+// whole season already saved locally would otherwise never appear in Firebase at all. Guarded
+// by a local-only flag so it only ever runs once per device, not on every single page load.
+function fbPushAllLocalDataIfNeeded(){
+  if(!CLOUD.isAdmin) return;
+  var FLAG="fbInitialPushDone";
+  if(ld(FLAG,false)) return;
+  Object.keys(localStorage).forEach(function(fullKey){
+    if(fullKey.indexOf(DB)!==0) return;
+    var k=fullKey.slice(DB.length);
+    if(k===FLAG) return;
+    var v=ld(k,undefined);
+    if(v!==undefined) fbMirrorWrite(k,v);
+  });
+  _origSv(FLAG,true); // local bookkeeping only - deliberately never mirrored itself
+  console.log("fb: initial full push of existing local data to cloud complete");
 }
 
 // The single choke point deciding what (if anything) gets mirrored to the cloud for a given
