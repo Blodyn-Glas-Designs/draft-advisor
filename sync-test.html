@@ -497,7 +497,11 @@ var FB_CONFIG = {
 // else (scores, player pool, cups, etc) is admin-only and read-only for friends - matches
 // the Firebase security rules exactly, so a friend's device never even attempts a write
 // that the rules would reject anyway.
-var FB_OWNER_SPLIT_KEYS = {teams:true, captainMonths:true, wildcardSubs:true};
+// NOTE: captainMonths and wildcardSubs are deliberately NOT here - a friend's captain/sub
+// choice now goes into a holding pen (pendingCaptains/pendingWildcardSubs) instead of
+// applying directly. Only admin ever writes the real captainMonths/wildcardSubs data (on
+// approval), which is unrestricted for admin regardless of this list.
+var FB_OWNER_SPLIT_KEYS = {teams:true, pendingCaptains:true, pendingWildcardSubs:true};
 var CLOUD = {uid:null, ownerName:null, isAdmin:false, ready:false, applyingRemote:false};
 var _fbListenersStarted=false;
 
@@ -529,10 +533,7 @@ function fbBoot(){
       CLOUD.ready=true;
       fbStartListening();
       fbPushAllLocalDataIfNeeded();
-    }).catch(function(e){
-      console.log("fb role lookup failed",e);
-      alert("Cloud sync check: role lookup FAILED for uid="+CLOUD.uid+"\n"+e.message);
-    });
+    }).catch(function(e){ console.log("fb role lookup failed",e); });
   });
 }
 
@@ -542,14 +543,12 @@ function fbBoot(){
 // whole season already saved locally would otherwise never appear in Firebase at all. Guarded
 // by a local-only flag so it only ever runs once per device, not on every single page load.
 function fbPushAllLocalDataIfNeeded(){
-  // TEST BUILD DIAGNOSTIC: uses alert() rather than a toast so it can't be missed or fade away
-  // before it's seen on a phone. Reports the actual outcome (success/fail counts, first error),
-  // and now also reports clearly if the device isn't even being recognised as admin at all -
-  // bypasses the fbMirrorWrite wrapper so each write's real completion can be tracked via its
-  // own promise, rather than firing-and-forgetting like the normal mirror path does.
+  // Bypasses the fbMirrorWrite wrapper so each write's real completion can be tracked via its
+  // own promise, rather than firing-and-forgetting like the normal mirror path does. Results go
+  // to the console only now (not an on-screen alert) - confirmed working, and a friend/unclaimed
+  // device hitting this every boot should never see anything pop up.
   if(!CLOUD.isAdmin){
     console.log("fb push skipped - not recognised as admin");
-    alert("Cloud sync check:\nuid="+CLOUD.uid+"\nownerName="+CLOUD.ownerName+"\nisAdmin="+CLOUD.isAdmin+"\n(Not recognised as admin - nothing pushed.)");
     return;
   }
   var db=firebase.database();
@@ -573,7 +572,6 @@ function fbPushAllLocalDataIfNeeded(){
   Promise.all(promises).then(function(){
     var msg="Cloud push: "+ok+" ok, "+fail+" failed"+(firstError?" - "+firstError:"");
     console.log(msg);
-    alert(msg);
   });
 }
 
@@ -657,6 +655,14 @@ function fbApplyRemote(remote){
       _origSv(k,incoming);
     });
     loadAll();
+    // If this device is still sitting on the welcome screen (e.g. a brand-new, unclaimed
+    // device that just had a friend's/admin's real data quietly arrive for the first time),
+    // refresh it too - otherwise it'd be stuck showing "Download Players" even though real
+    // data just landed locally, until the person manually reloads the page.
+    var welcomeEl=document.getElementById("welcome-screen");
+    if(welcomeEl && welcomeEl.classList.contains("active") && typeof renderWelcomeScreen==="function"){
+      renderWelcomeScreen();
+    }
     var activeBtn=document.querySelector(".nav-btn.active");
     var tabId=activeBtn && activeBtn.getAttribute("data-tab");
     var renderFn={
@@ -689,6 +695,7 @@ function saveAll(){
   sv("snake",{snakeOrder:S.snakeOrder,pickIdx:S.pickIdx});
   sv("captains",S.captains); sv("captainHistory",S.captainHistory); sv("wildcards",S.wildcardSubs);
   sv("captainMonths",S.captainMonths); sv("gwMonthMap",S.gwMonthMap);
+  sv("pendingCaptains",S.pendingCaptains); sv("pendingWildcardSubs",S.pendingWildcardSubs);
   sv("scores",S.scores); sv("scoresFetched",S.scoresFetched); sv("scoreOverrides",S.scoreOverrides);
   sv("meta",{lastRefreshed:S.lastRefreshed,currentGW:S.currentGW});
   sv("cups",S.cups);
@@ -706,6 +713,7 @@ function loadAll(){
   var sn=ld("snake",{}); S.snakeOrder=sn.snakeOrder||[]; S.pickIdx=sn.pickIdx||0;
   S.captains=ld("captains",{}); S.captainHistory=ld("captainHistory",{}); S.wildcardSubs=ld("wildcards",{});
   S.captainMonths=ld("captainMonths",{}); S.gwMonthMap=ld("gwMonthMap",{});
+  S.pendingCaptains=ld("pendingCaptains",{}); S.pendingWildcardSubs=ld("pendingWildcardSubs",{});
   // One-off repair, confirmed with James: Gareth's Odegaard-for-Sarr wildcard sub was made
   // in the gap between GW2 and GW3 (after GW2 had already been played), but got stamped
   // gameweek:2 by the off-by-one bug described at nextEffectiveWildcardGW() below - which
@@ -2472,6 +2480,7 @@ function renderMyTeamTab(){
     var myReason=noCaptainReason(S.myName,vGW);
     html+='<div class="warn">&#x26A0;&#xFE0F; '+(myReason?myReason+" - choose a new captain":"No captain"+(isPastView?" as of GW"+vGW:""))+'!'+(isPastView?'':'<button class="btn btn-blue" style="margin-top:6px;padding:6px;" onclick="openMyCaptainModal()">Nominate</button>')+'</div>';
   }
+  html+=renderPendingCaptainBanner(S.myName)+renderPendingSubBanners(S.myName);
 
   html+=renderSquadSection(S.myName, vGW, capForVGW);
   html+="</div>";
@@ -2537,6 +2546,7 @@ function renderFriendDetail(el,name){
     var friendReason=noCaptainReason(name,vGW);
     html+='<div class="warn">&#x26A0;&#xFE0F; '+(friendReason?friendReason+" - choose a new captain":"No captain"+(isPastView?" as of GW"+vGW:""))+'!'+(isPastView?'':'<button class="btn btn-blue" style="margin-top:6px;padding:6px;" onclick="openCaptainModal(\''+safeName.replace(/'/g,"\\'")+'\')">Nominate</button>')+'</div>';
   }
+  html+=renderPendingCaptainBanner(name)+renderPendingSubBanners(name);
 
   html+=renderSquadSection(name, vGW, capForVGW);
   html+="</div>";
@@ -2583,6 +2593,7 @@ function openCaptainModal(personName, month){
   // left after everyone else already drafted, so the restriction doesn't apply to them.
   var firstPickKey=isLateJoiner?null:(myPicks[0]||null);
   var html='<h3>Nominate Captain for '+personName+'</h3>';
+  html+=renderPendingCaptainBanner(personName);
   html+='<label class="lbl">Month</label><select class="inp" id="cap-month-select" style="margin-bottom:12px;" onchange="openCaptainModal(\''+personName.replace(/'/g,"\\'")+'\',this.value)">'+
     months.map(function(m){return '<option value="'+m+'"'+(m===month?" selected":"")+'>'+monthLabel(m)+'</option>';}).join("")+
     '</select>';
@@ -2607,16 +2618,32 @@ function setCaptainForMonth(personName,month,pName,pClub){
   ["GK","DEF","MID","ATT"].forEach(function(pos){(team[pos]||[]).forEach(function(p){if(p.name===pName&&p.club===pClub)player=p;});});
   if(!player) return;
   var key=pName+"|"+pClub;
-  if(!S.captainMonths[personName]) S.captainMonths[personName]=[];
-  var existingForMonth=S.captainMonths[personName].find(function(e){return e.month===month;});
+  var existingForMonth=(S.captainMonths[personName]||[]).find(function(e){return e.month===month;});
   var alreadyThisPlayerThisMonth=existingForMonth&&existingForMonth.player.name===pName&&existingForMonth.player.club===pClub;
   var budget=getCaptainBudget(personName,key);
   if(!alreadyThisPlayerThisMonth && budget.remainingMonths<=0 && budget.hasEverBeenCaptain){
     showToast(pName+" has already used all 3 of their captain months.");
     return;
   }
+  if(!CLOUD.isAdmin){
+    // A friend's own device: this submits into a holding pen for admin sign-off rather than
+    // taking effect immediately - matches the monthly approval workflow. Admin (this device,
+    // or James acting directly) still applies changes immediately, exactly as before.
+    if(!CLOUD.ownerName){ showToast("Sign-in required to change a captain."); return; }
+    if(personName!==CLOUD.ownerName){ showToast("You can only nominate a captain for your own team."); return; }
+    S.pendingCaptains[personName]={player:player, month:month, submittedAt:new Date().toISOString(), status:"pending", rejectNote:null};
+    sv("pendingCaptains",S.pendingCaptains);
+    closeModal();
+    showToast(pName+" submitted as captain for "+monthLabel(month)+" - awaiting admin approval.");
+    renderMyTeamTab(); renderFriendsTab();
+    return;
+  }
+  if(!S.captainMonths[personName]) S.captainMonths[personName]=[];
   if(existingForMonth) existingForMonth.player=player;
   else S.captainMonths[personName].push({month:month, player:player});
+  // Clear any pending/rejected request for this person now admin has directly applied one -
+  // avoids the holding pen showing a stale item after a direct admin override.
+  if(S.pendingCaptains[personName]){ delete S.pendingCaptains[personName]; sv("pendingCaptains",S.pendingCaptains); }
   sv("captainMonths",S.captainMonths);
   closeModal(); checkCaptainBanner();
   showToast(pName+" nominated as captain for "+monthLabel(month)+".");
@@ -2630,6 +2657,7 @@ function openSubModal(personName,wcIdx){
   if(!wcPlayer) return;
   var wcPos=wcPlayer.position;
   var html='<h3>Sub In '+wcPlayer.name+'</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Select a '+(wcPos||"matching-position")+' player to permanently replace. They will stop scoring from now.</p>';
+  html+=renderPendingSubBanners(personName);
   if(!wcPos || !["GK","DEF","MID","ATT"].includes(wcPos)){
     html+='<div class="warn">This player\'s position isn\'t confirmed yet. Resolve them first if they\'re a non-PL signing.</div>';
     showModal(html); return;
@@ -2678,12 +2706,141 @@ function executeSub(personName,wcIdx,outName,outClub,outPos,outIdx){
   var wcPlayer=(team.WC||[])[wcIdx];
   var outPlayer=(team[outPos]||[])[outIdx];
   if(!wcPlayer||!outPlayer){closeModal();return;}
+  if(!CLOUD.isAdmin){
+    // Friend's own device: submit into the holding pen - no time-window restriction here
+    // (unlike captains), a sub can be proposed at any point, it just waits for admin
+    // sign-off before it actually takes effect and starts scoring.
+    if(!CLOUD.ownerName){ showToast("Sign-in required to make a substitution."); return; }
+    if(personName!==CLOUD.ownerName){ showToast("You can only make subs for your own team."); return; }
+    if(!S.pendingWildcardSubs[personName]) S.pendingWildcardSubs[personName]=[];
+    var entry={inPlayer:wcPlayer,outPlayer:outPlayer,wcIdx:wcIdx,outPos:outPos,outIdx:outIdx,submittedAt:new Date().toISOString(),status:"pending",rejectNote:null};
+    var existingIdx=S.pendingWildcardSubs[personName].findIndex(function(e){return e.wcIdx===wcIdx;});
+    if(existingIdx>=0) S.pendingWildcardSubs[personName][existingIdx]=entry;
+    else S.pendingWildcardSubs[personName].push(entry);
+    sv("pendingWildcardSubs",S.pendingWildcardSubs);
+    closeModal();
+    showToast("Submitted: "+outPlayer.name+" → "+wcPlayer.name+" - awaiting admin approval.");
+    renderMyTeamTab();
+    if(viewingFriend===personName) renderFriendDetail(document.getElementById("tab-friends"),personName);
+    return;
+  }
   if(!S.wildcardSubs[personName]) S.wildcardSubs[personName]=[];
   S.wildcardSubs[personName].push({inPlayer:wcPlayer,outPlayer:outPlayer,gameweek:nextEffectiveWildcardGW(),wcIdx:wcIdx,outPos:outPos,outIdx:outIdx});
   sv("wildcards",S.wildcardSubs);
   closeModal(); renderMyTeamTab();
   if(viewingFriend===personName) renderFriendDetail(document.getElementById("tab-friends"),personName);
 }
+
+// ── PENDING APPROVALS (holding pen) ─────────────────────────────────────────────
+// Small on-screen banners so a friend (or anyone viewing their team) can see at a glance
+// that a captain/sub choice has been submitted but isn't live yet, or was rejected and why.
+function renderPendingCaptainBanner(owner){
+  var req=S.pendingCaptains[owner];
+  if(!req) return '';
+  if(req.status==="pending"){
+    return '<div class="card" style="border-color:#f59e0b;padding:8px 12px;margin-bottom:8px;"><div style="font-size:12px;color:#fbbf24;">&#x23F3; Awaiting approval: <strong>'+req.player.name+'</strong> as captain for '+monthLabel(req.month)+'</div></div>';
+  }
+  if(req.status==="rejected"){
+    return '<div class="card" style="border-color:#ef4444;padding:8px 12px;margin-bottom:8px;"><div style="font-size:12px;color:#f87171;">&#x2717; Captain request ('+req.player.name+' for '+monthLabel(req.month)+') was rejected: '+(req.rejectNote||"")+'</div></div>';
+  }
+  return '';
+}
+function renderPendingSubBanners(owner){
+  var list=(S.pendingWildcardSubs[owner]||[]).filter(function(s){return s.status==="pending"||s.status==="rejected";});
+  if(list.length===0) return '';
+  var html='';
+  list.forEach(function(s){
+    if(s.status==="pending"){
+      html+='<div class="card" style="border-color:#f59e0b;padding:8px 12px;margin-bottom:8px;"><div style="font-size:12px;color:#fbbf24;">&#x23F3; Awaiting approval: sub '+s.outPlayer.name+' &rarr; '+s.inPlayer.name+'</div></div>';
+    } else {
+      html+='<div class="card" style="border-color:#ef4444;padding:8px 12px;margin-bottom:8px;"><div style="font-size:12px;color:#f87171;">&#x2717; Sub request ('+s.outPlayer.name+' &rarr; '+s.inPlayer.name+') was rejected: '+(s.rejectNote||"")+'</div></div>';
+    }
+  });
+  return html;
+}
+
+// Admin-only: builds the "Pending Approvals" section shown in Settings. Returns '' (nothing
+// rendered) for a non-admin device, and also '' if there's simply nothing waiting right now.
+function renderPendingApprovalsSection(){
+  if(!CLOUD.isAdmin) return '';
+  var pendingCapOwners=Object.keys(S.pendingCaptains||{}).filter(function(o){return S.pendingCaptains[o]&&S.pendingCaptains[o].status==="pending";});
+  var pendingSubEntries=[];
+  Object.keys(S.pendingWildcardSubs||{}).forEach(function(owner){
+    (S.pendingWildcardSubs[owner]||[]).forEach(function(s,idx){
+      if(s.status==="pending") pendingSubEntries.push({owner:owner,idx:idx,sub:s});
+    });
+  });
+  if(pendingCapOwners.length===0 && pendingSubEntries.length===0) return '';
+  var html='<div class="sec-hdr">&#x1F4E5; Pending Approvals</div><div class="card" style="border-color:#f59e0b;">';
+  pendingCapOwners.forEach(function(owner){
+    var req=S.pendingCaptains[owner];
+    var ownerEsc=owner.replace(/'/g,"\\'");
+    html+='<div class="roster-slot" style="margin-bottom:8px;"><div style="font-size:13px;font-weight:700;">'+owner+' &rarr; Captain: '+req.player.name+' ('+monthLabel(req.month)+')</div>'+
+      '<div style="display:flex;gap:6px;margin-top:6px;">'+
+      '<button class="btn btn-blue" style="width:auto;padding:5px 10px;font-size:12px;" onclick="approvePendingCaptainFromSettings(\''+ownerEsc+'\')">&#x2713; Approve</button>'+
+      '<button class="btn btn-gray" style="width:auto;padding:5px 10px;font-size:12px;border-color:#ef4444;color:#ef4444;" onclick="openRejectCaptainModal(\''+ownerEsc+'\')">&#x2717; Reject</button>'+
+      '</div></div>';
+  });
+  pendingSubEntries.forEach(function(e){
+    var ownerEsc=e.owner.replace(/'/g,"\\'");
+    html+='<div class="roster-slot" style="margin-bottom:8px;"><div style="font-size:13px;font-weight:700;">'+e.owner+' &rarr; Sub: '+e.sub.outPlayer.name+' out, '+e.sub.inPlayer.name+' in</div>'+
+      '<div style="display:flex;gap:6px;margin-top:6px;">'+
+      '<button class="btn btn-blue" style="width:auto;padding:5px 10px;font-size:12px;" onclick="approvePendingSubFromSettings(\''+ownerEsc+'\','+e.idx+')">&#x2713; Approve</button>'+
+      '<button class="btn btn-gray" style="width:auto;padding:5px 10px;font-size:12px;border-color:#ef4444;color:#ef4444;" onclick="openRejectSubModal(\''+ownerEsc+'\','+e.idx+')">&#x2717; Reject</button>'+
+      '</div></div>';
+  });
+  html+='</div>';
+  return html;
+}
+function approvePendingCaptainFromSettings(owner){
+  var pending=S.pendingCaptains[owner];
+  if(!pending||pending.status!=="pending") return;
+  // Re-runs the exact same admin-path logic as a direct nomination (re-validates budget
+  // etc at the moment of approval, not submission) - this device is admin, so
+  // setCaptainForMonth takes the "apply directly" branch and clears the pending entry itself.
+  setCaptainForMonth(owner, pending.month, pending.player.name, pending.player.club);
+  renderSettingsTab();
+}
+function openRejectCaptainModal(owner){
+  showModal('<h3>Reject Captain Request</h3><p style="color:#8b949e;font-size:13px;margin-bottom:10px;">Let '+owner+' know why - this note is shown to them.</p><textarea class="inp" id="reject-note" rows="3" placeholder="e.g. that player is injured this week" style="margin-bottom:14px;"></textarea><button class="btn btn-red" onclick="submitRejectCaptain(\''+owner.replace(/'/g,"\\'")+'\')">Reject with Note</button><button class="btn btn-gray" style="margin-top:8px;" onclick="closeModal()">Cancel</button>');
+}
+function submitRejectCaptain(owner){
+  var note=(document.getElementById("reject-note").value||"").trim();
+  if(!note){ showToast("Please add a short reason."); return; }
+  var pending=S.pendingCaptains[owner];
+  if(!pending) return;
+  pending.status="rejected"; pending.rejectNote=note;
+  sv("pendingCaptains",S.pendingCaptains);
+  closeModal();
+  showToast("Rejected "+owner+"'s captain request.");
+  renderSettingsTab();
+}
+function approvePendingSubFromSettings(owner,idx){
+  var list=S.pendingWildcardSubs[owner]||[];
+  var pending=list[idx];
+  if(!pending||pending.status!=="pending") return;
+  // This device is admin, so executeSub takes the "apply directly" branch immediately.
+  executeSub(owner, pending.wcIdx, pending.outPlayer.name, pending.outPlayer.club, pending.outPos, pending.outIdx);
+  list.splice(idx,1);
+  sv("pendingWildcardSubs",S.pendingWildcardSubs);
+  renderSettingsTab();
+}
+function openRejectSubModal(owner,idx){
+  showModal('<h3>Reject Sub Request</h3><p style="color:#8b949e;font-size:13px;margin-bottom:10px;">Let '+owner+' know why - this note is shown to them.</p><textarea class="inp" id="reject-note" rows="3" placeholder="e.g. wait until after this gameweek" style="margin-bottom:14px;"></textarea><button class="btn btn-red" onclick="submitRejectSub(\''+owner.replace(/'/g,"\\'")+'\','+idx+')">Reject with Note</button><button class="btn btn-gray" style="margin-top:8px;" onclick="closeModal()">Cancel</button>');
+}
+function submitRejectSub(owner,idx){
+  var note=(document.getElementById("reject-note").value||"").trim();
+  if(!note){ showToast("Please add a short reason."); return; }
+  var list=S.pendingWildcardSubs[owner]||[];
+  var pending=list[idx];
+  if(!pending) return;
+  pending.status="rejected"; pending.rejectNote=note;
+  sv("pendingWildcardSubs",S.pendingWildcardSubs);
+  closeModal();
+  showToast("Rejected sub request.");
+  renderSettingsTab();
+}
+
 function resolveWildcard(personName,pos,idx){
   var team=S.teams[personName]||{};
   var player=(team[pos]||[])[idx];
@@ -3307,6 +3464,8 @@ function renderSettingsTab(){
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #22d3ee;color:#22d3ee;" onclick="openEditPositionTeamSelect()">&#x270F; Edit Player Position</button>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #fbbf24;color:#fbbf24;" onclick="shareCaptainsWhatsApp()">&#x1F451; Share Captains (WhatsApp)</button>';
   html+='</div>';
+
+  html+=renderPendingApprovalsSection();
 
   // ── Backup & Restore ──
   html+='<div class="sec-hdr">Backup & Restore</div>';
