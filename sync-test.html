@@ -529,7 +529,10 @@ function fbBoot(){
       CLOUD.ready=true;
       fbStartListening();
       fbPushAllLocalDataIfNeeded();
-    }).catch(function(e){ console.log("fb role lookup failed",e); });
+    }).catch(function(e){
+      console.log("fb role lookup failed",e);
+      alert("Cloud sync check: role lookup FAILED for uid="+CLOUD.uid+"\n"+e.message);
+    });
   });
 }
 
@@ -539,11 +542,16 @@ function fbBoot(){
 // whole season already saved locally would otherwise never appear in Firebase at all. Guarded
 // by a local-only flag so it only ever runs once per device, not on every single page load.
 function fbPushAllLocalDataIfNeeded(){
-  if(!CLOUD.isAdmin){ console.log("fb push skipped - not recognised as admin"); return; }
-  // TEST BUILD DIAGNOSTIC: reports the actual outcome (success/fail counts, first error) as an
-  // on-screen toast, since there's no easy way to read the JS console on a phone. Bypasses the
-  // fbMirrorWrite wrapper so we can track each write's real completion via its own promise,
-  // rather than firing-and-forgetting like the normal mirror path does.
+  // TEST BUILD DIAGNOSTIC: uses alert() rather than a toast so it can't be missed or fade away
+  // before it's seen on a phone. Reports the actual outcome (success/fail counts, first error),
+  // and now also reports clearly if the device isn't even being recognised as admin at all -
+  // bypasses the fbMirrorWrite wrapper so each write's real completion can be tracked via its
+  // own promise, rather than firing-and-forgetting like the normal mirror path does.
+  if(!CLOUD.isAdmin){
+    console.log("fb push skipped - not recognised as admin");
+    alert("Cloud sync check:\nuid="+CLOUD.uid+"\nownerName="+CLOUD.ownerName+"\nisAdmin="+CLOUD.isAdmin+"\n(Not recognised as admin - nothing pushed.)");
+    return;
+  }
   var db=firebase.database();
   var keys=[];
   Object.keys(localStorage).forEach(function(fullKey){
@@ -565,7 +573,7 @@ function fbPushAllLocalDataIfNeeded(){
   Promise.all(promises).then(function(){
     var msg="Cloud push: "+ok+" ok, "+fail+" failed"+(firstError?" - "+firstError:"");
     console.log(msg);
-    if(typeof showToast==="function") showToast(msg);
+    alert(msg);
   });
 }
 
