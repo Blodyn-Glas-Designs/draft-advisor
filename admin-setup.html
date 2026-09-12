@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Draft Advisor - Admin Setup</title>
+<style>
+  body{background:#0d1117;color:#f0f6fc;font-family:system-ui,sans-serif;padding:24px;text-align:center;}
+  h1{font-size:18px;color:#10b981;}
+  .code{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;margin:20px 0;font-family:monospace;font-size:15px;word-break:break-all;user-select:all;}
+  button{background:#10b981;color:#0d1117;border:none;border-radius:8px;padding:12px 20px;font-size:15px;font-weight:700;cursor:pointer;}
+  .status{color:#8b949e;font-size:13px;margin-top:16px;}
+  .err{color:#ef4444;}
+</style>
+</head>
+<body>
+<h1>Draft Advisor &mdash; One-time Admin Setup</h1>
+<div id="content"><div class="status">Signing in...</div></div>
+
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+<script>
+var firebaseConfig = {
+  apiKey: "AIzaSyDNlKHRH-LO9QnUVlpyd-ZfkGFt0XbXJ7w",
+  authDomain: "draft-advisor-e8a94.firebaseapp.com",
+  databaseURL: "https://draft-advisor-e8a94-default-rtdb.europe-west1.firebasedatabase.app",
+  projectId: "draft-advisor-e8a94",
+  storageBucket: "draft-advisor-e8a94.firebasestorage.app",
+  messagingSenderId: "694204833214",
+  appId: "1:694204833214:web:beea7b2ff3ff2c3e4c6def"
+};
+firebase.initializeApp(firebaseConfig);
+
+firebase.auth().signInAnonymously().then(function(cred){
+  var uid = cred.user.uid;
+  document.getElementById('content').innerHTML =
+    '<p>This device is now signed in. Copy this ID and send it back:</p>' +
+    '<div class="code" id="uidBox">' + uid + '</div>' +
+    '<button onclick="copyUid()">Copy ID</button>' +
+    '<div class="status">This is not a password - it just identifies this device/browser.</div>';
+}).catch(function(err){
+  document.getElementById('content').innerHTML = '<p class="err">Sign-in failed: ' + err.message + '</p>';
+});
+
+function copyUid(){
+  var text = document.getElementById('uidBox').textContent;
+  navigator.clipboard.writeText(text).then(function(){
+    var btn = document.querySelector('button');
+    btn.textContent = 'Copied!';
+  }).catch(function(){
+    // Fallback for older browsers - text is already select-on-click via CSS user-select
+    alert('Could not auto-copy - please long-press the code above and copy it manually.');
+  });
+}
+</script>
+</body>
+</html>
