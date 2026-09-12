@@ -540,17 +540,18 @@ function fbBoot(){
 // by a local-only flag so it only ever runs once per device, not on every single page load.
 function fbPushAllLocalDataIfNeeded(){
   if(!CLOUD.isAdmin) return;
-  var FLAG="fbInitialPushDone";
-  if(ld(FLAG,false)) return;
+  // TEST BUILD: deliberately re-runs on every admin boot rather than gating behind a
+  // one-time flag - each individual write is just a plain overwrite (fbMirrorWrite -> .set()),
+  // so repeating it is harmless, and this avoids a flag getting stuck "done" after a run whose
+  // writes silently failed (e.g. before identity persistence was fixed).
+  var pushed=0;
   Object.keys(localStorage).forEach(function(fullKey){
     if(fullKey.indexOf(DB)!==0) return;
     var k=fullKey.slice(DB.length);
-    if(k===FLAG) return;
     var v=ld(k,undefined);
-    if(v!==undefined) fbMirrorWrite(k,v);
+    if(v!==undefined){ fbMirrorWrite(k,v); pushed++; }
   });
-  _origSv(FLAG,true); // local bookkeeping only - deliberately never mirrored itself
-  console.log("fb: initial full push of existing local data to cloud complete");
+  console.log("fb: pushed "+pushed+" local keys to cloud (admin boot)");
 }
 
 // The single choke point deciding what (if anything) gets mirrored to the cloud for a given
