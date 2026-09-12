@@ -539,19 +539,34 @@ function fbBoot(){
 // whole season already saved locally would otherwise never appear in Firebase at all. Guarded
 // by a local-only flag so it only ever runs once per device, not on every single page load.
 function fbPushAllLocalDataIfNeeded(){
-  if(!CLOUD.isAdmin) return;
-  // TEST BUILD: deliberately re-runs on every admin boot rather than gating behind a
-  // one-time flag - each individual write is just a plain overwrite (fbMirrorWrite -> .set()),
-  // so repeating it is harmless, and this avoids a flag getting stuck "done" after a run whose
-  // writes silently failed (e.g. before identity persistence was fixed).
-  var pushed=0;
+  if(!CLOUD.isAdmin){ console.log("fb push skipped - not recognised as admin"); return; }
+  // TEST BUILD DIAGNOSTIC: reports the actual outcome (success/fail counts, first error) as an
+  // on-screen toast, since there's no easy way to read the JS console on a phone. Bypasses the
+  // fbMirrorWrite wrapper so we can track each write's real completion via its own promise,
+  // rather than firing-and-forgetting like the normal mirror path does.
+  var db=firebase.database();
+  var keys=[];
   Object.keys(localStorage).forEach(function(fullKey){
     if(fullKey.indexOf(DB)!==0) return;
-    var k=fullKey.slice(DB.length);
-    var v=ld(k,undefined);
-    if(v!==undefined){ fbMirrorWrite(k,v); pushed++; }
+    keys.push(fullKey.slice(DB.length));
   });
-  console.log("fb: pushed "+pushed+" local keys to cloud (admin boot)");
+  var ok=0, fail=0, firstError=null;
+  var promises=keys.map(function(k){
+    var v=ld(k,undefined);
+    if(v===undefined) return Promise.resolve();
+    return db.ref("league/data/"+k).set(v).then(function(){
+      ok++;
+    }).catch(function(e){
+      fail++;
+      if(!firstError) firstError=k+": "+e.message;
+      console.log("fb push failed for key",k,e);
+    });
+  });
+  Promise.all(promises).then(function(){
+    var msg="Cloud push: "+ok+" ok, "+fail+" failed"+(firstError?" - "+firstError:"");
+    console.log(msg);
+    if(typeof showToast==="function") showToast(msg);
+  });
 }
 
 // The single choke point deciding what (if anything) gets mirrored to the cloud for a given
