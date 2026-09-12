@@ -504,6 +504,16 @@ var _fbListenersStarted=false;
 function fbBoot(){
   if(typeof firebase==="undefined") return; // SDK didn't load (e.g. offline) - stay local-only
   try{ firebase.initializeApp(FB_CONFIG); }catch(e){ /* already initialized, fine */ }
+  // Explicitly force LOCAL persistence for the anonymous sign-in. Some Safari versions don't
+  // reliably keep the SDK's own default persistence choice across a plain page reload -
+  // without this, a device can silently get signed in as a brand new anonymous identity every
+  // single reload, which looks exactly like "nothing ever syncs" even though everything else
+  // (the assignment, the security rules, the push logic) is working correctly.
+  try{
+    firebase.auth().setPersistence(firebase.auth.Auth.Persistence.LOCAL).catch(function(e){
+      console.log("fb setPersistence failed - continuing anyway",e);
+    });
+  }catch(e){ console.log("fb setPersistence threw",e); }
   firebase.auth().onAuthStateChanged(function(user){
     if(!user){
       firebase.auth().signInAnonymously().catch(function(e){ console.log("fb sign-in failed",e); });
