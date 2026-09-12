@@ -562,7 +562,7 @@ function fbPushAllLocalDataIfNeeded(){
   var promises=keys.map(function(k){
     var v=ld(k,undefined);
     if(v===undefined) return Promise.resolve();
-    return db.ref("league/data/"+k).set(v).then(function(){
+    return db.ref("league/data/"+k).set(fbSanitizeForCloud(v)).then(function(){
       ok++;
     }).catch(function(e){
       fail++;
@@ -577,6 +577,39 @@ function fbPushAllLocalDataIfNeeded(){
   });
 }
 
+// Firebase Realtime Database forbids ".", "$", "#", "[", "]", "/" inside object keys - but
+// this app freely uses "PlayerName|Club" as a literal object key in several places (pickedMap,
+// scores, scoreOverrides, thirdSubPicks, and the postDraftSnapshot copies of these), and a
+// player name containing e.g. a period ("B. Fernandez") breaks that instantly. Rather than
+// hunting down and special-casing every field that happens to use this pattern, every value
+// gets recursively re-keyed on the way out (and reversed on the way back in) so ANY object key,
+// anywhere in the tree, is always safe to write - "~" is escaped too so the encoding round-trips
+// exactly even if a name genuinely contains a literal tilde.
+function fbEncodeKey(k){
+  return String(k).replace(/[.$#\[\]\/~]/g,function(ch){
+    return "~"+ch.charCodeAt(0).toString(16).toUpperCase();
+  });
+}
+function fbDecodeKey(k){
+  return String(k).replace(/~([0-9A-F]{2})/g,function(_,hex){
+    return String.fromCharCode(parseInt(hex,16));
+  });
+}
+function fbSanitizeForCloud(v){
+  if(v===null||typeof v!=="object") return v;
+  if(Array.isArray(v)) return v.map(fbSanitizeForCloud);
+  var out={};
+  Object.keys(v).forEach(function(origKey){ out[fbEncodeKey(origKey)]=fbSanitizeForCloud(v[origKey]); });
+  return out;
+}
+function fbUnsanitizeFromCloud(v){
+  if(v===null||typeof v!=="object") return v;
+  if(Array.isArray(v)) return v.map(fbUnsanitizeFromCloud);
+  var out={};
+  Object.keys(v).forEach(function(origKey){ out[fbDecodeKey(origKey)]=fbUnsanitizeFromCloud(v[origKey]); });
+  return out;
+}
+
 // The single choke point deciding what (if anything) gets mirrored to the cloud for a given
 // local save. Mirrors the deployed security rules exactly: admin mirrors everything
 // unrestricted; a claimed friend mirrors only their own slice of the few keys they're
@@ -586,13 +619,13 @@ function fbMirrorWrite(k,v){
   if(!CLOUD.ready || !CLOUD.uid || CLOUD.applyingRemote) return;
   var db=firebase.database();
   if(CLOUD.isAdmin){
-    db.ref("league/data/"+k).set(v===undefined?null:v).catch(function(e){ console.log("fb admin write failed",k,e); });
+    db.ref("league/data/"+k).set(v===undefined?null:fbSanitizeForCloud(v)).catch(function(e){ console.log("fb admin write failed",k,e); });
     return;
   }
   if(!CLOUD.ownerName) return; // device not yet claimed by any friend
   if(FB_OWNER_SPLIT_KEYS[k]){
     var slice=(v && v[CLOUD.ownerName]!==undefined) ? v[CLOUD.ownerName] : null;
-    db.ref("league/data/"+k+"/"+CLOUD.ownerName).set(slice).catch(function(e){ console.log("fb friend write failed",k,e); });
+    db.ref("league/data/"+k+"/"+CLOUD.ownerName).set(fbSanitizeForCloud(slice)).catch(function(e){ console.log("fb friend write failed",k,e); });
   }
   // any other key: friends have no write path for it (and no need for one) - skipped.
 }
@@ -618,7 +651,7 @@ function fbApplyRemote(remote){
   CLOUD.applyingRemote=true;
   try{
     Object.keys(remote).forEach(function(k){
-      var incoming=remote[k];
+      var incoming=fbUnsanitizeFromCloud(remote[k]);
       var current=ld(k,undefined);
       if(JSON.stringify(incoming)===JSON.stringify(current)) return;
       _origSv(k,incoming);
