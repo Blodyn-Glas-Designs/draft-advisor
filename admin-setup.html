@@ -10,7 +10,8 @@
   .code{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:16px;margin:20px 0;font-family:monospace;font-size:15px;word-break:break-all;user-select:all;}
   button{background:#10b981;color:#0d1117;border:none;border-radius:8px;padding:12px 20px;font-size:15px;font-weight:700;cursor:pointer;}
   .status{color:#8b949e;font-size:13px;margin-top:16px;}
-  .err{color:#ef4444;}
+  .err{color:#ef4444;font-weight:700;}
+  .ok{color:#10b981;font-weight:700;font-size:16px;}
 </style>
 </head>
 <body>
@@ -19,6 +20,7 @@
 
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js"></script>
 <script>
 var firebaseConfig = {
   apiKey: "AIzaSyDNlKHRH-LO9QnUVlpyd-ZfkGFt0XbXJ7w",
@@ -33,11 +35,29 @@ firebase.initializeApp(firebaseConfig);
 
 firebase.auth().signInAnonymously().then(function(cred){
   var uid = cred.user.uid;
-  document.getElementById('content').innerHTML =
-    '<p>This device is now signed in. Copy this ID and send it back:</p>' +
+  var content = document.getElementById('content');
+  content.innerHTML =
+    '<p>Signed in. Your device ID:</p>' +
     '<div class="code" id="uidBox">' + uid + '</div>' +
     '<button onclick="copyUid()">Copy ID</button>' +
-    '<div class="status">This is not a password - it just identifies this device/browser.</div>';
+    '<div class="status" id="checkStatus">Checking admin access...</div>';
+
+  // Try reading the admin assignment entry for THIS device's uid - if the manual database
+  // entry was set up correctly, this read should succeed and show ownerName "__admin__".
+  // If it fails or shows something else, the setup isn't right yet.
+  firebase.database().ref('league/assignments/' + uid).once('value').then(function(snap){
+    var val = snap.val();
+    var checkEl = document.getElementById('checkStatus');
+    if(val && val.ownerName === '__admin__'){
+      checkEl.innerHTML = '<span class="ok">&#x2705; Admin access confirmed working!</span>';
+    } else if(val){
+      checkEl.innerHTML = '<span class="err">Entry exists but ownerName is "' + val.ownerName + '", not "__admin__". Please check the database entry.</span>';
+    } else {
+      checkEl.innerHTML = '<span class="err">No admin entry found for this device ID yet - has it been added to the database?</span>';
+    }
+  }).catch(function(err){
+    document.getElementById('checkStatus').innerHTML = '<span class="err">Could not verify: ' + err.message + '</span>';
+  });
 }).catch(function(err){
   document.getElementById('content').innerHTML = '<p class="err">Sign-in failed: ' + err.message + '</p>';
 });
@@ -48,7 +68,6 @@ function copyUid(){
     var btn = document.querySelector('button');
     btn.textContent = 'Copied!';
   }).catch(function(){
-    // Fallback for older browsers - text is already select-on-click via CSS user-select
     alert('Could not auto-copy - please long-press the code above and copy it manually.');
   });
 }
