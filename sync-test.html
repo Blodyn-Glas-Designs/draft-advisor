@@ -401,7 +401,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-09-07.4";
+const APP_VERSION = "2026-09-13.1";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -529,6 +529,20 @@ function fbBoot(){
       if(val && val.ownerName){
         CLOUD.ownerName=val.ownerName;
         CLOUD.isAdmin=(val.ownerName==="__admin__");
+        // A claimed friend device's "My Team" identity must always match the name
+        // admin assigned it to in Firebase - that assignment is the one authoritative
+        // source of who this specific phone belongs to. Without this, S.myName only
+        // ever comes from the local draft-setup screen, which can be blank, or later
+        // get silently overwritten by an admin's own cfg landing via sync (see the
+        // matching guard in fbApplyRemote below).
+        if(!CLOUD.isAdmin && S.myName!==CLOUD.ownerName){
+          S.myName=CLOUD.ownerName;
+          sv("cfg",{apiKey:S.apiKey,myName:S.myName,draftOrder:S.draftOrder,clubMax:S.clubMax,defaultTab:S.defaultTab,hideDraft:S.hideDraft,draftDone:S.draftDone});
+          if(typeof renderWelcomeScreen==="function") renderWelcomeScreen();
+          var activeBtn=document.querySelector(".nav-btn.active");
+          var tabId=activeBtn && activeBtn.getAttribute("data-tab");
+          if(tabId==="myteam" && typeof renderMyTeamTab==="function") renderMyTeamTab();
+        }
       }
       CLOUD.ready=true;
       fbStartListening();
@@ -651,10 +665,21 @@ function fbApplyRemote(remote){
     Object.keys(remote).forEach(function(k){
       var incoming=fbUnsanitizeFromCloud(remote[k]);
       var current=ld(k,undefined);
+      if(k==="cfg" && incoming && typeof incoming==="object"){
+        // myName/apiKey identify WHICH PERSON this device belongs to - that must never
+        // be replaced by whatever another device (e.g. admin's own phone) last pushed,
+        // or a friend's "My Team" tab ends up showing someone else's team. Everything
+        // else in cfg (draftOrder, clubMax, hideDraft, draftDone) is genuinely shared
+        // league-wide state and should still sync normally.
+        var currentCfg=current||{};
+        incoming.myName=currentCfg.myName||"";
+        incoming.apiKey=currentCfg.apiKey||"";
+      }
       if(JSON.stringify(incoming)===JSON.stringify(current)) return;
       _origSv(k,incoming);
     });
     loadAll();
+    updateDraftNavVisibility();
     // If this device is still sitting on the welcome screen (e.g. a brand-new, unclaimed
     // device that just had a friend's/admin's real data quietly arrive for the first time),
     // refresh it too - otherwise it'd be stuck showing "Download Players" even though real
