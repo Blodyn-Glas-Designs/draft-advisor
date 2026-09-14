@@ -4538,7 +4538,15 @@ function getBestXI(gwNum){
       var team=S.teams[name]||{};
       (team[pos]||[]).forEach(function(p){
         var key=p.name+"|"+p.club;
-        var pts=gwNum===null?getPlayerPts(key,name):((S.scores[gwNum]||{})[key]||0);
+        var pts;
+        if(gwNum===null){
+          pts=getPlayerPts(key,name); // season total - getPlayerPts already doubles captain months internally
+        } else {
+          var raw=(S.scores[gwNum]||{})[key]||0;
+          var capThisGW=getCaptainForGW(name,gwNum);
+          var isCap=capThisGW&&(capThisGW.name+"|"+capThisGW.club)===key;
+          pts=isCap?raw*2:raw;
+        }
         candidates.push({name:p.name,club:p.club,pos:pos,owner:name,pts:pts,key:key});
       });
     });

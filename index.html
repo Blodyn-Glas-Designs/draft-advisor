@@ -418,7 +418,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-09-07.4";
+const APP_VERSION = "2026-09-14.1";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -4163,7 +4163,15 @@ function getBestXI(gwNum){
       var team=S.teams[name]||{};
       (team[pos]||[]).forEach(function(p){
         var key=p.name+"|"+p.club;
-        var pts=gwNum===null?getPlayerPts(key,name):((S.scores[gwNum]||{})[key]||0);
+        var pts;
+        if(gwNum===null){
+          pts=getPlayerPts(key,name); // season total - getPlayerPts already doubles captain months internally
+        } else {
+          var raw=(S.scores[gwNum]||{})[key]||0;
+          var capThisGW=getCaptainForGW(name,gwNum);
+          var isCap=capThisGW&&(capThisGW.name+"|"+capThisGW.club)===key;
+          pts=isCap?raw*2:raw;
+        }
         candidates.push({name:p.name,club:p.club,pos:pos,owner:name,pts:pts,key:key});
       });
     });
