@@ -401,7 +401,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-09-13.1";
+const APP_VERSION = "2026-09-15.1";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -524,6 +524,7 @@ function fbBoot(){
       return;
     }
     CLOUD.uid=user.uid;
+    refreshSettingsIfActive(); // Device ID is now known - show it if Settings happens to be open
     firebase.database().ref("league/assignments/"+CLOUD.uid).once("value").then(function(snap){
       var val=snap.val();
       if(val && val.ownerName){
@@ -547,8 +548,18 @@ function fbBoot(){
       CLOUD.ready=true;
       fbStartListening();
       fbPushAllLocalDataIfNeeded();
+      refreshSettingsIfActive(); // linked/admin status may have just changed
     }).catch(function(e){ console.log("fb role lookup failed",e); });
   });
+}
+
+// Re-renders the Settings tab in place if it's the one currently on screen - used so the
+// Cloud Sync status/Device ID there stays accurate as fbBoot's async steps resolve, without
+// needing a manual reload.
+function refreshSettingsIfActive(){
+  var activeBtn=document.querySelector(".nav-btn.active");
+  var tabId=activeBtn && activeBtn.getAttribute("data-tab");
+  if(tabId==="settings" && typeof renderSettingsTab==="function") renderSettingsTab();
 }
 
 // One-time only: the very first time THIS device is recognised as admin, push everything
@@ -3343,8 +3354,8 @@ async function doSyncPlayerClubs(){
 }
 
 function shareWhatsApp(){
-  var standings=S.draftOrder.map(function(n){return {name:n,total:getPersonTotalPts(n)};}).sort(function(a,b){return b.total-a.total;});
-  var text="⚽ Fantasy Draft Leaderboard — GW"+S.currentGW+"\n\n"+standings.map(function(s,i){return (i+1)+". "+s.name+": "+s.total+"pts";}).join("\n")+"\n\n🤖 Draft Advisor App";
+  var standings=S.draftOrder.map(function(n){return {name:n,total:getPersonTotalPts(n),gw:getPersonGWPts(n,S.currentGW)};}).sort(function(a,b){return b.total-a.total;});
+  var text="⚽ Fantasy Draft Leaderboard — GW"+S.currentGW+"\n\n"+standings.map(function(s,i){return (i+1)+". "+s.name+": "+s.total+" ("+s.gw+")";}).join("\n")+"\n\n🤖 Draft Advisor App";
   window.open("https://wa.me/?text="+encodeURIComponent(text),"_blank");
 }
 function shareCupRound(cupId, roundIdx){
@@ -3464,6 +3475,29 @@ function renderSettingsTab(){
     html+='</div>';
   }
 
+  // ── Cloud Sync ──
+  html+='<div class="sec-hdr">Cloud Sync</div>';
+  html+='<div class="card">';
+  if(!CLOUD.ready){
+    html+='<div style="color:#8b949e;font-size:12px;margin-bottom:8px;">Connecting...</div>';
+  } else if(CLOUD.isAdmin){
+    html+='<div style="color:#10b981;font-size:12px;margin-bottom:8px;">&#x2705; This device is an admin.</div>';
+  } else if(CLOUD.ownerName){
+    html+='<div style="color:#10b981;font-size:12px;margin-bottom:8px;">&#x2705; Linked as '+CLOUD.ownerName+'.</div>';
+  } else {
+    html+='<div style="color:#f59e0b;font-size:12px;margin-bottom:8px;">&#x26A0; Not yet linked to a team. Send your Device ID below to the league admin so they can link this device.</div>';
+  }
+  if(CLOUD.uid){
+    html+='<label class="lbl" style="margin-top:0;">Your Device ID</label>';
+    html+='<div style="display:flex;gap:8px;align-items:center;">';
+    html+='<input class="inp" id="s-deviceid" readonly value="'+CLOUD.uid+'" style="margin:0;font-size:11px;" onclick="this.select();">';
+    html+='<button class="btn btn-gray" style="width:auto;padding:9px 14px;margin:0;flex-shrink:0;" onclick="copyDeviceId()">Copy</button>';
+    html+='</div>';
+  } else {
+    html+='<div style="color:#8b949e;font-size:12px;">Device ID not available yet - check back in a moment.</div>';
+  }
+  html+='</div>';
+
   // ── Data & Scoring ──
   html+='<div class="sec-hdr">Data & Scoring</div>';
   html+='<div class="card">';
@@ -3522,6 +3556,21 @@ function saveSettings(){
   sv("cfg",{apiKey:S.apiKey,myName:S.myName,draftOrder:S.draftOrder,clubMax:S.clubMax,defaultTab:S.defaultTab,hideDraft:S.hideDraft,draftDone:S.draftDone});
   showToast("Settings saved");
   renderTopBar();
+}
+function copyDeviceId(){
+  if(!CLOUD.uid){ showToast("Not connected yet - try again in a moment."); return; }
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(CLOUD.uid).then(function(){ showToast("Device ID copied!"); }).catch(function(){ fallbackCopyDeviceId(); });
+  } else {
+    fallbackCopyDeviceId();
+  }
+}
+function fallbackCopyDeviceId(){
+  var el=document.getElementById("s-deviceid");
+  if(!el){ showToast("Could not copy - long-press the ID above to select it."); return; }
+  el.select(); el.setSelectionRange(0,99999);
+  try{ document.execCommand("copy"); showToast("Device ID copied!"); }
+  catch(e){ showToast("Could not copy - long-press the ID above to select it."); }
 }
 function confirmReset(){
   showModal('<h3>Reset Data</h3><p style="color:#8b949e;font-size:13px;margin-bottom:16px;">All actions are permanent.</p><div class="card" style="margin-bottom:8px;"><div style="font-weight:700;margin-bottom:4px;">Reset Draft Only</div><div style="color:#8b949e;font-size:12px;margin-bottom:8px;">Clears picks and teams. Keeps API key, names and scores.</div><button class="btn btn-gray" style="border:1px solid #f59e0b;color:#f59e0b;" onclick="doResetDraft()">Reset Draft</button></div><div class="card" style="margin-bottom:8px;"><div style="font-weight:700;margin-bottom:4px;">Reset Season Scores</div><div style="color:#8b949e;font-size:12px;margin-bottom:8px;">Clears score data only.</div><button class="btn btn-gray" style="border:1px solid #f59e0b;color:#f59e0b;" onclick="doResetScores()">Reset Scores</button></div><div class="card" style="margin-bottom:8px;"><div style="font-weight:700;margin-bottom:4px;">Full Reset</div><div style="color:#8b949e;font-size:12px;margin-bottom:8px;">Clears everything including API key.</div><button class="btn btn-red" onclick="doResetFull()">Full Reset</button></div><button class="btn btn-gray" style="margin-top:4px;" onclick="closeModal()">Cancel</button>');

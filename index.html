@@ -418,7 +418,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-09-14.1";
+const APP_VERSION = "2026-09-15.1";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -2970,8 +2970,8 @@ async function doSyncPlayerClubs(){
 }
 
 function shareWhatsApp(){
-  var standings=S.draftOrder.map(function(n){return {name:n,total:getPersonTotalPts(n)};}).sort(function(a,b){return b.total-a.total;});
-  var text="⚽ Fantasy Draft Leaderboard — GW"+S.currentGW+"\n\n"+standings.map(function(s,i){return (i+1)+". "+s.name+": "+s.total+"pts";}).join("\n")+"\n\n🤖 Draft Advisor App";
+  var standings=S.draftOrder.map(function(n){return {name:n,total:getPersonTotalPts(n),gw:getPersonGWPts(n,S.currentGW)};}).sort(function(a,b){return b.total-a.total;});
+  var text="⚽ Fantasy Draft Leaderboard — GW"+S.currentGW+"\n\n"+standings.map(function(s,i){return (i+1)+". "+s.name+": "+s.total+" ("+s.gw+")";}).join("\n")+"\n\n🤖 Draft Advisor App";
   window.open("https://wa.me/?text="+encodeURIComponent(text),"_blank");
 }
 function shareCupRound(cupId, roundIdx){
