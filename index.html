@@ -418,7 +418,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-09-15.1";
+const APP_VERSION = "2026-09-17.1";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -2148,6 +2148,16 @@ function shareTeamWhatsApp(owner){
     return r.pos+": "+r.name+tag;
   });
   var text="\u26BD "+owner+"'s Team\n\n"+lines.join("\n");
+  // getCurrentSquadList (like the squad view) correctly keys swaps off S.currentGW - a sub only
+  // actually takes effect once its recorded gameweek arrives (nextEffectiveWildcardGW schedules
+  // it for NEXT gameweek once this week's scores are already in), so the roster above is
+  // genuinely who's playing THIS gameweek. Call out anything queued but not live yet so a just-
+  // made sub doesn't read as "the button didn't work."
+  var pendingSubs=(S.wildcardSubs[owner]||[]).filter(function(s){return S.currentGW<s.gameweek;});
+  if(pendingSubs.length>0){
+    text+="\n\n\u23F3 Pending (live from GW"+pendingSubs.map(function(s){return s.gameweek;}).join("/")+"):\n"+
+      pendingSubs.map(function(s){return s.inPlayer.name+" in for "+s.outPlayer.name;}).join("\n");
+  }
   text+="\n\n\u{1F451} Captain history:\n"+captainHistoryLines(owner).join("\n");
   text+="\n\n\u{1F916} Draft Advisor App";
   window.open("https://wa.me/?text="+encodeURIComponent(text),"_blank");
@@ -2192,7 +2202,7 @@ function renderSquadSection(owner, vGW, capForVGW){
         var isCap=capForVGW&&(capForVGW.name+"|"+capForVGW.club)===displayKey;
         var cumPts=getPlayerPts(displayKey,owner,vGW);
         var gwScore=getPlayerGWPts(displayKey,owner,vGW);
-        var subNote=swapActive?'<span style="font-size:9px;color:#a78bfa;font-weight:normal;"> &middot; WC sub GW'+subOut.gameweek+'</span>':"";
+        var subNote=swapActive?'<span style="font-size:9px;color:#a78bfa;font-weight:normal;"> &middot; WC sub GW'+subOut.gameweek+'</span>':(subOut?'<span style="font-size:9px;color:#f59e0b;font-weight:normal;"> &middot; &#x21C4; '+subOut.inPlayer.name+' from GW'+subOut.gameweek+'</span>':"");
         var pickOrder=getPersonalPickOrder(owner,displayKey);
         var resolveBtn = (displayPlayer.isNonPL && !swapActive) ?
           '<button class="btn btn-gray" style="margin-top:4px;font-size:11px;padding:5px;border-color:#f59e0b;color:#f59e0b;" onclick="resolveWildcard(\''+owner.replace(/'/g,"\\'")+'\',\''+pos+'\','+i+')">&#x26A0; Resolve (Non-PL)</button>' : '';
@@ -2219,10 +2229,18 @@ function renderSquadSection(owner, vGW, capForVGW){
   (team.WC||[]).forEach(function(p,i){
     var key=p.name+"|"+p.club;
     var subIn=(S.wildcardSubs[owner]||[]).find(function(s){return (s.inPlayer.name+"|"+s.inPlayer.club)===key;});
-    if(subIn) return;
+    // A sub only actually takes effect from its recorded gameweek onward (nextEffectiveWildcardGW
+    // can schedule it for NEXT gameweek if this week's scores are already in) - only drop this WC
+    // player from the bench list once the swap has actually taken effect as of the viewed GW.
+    // Hiding it unconditionally as soon as a sub exists made a just-scheduled sub look like the
+    // player had vanished entirely, even though he's still sitting on the bench for now.
+    var subActive=subIn && vGW>=subIn.gameweek;
+    if(subActive) return;
     var ownerEsc=owner.replace(/'/g,"\\'");
     var leftBadge=p.leftPL?' <span style="color:#ef4444;font-size:10px;font-weight:700;">&#x26A0; NOT IN PL SQUAD</span>':"";
-    if(p.isNonPL){
+    if(subIn){
+      wcRows+='<div style="margin-top:4px;opacity:0.55;"><div class="roster-slot" style="font-size:12px;padding:8px;">'+p.name+' ('+(p.position||"position unconfirmed")+') &middot; scheduled in from GW'+subIn.gameweek+' for '+subIn.outPlayer.name+' - can\'t be subbed again</div>'+leftBadge+'</div>';
+    } else if(p.isNonPL){
       wcRows+='<div style="margin-top:4px;"><button class="btn btn-gray" style="font-size:12px;padding:7px;border-color:#f59e0b;" onclick="resolveWildcard(\''+ownerEsc+'\',\'WC\','+i+')">&#x26A0; Resolve '+p.name+' (Non-PL)</button>'+leftBadge+'</div>';
     } else {
       wcRows+='<div style="margin-top:4px;"><button class="btn btn-gray" style="font-size:12px;padding:7px;" onclick="openSubModal(\''+ownerEsc+'\','+i+')">Sub in '+p.name+' ('+(p.position||"position unconfirmed")+')</button>'+leftBadge+'</div>';
