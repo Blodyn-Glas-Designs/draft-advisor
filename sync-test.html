@@ -401,7 +401,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-09-21.1";
+const APP_VERSION = "2026-09-21.2";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -5159,15 +5159,15 @@ function renderWelcomeScreen(){
   var html = '';
 
   if(isDraftDone){
+    html += makeWelcomeBtn('&#x1F464; My Team','#1f6feb',function(){showScreen('main');showTab('myteam');},true);
     html += makeWelcomeBtn('&#x1F4CA; View League Table','#10b981',function(){showScreen('main');showTab('league');});
-    html += makeWelcomeBtn('&#x1F464; My Team','#1f6feb',function(){showScreen('main');showTab('myteam');});
     html += makeWelcomeBtn('&#x1F30D; Player Pool','#8b5cf6',function(){showScreen('main');showTab('pool');});
     html += makeWelcomeBtn('&#x1F465; Friends Teams','#30363d',function(){showScreen('main');showTab('friends');});
     if(CLOUD.isAdmin) html += makeWelcomeBtn('&#x1F504; Start New Draft','#21262d',function(){confirmNewDraft();});
     if(S.currentGW>=38) html += makeWelcomeBtn('&#x1F3C6; Season Summary','#f59e0b',function(){renderSeasonSummary();});
   } else if(isDraftInProgress){
+    html += makeWelcomeBtn('&#x1F464; My Team So Far','#1f6feb',function(){showScreen('main');showTab('myteam');},true);
     html += makeWelcomeBtn('&#x25B6; Continue Draft','#10b981',function(){showScreen('main');showTab('draft');});
-    html += makeWelcomeBtn('&#x1F464; My Team So Far','#1f6feb',function(){showScreen('main');showTab('myteam');});
     if(CLOUD.isAdmin) html += makeWelcomeBtn('&#x1F504; Start New Draft','#21262d',function(){confirmNewDraft();});
     if(S.currentGW>=38) html += makeWelcomeBtn('&#x1F3C6; Season Summary','#f59e0b',function(){renderSeasonSummary();});
     html += makeWelcomeBtn('&#x2699; Settings','#30363d',function(){showScreen('main');showTab('settings');});
@@ -5211,13 +5211,17 @@ function renderWelcomeScreen(){
 
 // Neon button colours for welcome screen - Arcane palette
 
-function makeWelcomeBtn(label, color, fn){
+function makeWelcomeBtn(label, color, fn, fullWidth){
   var idx = Object.keys(welcomeBtnFns).length;
   var id = 'wb'+idx;
   welcomeBtnFns[id] = fn;
   var nc = welcomeNeonColors[idx % welcomeNeonColors.length];
-  var style = ['width:100%','padding:12px 8px','background:'+nc.bg,'color:'+nc.text,'border:1px solid '+nc.border,'border-radius:10px','font-size:18px','font-family:Bangers,cursive','letter-spacing:2px','cursor:pointer','line-height:1.2','text-shadow:0 0 8px '+nc.glow+',0 0 16px '+nc.glow,'box-shadow:0 0 10px '+nc.glow+',inset 0 0 10px rgba(255,255,255,0.03)'].join(';');
-  return '<button onclick="welcomeBtnFns[\'' + id + '\']();" style="'+style+'">'+label+'</button>';
+  var style = ['width:100%','padding:12px 8px','background:'+nc.bg,'color:'+nc.text,'border:1px solid '+nc.border,'border-radius:10px','font-size:18px','font-family:Bangers,cursive','letter-spacing:2px','cursor:pointer','line-height:1.2','text-shadow:0 0 8px '+nc.glow+',0 0 16px '+nc.glow,'box-shadow:0 0 10px '+nc.glow+',inset 0 0 10px rgba(255,255,255,0.03)'];
+  // #welcome-buttons is a 2-column grid - spanning both columns puts this button on its
+  // own full-width row, useful for a lone "odd one out" button (e.g. My Team) so the
+  // remaining buttons pair up evenly underneath instead of leaving a lopsided last row.
+  if(fullWidth) style.push('grid-column:1 / -1');
+  return '<button onclick="welcomeBtnFns[\'' + id + '\']();" style="'+style.join(';')+'">'+label+'</button>';
 }
 
 // ── ACCESS GATE (SYNC TEST BUILD) ────────────────────────────────────────────────
