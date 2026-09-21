@@ -401,7 +401,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-09-17.2";
+const APP_VERSION = "2026-09-21.1";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -548,7 +548,9 @@ function fbBoot(){
       CLOUD.ready=true;
       fbStartListening();
       fbPushAllLocalDataIfNeeded();
+      updateDraftNavVisibility(); // Draft tab visibility depends on CLOUD.isAdmin, now known
       refreshSettingsIfActive(); // linked/admin status may have just changed
+      refreshWelcomeIfActive(); // welcome screen's button list also depends on CLOUD.isAdmin
     }).catch(function(e){ console.log("fb role lookup failed",e); });
   });
 }
@@ -560,6 +562,12 @@ function refreshSettingsIfActive(){
   var activeBtn=document.querySelector(".nav-btn.active");
   var tabId=activeBtn && activeBtn.getAttribute("data-tab");
   if(tabId==="settings" && typeof renderSettingsTab==="function") renderSettingsTab();
+}
+// Same idea for the welcome screen - its button list (Start New Draft, Restore Backup, etc)
+// depends on CLOUD.isAdmin, which isn't known on the very first render.
+function refreshWelcomeIfActive(){
+  var el=document.getElementById("welcome-screen");
+  if(el && el.classList.contains("active") && typeof renderWelcomeScreen==="function") renderWelcomeScreen();
 }
 
 // One-time only: the very first time THIS device is recognised as admin, push everything
@@ -1473,6 +1481,10 @@ function updateDraftNavVisibility(){
   document.querySelectorAll(".nav-btn[data-tab='stats']").forEach(function(b){b.style.display=S.draftDone?"":"none";});
   // Advice is only relevant while actively drafting - hide it once the draft is complete.
   document.querySelectorAll(".nav-btn[data-tab='advice']").forEach(function(b){b.style.display=S.draftDone?"none":"";});
+  // The Draft tab is an admin/management view (reviewing picks, running a fresh draft) - a
+  // friend never needs it, regardless of the admin's own "Draft Tab" Settings preference
+  // (hideDraft is a shared cfg value that would otherwise apply to every synced device).
+  document.querySelectorAll(".nav-btn[data-tab='draft']").forEach(function(b){b.style.display=(CLOUD.isAdmin && !S.hideDraft)?"":"none";});
 }
 
 function proceedToApp(){
@@ -2141,7 +2153,7 @@ function renderTopBar(){
   document.getElementById("topbar-info").textContent=info;
   var undoBtn=document.getElementById("undo-btn");
   undoBtn.style.display=(S.history.length>0&&!S.draftDone)?"block":"none";
-  document.querySelectorAll(".nav-btn[data-tab='draft']").forEach(function(b){b.style.display=S.hideDraft?"none":"";});
+  updateDraftNavVisibility();
   document.querySelectorAll(".nav-btn[data-tab='advice']").forEach(function(b){b.classList.toggle("my-turn",myT&&!S.draftDone&&!allDone);});
 }
 function checkAdviceBanner(){
@@ -3464,8 +3476,45 @@ function exportTeamsCSV(){
 }
 
 // ── RENDER: SETTINGS ───────────────────────────────────────────────────────────
+// Cloud Sync card is identical for admin and friend views - built once, used in both.
+function cloudSyncCardHtml(){
+  var html='<div class="sec-hdr">Cloud Sync</div><div class="card">';
+  if(!CLOUD.ready){
+    html+='<div style="color:#8b949e;font-size:12px;margin-bottom:8px;">Connecting...</div>';
+  } else if(CLOUD.isAdmin){
+    html+='<div style="color:#10b981;font-size:12px;margin-bottom:8px;">&#x2705; This device is an admin.</div>';
+  } else if(CLOUD.ownerName){
+    html+='<div style="color:#10b981;font-size:12px;margin-bottom:8px;">&#x2705; Linked as '+CLOUD.ownerName+'.</div>';
+  } else {
+    html+='<div style="color:#f59e0b;font-size:12px;margin-bottom:8px;">&#x26A0; Not yet linked to a team. Send your Device ID below to the league admin so they can link this device.</div>';
+  }
+  if(CLOUD.uid){
+    html+='<label class="lbl" style="margin-top:0;">Your Device ID</label>';
+    html+='<div style="display:flex;gap:8px;align-items:center;">';
+    html+='<input class="inp" id="s-deviceid" readonly value="'+CLOUD.uid+'" style="margin:0;font-size:11px;" onclick="this.select();">';
+    html+='<button class="btn btn-gray" style="width:auto;padding:9px 14px;margin:0;flex-shrink:0;" onclick="copyDeviceId()">Copy</button>';
+    html+='</div>';
+  } else {
+    html+='<div style="color:#8b949e;font-size:12px;">Device ID not available yet - check back in a moment.</div>';
+  }
+  html+='</div>';
+  return html;
+}
 function renderSettingsTab(){
   var el=document.getElementById("tab-settings");
+  // Friends get a deliberately minimal Settings screen - just how to link this device, and
+  // a reference to the rules. Everything else here (API key, draft config, score/backup
+  // tools, resets) is an admin/league-management concern they never need to touch.
+  if(!CLOUD.isAdmin){
+    var fhtml='<div style="padding:14px;overflow-y:auto;flex:1;">';
+    fhtml+='<div class="sec-hdr">Settings</div>';
+    fhtml+=cloudSyncCardHtml();
+    fhtml+='<div class="sec-hdr">League Rules</div>';
+    fhtml+='<div class="card"><button class="btn btn-gray" style="border:1px solid #6366f1;color:#818cf8;" onclick="showTab(\'rules\')">&#x1F4D6; League Rules</button></div>';
+    fhtml+='</div>';
+    el.innerHTML=fhtml;
+    return;
+  }
   var html='<div style="display:flex;flex-direction:column;flex:1;overflow:hidden;"><div style="padding:10px 14px 0;flex-shrink:0;"><input class="inp" id="pool-srch" placeholder="Search players or clubs..." oninput="searchQuery=this.value;renderPoolTab();" value="'+searchQuery+'"></div><div style="padding:14px;overflow-y:auto;flex:1;">';
   html+='<div class="sec-hdr">Settings</div>';
   html+='<div class="card">';
@@ -3494,27 +3543,7 @@ function renderSettingsTab(){
   }
 
   // ── Cloud Sync ──
-  html+='<div class="sec-hdr">Cloud Sync</div>';
-  html+='<div class="card">';
-  if(!CLOUD.ready){
-    html+='<div style="color:#8b949e;font-size:12px;margin-bottom:8px;">Connecting...</div>';
-  } else if(CLOUD.isAdmin){
-    html+='<div style="color:#10b981;font-size:12px;margin-bottom:8px;">&#x2705; This device is an admin.</div>';
-  } else if(CLOUD.ownerName){
-    html+='<div style="color:#10b981;font-size:12px;margin-bottom:8px;">&#x2705; Linked as '+CLOUD.ownerName+'.</div>';
-  } else {
-    html+='<div style="color:#f59e0b;font-size:12px;margin-bottom:8px;">&#x26A0; Not yet linked to a team. Send your Device ID below to the league admin so they can link this device.</div>';
-  }
-  if(CLOUD.uid){
-    html+='<label class="lbl" style="margin-top:0;">Your Device ID</label>';
-    html+='<div style="display:flex;gap:8px;align-items:center;">';
-    html+='<input class="inp" id="s-deviceid" readonly value="'+CLOUD.uid+'" style="margin:0;font-size:11px;" onclick="this.select();">';
-    html+='<button class="btn btn-gray" style="width:auto;padding:9px 14px;margin:0;flex-shrink:0;" onclick="copyDeviceId()">Copy</button>';
-    html+='</div>';
-  } else {
-    html+='<div style="color:#8b949e;font-size:12px;">Device ID not available yet - check back in a moment.</div>';
-  }
-  html+='</div>';
+  html+=cloudSyncCardHtml();
 
   // ── Data & Scoring ──
   html+='<div class="sec-hdr">Data & Scoring</div>';
@@ -4839,6 +4868,9 @@ function exitBrowseMode(){
 
 
 function checkBackupPrompt(){
+  // Backups are an admin/league-data concern - a friend's own device has nothing that
+  // needs backing up locally (everything they can change lives in the cloud/holding pen).
+  if(!CLOUD.isAdmin) return;
   // Only show if there's meaningful data to back up
   if(!S.myName || S.draftOrder.length < 2) return;
 
@@ -5131,12 +5163,12 @@ function renderWelcomeScreen(){
     html += makeWelcomeBtn('&#x1F464; My Team','#1f6feb',function(){showScreen('main');showTab('myteam');});
     html += makeWelcomeBtn('&#x1F30D; Player Pool','#8b5cf6',function(){showScreen('main');showTab('pool');});
     html += makeWelcomeBtn('&#x1F465; Friends Teams','#30363d',function(){showScreen('main');showTab('friends');});
-    html += makeWelcomeBtn('&#x1F504; Start New Draft','#21262d',function(){confirmNewDraft();});
+    if(CLOUD.isAdmin) html += makeWelcomeBtn('&#x1F504; Start New Draft','#21262d',function(){confirmNewDraft();});
     if(S.currentGW>=38) html += makeWelcomeBtn('&#x1F3C6; Season Summary','#f59e0b',function(){renderSeasonSummary();});
   } else if(isDraftInProgress){
     html += makeWelcomeBtn('&#x25B6; Continue Draft','#10b981',function(){showScreen('main');showTab('draft');});
     html += makeWelcomeBtn('&#x1F464; My Team So Far','#1f6feb',function(){showScreen('main');showTab('myteam');});
-    html += makeWelcomeBtn('&#x1F504; Start New Draft','#21262d',function(){confirmNewDraft();});
+    if(CLOUD.isAdmin) html += makeWelcomeBtn('&#x1F504; Start New Draft','#21262d',function(){confirmNewDraft();});
     if(S.currentGW>=38) html += makeWelcomeBtn('&#x1F3C6; Season Summary','#f59e0b',function(){renderSeasonSummary();});
     html += makeWelcomeBtn('&#x2699; Settings','#30363d',function(){showScreen('main');showTab('settings');});
   } else if(hasDraft){
@@ -5162,11 +5194,11 @@ function renderWelcomeScreen(){
     html += makeWelcomeBtn('&#x1F3AF; Set Up Draft','#10b981',function(){showDraftSetup();});
     html += makeWelcomeBtn('&#x1F50D; Browse Players','#10b981',function(){browseLoadedPlayers();});
     html += makeWelcomeBtn('&#x2B07; Reload Players','#30363d',function(){showScreen('setup');});
-    html += makeWelcomeBtn('&#x2B06; Restore Backup','#30363d',function(){importBackup();});
+    if(CLOUD.isAdmin) html += makeWelcomeBtn('&#x2B06; Restore Backup','#30363d',function(){importBackup();});
   } else {
     // Completely fresh - no players loaded yet
     html += makeWelcomeBtn('&#x2B07; Download Players','#10b981',function(){showScreen('setup');});
-    html += makeWelcomeBtn('&#x2B06; Restore Backup','#30363d',function(){importBackup();});
+    if(CLOUD.isAdmin) html += makeWelcomeBtn('&#x2B06; Restore Backup','#30363d',function(){importBackup();});
   }
 
   // Always show settings access
