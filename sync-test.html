@@ -401,7 +401,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-09-21.4";
+const APP_VERSION = "2026-09-21.5";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -530,14 +530,19 @@ function fbBoot(){
       if(val && val.ownerName){
         CLOUD.ownerName=val.ownerName;
         CLOUD.isAdmin=(val.ownerName==="__admin__");
-        // A claimed friend device's "My Team" identity must always match the name
-        // admin assigned it to in Firebase - that assignment is the one authoritative
-        // source of who this specific phone belongs to. Without this, S.myName only
-        // ever comes from the local draft-setup screen, which can be blank, or later
-        // get silently overwritten by an admin's own cfg landing via sync (see the
-        // matching guard in fbApplyRemote below).
-        if(!CLOUD.isAdmin && S.myName!==CLOUD.ownerName){
-          S.myName=CLOUD.ownerName;
+        // A claimed device's "My Team" identity must always match who admin says this
+        // phone belongs to - that assignment is the one authoritative source, not
+        // whatever's sitting in local storage (which could be blank, or get silently
+        // overwritten by another device's cfg landing via sync - see the matching guard
+        // in fbApplyRemote below). For a normal friend, ownerName IS their name. For an
+        // admin, ownerName has to stay the literal "__admin__" (that's what grants admin
+        // rights), so a second/co-admin's real name goes in an optional separate
+        // "displayName" field instead, e.g. {"ownerName":"__admin__","displayName":"Gareth"}.
+        // Without this, promoting someone straight to admin (without ever linking them as
+        // a named friend first) leaves their device with no team identity at all.
+        var personName = val.displayName || (!CLOUD.isAdmin ? val.ownerName : null);
+        if(personName && S.myName!==personName){
+          S.myName=personName;
           sv("cfg",{apiKey:S.apiKey,myName:S.myName,draftOrder:S.draftOrder,clubMax:S.clubMax,defaultTab:S.defaultTab,hideDraft:S.hideDraft,draftDone:S.draftDone});
         }
       }
