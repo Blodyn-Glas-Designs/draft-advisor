@@ -401,7 +401,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-09-21.3";
+const APP_VERSION = "2026-09-21.4";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -506,7 +506,7 @@ var CLOUD = {uid:null, ownerName:null, isAdmin:false, ready:false, applyingRemot
 var _fbListenersStarted=false;
 
 function fbBoot(){
-  if(typeof firebase==="undefined") return; // SDK didn't load (e.g. offline) - stay local-only
+  if(typeof firebase==="undefined"){ enterFullApp(); return; } // SDK didn't load (e.g. offline) - stay local-only
   try{ firebase.initializeApp(FB_CONFIG); }catch(e){ /* already initialized, fine */ }
   // Explicitly force LOCAL persistence for the anonymous sign-in. Some Safari versions don't
   // reliably keep the SDK's own default persistence choice across a plain page reload -
@@ -524,7 +524,7 @@ function fbBoot(){
       return;
     }
     CLOUD.uid=user.uid;
-    refreshSettingsIfActive(); // Device ID is now known - show it if Settings happens to be open
+    updateUnlinkedDeviceId(); // show the ID as soon as it's known, even before link status resolves
     firebase.database().ref("league/assignments/"+CLOUD.uid).once("value").then(function(snap){
       var val=snap.val();
       if(val && val.ownerName){
@@ -539,35 +539,85 @@ function fbBoot(){
         if(!CLOUD.isAdmin && S.myName!==CLOUD.ownerName){
           S.myName=CLOUD.ownerName;
           sv("cfg",{apiKey:S.apiKey,myName:S.myName,draftOrder:S.draftOrder,clubMax:S.clubMax,defaultTab:S.defaultTab,hideDraft:S.hideDraft,draftDone:S.draftDone});
-          if(typeof renderWelcomeScreen==="function") renderWelcomeScreen();
-          var activeBtn=document.querySelector(".nav-btn.active");
-          var tabId=activeBtn && activeBtn.getAttribute("data-tab");
-          if(tabId==="myteam" && typeof renderMyTeamTab==="function") renderMyTeamTab();
         }
       }
       CLOUD.ready=true;
-      fbStartListening();
-      fbPushAllLocalDataIfNeeded();
-      updateDraftNavVisibility(); // Draft tab visibility depends on CLOUD.isAdmin, now known
-      refreshSettingsIfActive(); // linked/admin status may have just changed
-      refreshWelcomeIfActive(); // welcome screen's button list also depends on CLOUD.isAdmin
-    }).catch(function(e){ console.log("fb role lookup failed",e); });
+      if(CLOUD.isAdmin || CLOUD.ownerName){
+        // Linked (as admin or a named friend) - safe to read the shared league data and
+        // open the real app.
+        fbStartListening();
+        fbPushAllLocalDataIfNeeded();
+        updateDraftNavVisibility();
+        enterFullApp();
+      } else {
+        // Not linked yet - deliberately never call fbStartListening() here, so an unclaimed
+        // device never reads league/data at all, even though it's authenticated. All it
+        // gets is its own Device ID, until the admin links it and it's reloaded.
+        showUnlinkedScreen();
+      }
+    }).catch(function(e){
+      console.log("fb role lookup failed",e);
+      // Couldn't determine link status (offline, etc.) - fail open to the local app rather
+      // than stranding the user on a connecting screen forever.
+      enterFullApp();
+    });
   });
 }
 
-// Re-renders the Settings tab in place if it's the one currently on screen - used so the
-// Cloud Sync status/Device ID there stays accurate as fbBoot's async steps resolve, without
-// needing a manual reload.
-function refreshSettingsIfActive(){
-  var activeBtn=document.querySelector(".nav-btn.active");
-  var tabId=activeBtn && activeBtn.getAttribute("data-tab");
-  if(tabId==="settings" && typeof renderSettingsTab==="function") renderSettingsTab();
+// ── LINK-GATE SCREENS (SYNC TEST BUILD) ──────────────────────────────────────────
+// Between passing the passcode and knowing whether this device is linked, the user sees
+// a brief "Connecting" screen, then either the real app (linked) or a Device-ID-only
+// screen (not linked yet). None of the real league data is ever rendered, and
+// fbStartListening() is never called, until link status is confirmed.
+function showConnectingScreen(){
+  if(document.getElementById("connecting-screen")) return;
+  var div=document.createElement("div");
+  div.id="connecting-screen";
+  div.style.cssText="position:fixed;inset:0;z-index:9997;background:#0d1117;display:flex;align-items:center;justify-content:center;padding:20px;";
+  div.innerHTML='<div style="color:#8b949e;font-size:14px;">Connecting...</div>';
+  document.body.appendChild(div);
 }
-// Same idea for the welcome screen - its button list (Start New Draft, Restore Backup, etc)
-// depends on CLOUD.isAdmin, which isn't known on the very first render.
-function refreshWelcomeIfActive(){
-  var el=document.getElementById("welcome-screen");
-  if(el && el.classList.contains("active") && typeof renderWelcomeScreen==="function") renderWelcomeScreen();
+function removeConnectingScreen(){
+  var el=document.getElementById("connecting-screen");
+  if(el) el.remove();
+}
+function removeUnlinkedScreen(){
+  var el=document.getElementById("unlinked-screen");
+  if(el) el.remove();
+}
+function showUnlinkedScreen(){
+  removeConnectingScreen();
+  if(document.getElementById("unlinked-screen")){ updateUnlinkedDeviceId(); return; }
+  var div=document.createElement("div");
+  div.id="unlinked-screen";
+  div.style.cssText="position:fixed;inset:0;z-index:9997;background:#0d1117;display:flex;align-items:center;justify-content:center;padding:20px;";
+  div.innerHTML='<div style="max-width:340px;width:100%;text-align:center;">'+
+    '<div style="font-family:Bangers,cursive;font-size:26px;letter-spacing:2px;color:#10b981;margin-bottom:6px;">Draft Advisor</div>'+
+    '<div style="color:#8b949e;font-size:13px;margin-bottom:16px;">This device isn\'t linked to a team yet. Send the ID below to the league admin, then reload once they\'ve added it.</div>'+
+    '<label class="lbl" style="margin-top:0;">Your Device ID</label>'+
+    '<div style="display:flex;gap:8px;align-items:center;margin-bottom:14px;">'+
+    '<input class="inp" id="unlinked-deviceid" readonly value="'+(CLOUD.uid||"")+'" style="margin:0;font-size:11px;" onclick="this.select();">'+
+    '<button class="btn btn-gray" style="width:auto;padding:9px 14px;margin:0;flex-shrink:0;" onclick="copyDeviceId(\'unlinked-deviceid\')">Copy</button>'+
+    '</div>'+
+    '<button class="btn btn-blue" onclick="location.reload()">&#x1F504; I\'ve been added - Reload</button>'+
+    '</div>';
+  document.body.appendChild(div);
+}
+// Fills in the Device ID on the unlinked screen once it's known - CLOUD.uid is set slightly
+// before link status resolves, so this can run first if that screen is already showing.
+function updateUnlinkedDeviceId(){
+  var el=document.getElementById("unlinked-deviceid");
+  if(el && CLOUD.uid) el.value=CLOUD.uid;
+}
+// The one place that actually reveals the real app - called once we know this device is
+// either admin or a linked friend (or Firebase couldn't be reached at all, in which case
+// we fail open to the local-only app rather than stranding the user).
+function enterFullApp(){
+  removeConnectingScreen();
+  removeUnlinkedScreen();
+  if(S.apiKey){ var ak=document.getElementById("setup-apikey"); if(ak) ak.value=S.apiKey; }
+  renderWelcomeScreen();
+  showScreen("welcome");
 }
 
 // One-time only: the very first time THIS device is recognised as admin, push everything
@@ -3604,16 +3654,16 @@ function saveSettings(){
   showToast("Settings saved");
   renderTopBar();
 }
-function copyDeviceId(){
+function copyDeviceId(elId){
   if(!CLOUD.uid){ showToast("Not connected yet - try again in a moment."); return; }
   if(navigator.clipboard && navigator.clipboard.writeText){
-    navigator.clipboard.writeText(CLOUD.uid).then(function(){ showToast("Device ID copied!"); }).catch(function(){ fallbackCopyDeviceId(); });
+    navigator.clipboard.writeText(CLOUD.uid).then(function(){ showToast("Device ID copied!"); }).catch(function(){ fallbackCopyDeviceId(elId); });
   } else {
-    fallbackCopyDeviceId();
+    fallbackCopyDeviceId(elId);
   }
 }
-function fallbackCopyDeviceId(){
-  var el=document.getElementById("s-deviceid");
+function fallbackCopyDeviceId(elId){
+  var el=document.getElementById(elId||"s-deviceid");
   if(!el){ showToast("Could not copy - long-press the ID above to select it."); return; }
   el.select(); el.setSelectionRange(0,99999);
   try{ document.execCommand("copy"); showToast("Device ID copied!"); }
@@ -5269,15 +5319,13 @@ function showGateScreen(){
 // ── BOOT ───────────────────────────────────────────────────────────────────────
 function startApp(){
   loadAll();
-  if(S.apiKey){ var ak=document.getElementById("setup-apikey"); if(ak) ak.value=S.apiKey; }
-  // Tab visibility
+  // Tab visibility (safe to compute now - it only touches nav buttons, no real data shown yet)
   updateDraftNavVisibility();
-  // Always show welcome screen first
-  renderWelcomeScreen();
-  showScreen("welcome");
-  // Cloud sync boot (SYNC TEST BUILD) - entirely async, never blocks or delays the local
-  // boot/render above. If it fails for any reason the app has already fully loaded locally.
-  try{ fbBoot(); }catch(e){ console.log("fbBoot failed",e); }
+  // The real app (welcome screen included) does NOT render yet - an unlinked device must
+  // never see any of it, only its own Device ID. enterFullApp()/showUnlinkedScreen() in
+  // fbBoot decide which one actually appears, once link status is known.
+  showConnectingScreen();
+  try{ fbBoot(); }catch(e){ console.log("fbBoot failed",e); enterFullApp(); }
 }
 document.addEventListener("DOMContentLoaded",function(){
   if(!gatePassed()){ showGateScreen(); return; }
