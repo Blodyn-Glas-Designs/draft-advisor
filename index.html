@@ -14,6 +14,11 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Bangers&family=Rajdhani:wght@600;700&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<!-- Cloud sync (SYNC TEST BUILD ONLY) - if any of these three fail to load (e.g. no
+     internet), the app below detects that and simply runs local-only, exactly as before. -->
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js"></script>
 <style>
 
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;}
@@ -391,34 +396,12 @@ label.lbl{display:block;color:#8b5cf6;font-size:11px;text-transform:uppercase;le
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 // ── CONSTANTS ─────────────────────────────────────────────────────────────────
 const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-09-17.1";
+const APP_VERSION = "2026-10-10.2";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -490,14 +473,341 @@ var welcomeNeonColors = [
 
 
 // ── PERSISTENCE ────────────────────────────────────────────────────────────────
-function sv(k,v){try{localStorage.setItem(DB+k,JSON.stringify(v));}catch(e){}}
+function _origSv(k,v){try{localStorage.setItem(DB+k,JSON.stringify(v));}catch(e){}}
 function ld(k,d){try{var v=localStorage.getItem(DB+k);return v!==null?JSON.parse(v):d;}catch(e){return d;}}
+
+// ── CLOUD SYNC (SYNC TEST BUILD) ────────────────────────────────────────────────
+// Adds optional shared/multi-device sync on top of localStorage, without changing it.
+// Every save still goes to localStorage first, unconditionally, exactly as it always has
+// (_origSv, above, is byte-for-byte the original sv()) - the cloud mirror below is purely
+// additive. If Firebase fails to load, this device hasn't been "claimed" by any friend, or
+// the network is down, every cloud call below just quietly no-ops and the app behaves
+// exactly as it does today, fully local-only. Nothing about the existing local-first
+// behaviour has been removed.
+var FB_CONFIG = {
+  apiKey: "AIzaSyDNlKHRH-LO9QnUVlpyd-ZfkGFt0XbXJ7w",
+  authDomain: "draft-advisor-e8a94.firebaseapp.com",
+  databaseURL: "https://draft-advisor-e8a94-default-rtdb.europe-west1.firebasedatabase.app",
+  projectId: "draft-advisor-e8a94",
+  storageBucket: "draft-advisor-e8a94.firebasestorage.app",
+  messagingSenderId: "694204833214",
+  appId: "1:694204833214:web:beea7b2ff3ff2c3e4c6def"
+};
+// Keys where each friend owns/writes only their OWN slice, keyed by owner name. Everything
+// else (scores, player pool, cups, etc) is admin-only and read-only for friends - matches
+// the Firebase security rules exactly, so a friend's device never even attempts a write
+// that the rules would reject anyway.
+// NOTE: captainMonths and wildcardSubs are deliberately NOT here - a friend's captain/sub
+// choice now goes into a holding pen (pendingCaptains/pendingWildcardSubs) instead of
+// applying directly. Only admin ever writes the real captainMonths/wildcardSubs data (on
+// approval), which is unrestricted for admin regardless of this list.
+var FB_OWNER_SPLIT_KEYS = {teams:true, pendingCaptains:true, pendingWildcardSubs:true};
+var CLOUD = {uid:null, ownerName:null, isAdmin:false, ready:false, applyingRemote:false};
+var _fbListenersStarted=false;
+
+function fbBoot(){
+  if(typeof firebase==="undefined"){ enterFullApp(); return; } // SDK didn't load (e.g. offline) - stay local-only
+  try{ firebase.initializeApp(FB_CONFIG); }catch(e){ /* already initialized, fine */ }
+  // Explicitly force LOCAL persistence for the anonymous sign-in. Some Safari versions don't
+  // reliably keep the SDK's own default persistence choice across a plain page reload -
+  // without this, a device can silently get signed in as a brand new anonymous identity every
+  // single reload, which looks exactly like "nothing ever syncs" even though everything else
+  // (the assignment, the security rules, the push logic) is working correctly.
+  try{
+    firebase.auth().setPersistence(firebase.auth.Auth.Persistence.LOCAL).catch(function(e){
+      console.log("fb setPersistence failed - continuing anyway",e);
+    });
+  }catch(e){ console.log("fb setPersistence threw",e); }
+  firebase.auth().onAuthStateChanged(function(user){
+    if(!user){
+      firebase.auth().signInAnonymously().catch(function(e){ console.log("fb sign-in failed",e); });
+      return;
+    }
+    CLOUD.uid=user.uid;
+    updateUnlinkedDeviceId(); // show the ID as soon as it's known, even before link status resolves
+    firebase.database().ref("league/assignments/"+CLOUD.uid).once("value").then(function(snap){
+      var val=snap.val();
+      if(val && val.ownerName){
+        CLOUD.ownerName=val.ownerName;
+        CLOUD.isAdmin=(val.ownerName==="__admin__");
+        // A claimed device's "My Team" identity must always match who admin says this
+        // phone belongs to - that assignment is the one authoritative source, not
+        // whatever's sitting in local storage (which could be blank, or get silently
+        // overwritten by another device's cfg landing via sync - see the matching guard
+        // in fbApplyRemote below). For a normal friend, ownerName IS their name. For an
+        // admin, ownerName has to stay the literal "__admin__" (that's what grants admin
+        // rights), so a second/co-admin's real name goes in an optional separate
+        // "displayName" field instead, e.g. {"ownerName":"__admin__","displayName":"Gareth"}.
+        // Without this, promoting someone straight to admin (without ever linking them as
+        // a named friend first) leaves their device with no team identity at all.
+        var personName = val.displayName || (!CLOUD.isAdmin ? val.ownerName : null);
+        if(personName && S.myName!==personName){
+          S.myName=personName;
+          sv("cfg",{apiKey:S.apiKey,myName:S.myName,draftOrder:S.draftOrder,clubMax:S.clubMax,defaultTab:S.defaultTab,hideDraft:S.hideDraft,draftDone:S.draftDone});
+        }
+      }
+      CLOUD.ready=true;
+      if(CLOUD.isAdmin || CLOUD.ownerName){
+        // Linked (as admin or a named friend) - safe to read the shared league data and
+        // open the real app.
+        fbStartListening();
+        fbPushAllLocalDataIfNeeded();
+        updateDraftNavVisibility();
+        enterFullApp();
+      } else {
+        // Not linked yet - deliberately never call fbStartListening() here, so an unclaimed
+        // device never reads league/data at all, even though it's authenticated. All it
+        // gets is its own Device ID, until the admin links it and it's reloaded.
+        showUnlinkedScreen();
+      }
+    }).catch(function(e){
+      console.log("fb role lookup failed",e);
+      // Couldn't determine link status (offline, etc.) - fail open to the local app rather
+      // than stranding the user on a connecting screen forever.
+      enterFullApp();
+    });
+  });
+}
+
+// ── LINK-GATE SCREENS (SYNC TEST BUILD) ──────────────────────────────────────────
+// Between passing the passcode and knowing whether this device is linked, the user sees
+// a brief "Connecting" screen, then either the real app (linked) or a Device-ID-only
+// screen (not linked yet). None of the real league data is ever rendered, and
+// fbStartListening() is never called, until link status is confirmed.
+function showConnectingScreen(){
+  if(document.getElementById("connecting-screen")) return;
+  var div=document.createElement("div");
+  div.id="connecting-screen";
+  div.style.cssText="position:fixed;inset:0;z-index:9997;background:#0d1117;display:flex;align-items:center;justify-content:center;padding:20px;";
+  div.innerHTML='<div style="color:#8b949e;font-size:14px;">Connecting...</div>';
+  document.body.appendChild(div);
+}
+function removeConnectingScreen(){
+  var el=document.getElementById("connecting-screen");
+  if(el) el.remove();
+}
+function removeUnlinkedScreen(){
+  var el=document.getElementById("unlinked-screen");
+  if(el) el.remove();
+}
+function showUnlinkedScreen(){
+  removeConnectingScreen();
+  if(document.getElementById("unlinked-screen")){ updateUnlinkedDeviceId(); return; }
+  var div=document.createElement("div");
+  div.id="unlinked-screen";
+  div.style.cssText="position:fixed;inset:0;z-index:9997;background:#0d1117;display:flex;align-items:center;justify-content:center;padding:20px;";
+  div.innerHTML='<div style="max-width:340px;width:100%;text-align:center;">'+
+    '<div style="font-family:Bangers,cursive;font-size:26px;letter-spacing:2px;color:#10b981;margin-bottom:6px;">Draft Advisor</div>'+
+    '<div style="color:#8b949e;font-size:13px;margin-bottom:16px;">This device isn\'t linked to a team yet. Send the ID below to the league admin, then reload once they\'ve added it.</div>'+
+    '<label class="lbl" style="margin-top:0;">Your Device ID</label>'+
+    '<div style="display:flex;gap:8px;align-items:center;margin-bottom:14px;">'+
+    '<input class="inp" id="unlinked-deviceid" readonly value="'+(CLOUD.uid||"")+'" style="margin:0;font-size:11px;" onclick="this.select();">'+
+    '<button class="btn btn-gray" style="width:auto;padding:9px 14px;margin:0;flex-shrink:0;" onclick="copyDeviceId(\'unlinked-deviceid\')">Copy</button>'+
+    '</div>'+
+    '<button class="btn btn-blue" onclick="location.reload()">&#x1F504; I\'ve been added - Reload</button>'+
+    '</div>';
+  document.body.appendChild(div);
+}
+// Fills in the Device ID on the unlinked screen once it's known - CLOUD.uid is set slightly
+// before link status resolves, so this can run first if that screen is already showing.
+function updateUnlinkedDeviceId(){
+  var el=document.getElementById("unlinked-deviceid");
+  if(el && CLOUD.uid) el.value=CLOUD.uid;
+}
+// The one place that actually reveals the real app - called once we know this device is
+// either admin or a linked friend (or Firebase couldn't be reached at all, in which case
+// we fail open to the local-only app rather than stranding the user).
+function enterFullApp(){
+  removeConnectingScreen();
+  removeUnlinkedScreen();
+  if(S.apiKey){ var ak=document.getElementById("setup-apikey"); if(ak) ak.value=S.apiKey; }
+  renderWelcomeScreen();
+  showScreen("welcome");
+}
+
+// One-time only: the very first time THIS device is recognised as admin, push everything
+// already sitting in local storage up to the cloud. Without this, a brand-new admin device
+// only ever mirrors data going forward (the next captain change, score refresh, etc) and a
+// whole season already saved locally would otherwise never appear in Firebase at all. Guarded
+// by a local-only flag so it only ever runs once per device, not on every single page load.
+function fbPushAllLocalDataIfNeeded(){
+  // Bypasses the fbMirrorWrite wrapper so each write's real completion can be tracked via its
+  // own promise, rather than firing-and-forgetting like the normal mirror path does. Results go
+  // to the console only now (not an on-screen alert) - confirmed working, and a friend/unclaimed
+  // device hitting this every boot should never see anything pop up.
+  if(!CLOUD.isAdmin){
+    console.log("fb push skipped - not recognised as admin");
+    return;
+  }
+  var db=firebase.database();
+  // PULL-FIRST SAFETY: with more than one admin device and a season already live in the cloud,
+  // blindly pushing whatever happens to be in THIS device's local storage on every open is
+  // dangerous - a device with stale, partial or empty local data (a freshly promoted admin, an
+  // old browser profile) would overwrite the real season with it. So the bulk push now only
+  // happens to SEED an empty cloud (first-ever setup, or deliberate disaster recovery after
+  // clearing league/data). Once the cloud has data it is the source of truth: this device just
+  // receives it via the listener, and individual changes still mirror up as they're made.
+  db.ref("league/data/cfg").once("value").then(function(seedSnap){
+    if(seedSnap.exists()){
+      console.log("fb bulk push skipped - cloud already seeded, cloud is the source of truth");
+      return;
+    }
+    var keys=[];
+    Object.keys(localStorage).forEach(function(fullKey){
+      if(fullKey.indexOf(DB)!==0) return;
+      keys.push(fullKey.slice(DB.length));
+    });
+    var ok=0, fail=0, firstError=null;
+    var promises=keys.map(function(k){
+      var v=ld(k,undefined);
+      if(v===undefined) return Promise.resolve();
+      return db.ref("league/data/"+k).set(fbSanitizeForCloud(v)).then(function(){
+        ok++;
+      }).catch(function(e){
+        fail++;
+        if(!firstError) firstError=k+": "+e.message;
+        console.log("fb push failed for key",k,e);
+      });
+    });
+    return Promise.all(promises).then(function(){
+      var msg="Cloud seed push: "+ok+" ok, "+fail+" failed"+(firstError?" - "+firstError:"");
+      console.log(msg);
+    });
+  }).catch(function(e){ console.log("fb seed check failed - not pushing anything",e); });
+}
+
+// Firebase Realtime Database forbids ".", "$", "#", "[", "]", "/" inside object keys - but
+// this app freely uses "PlayerName|Club" as a literal object key in several places (pickedMap,
+// scores, scoreOverrides, thirdSubPicks, and the postDraftSnapshot copies of these), and a
+// player name containing e.g. a period ("B. Fernandez") breaks that instantly. Rather than
+// hunting down and special-casing every field that happens to use this pattern, every value
+// gets recursively re-keyed on the way out (and reversed on the way back in) so ANY object key,
+// anywhere in the tree, is always safe to write - "~" is escaped too so the encoding round-trips
+// exactly even if a name genuinely contains a literal tilde.
+function fbEncodeKey(k){
+  return String(k).replace(/[.$#\[\]\/~]/g,function(ch){
+    return "~"+ch.charCodeAt(0).toString(16).toUpperCase();
+  });
+}
+function fbDecodeKey(k){
+  return String(k).replace(/~([0-9A-F]{2})/g,function(_,hex){
+    return String.fromCharCode(parseInt(hex,16));
+  });
+}
+function fbSanitizeForCloud(v){
+  if(v===null||typeof v!=="object") return v;
+  if(Array.isArray(v)) return v.map(fbSanitizeForCloud);
+  var out={};
+  Object.keys(v).forEach(function(origKey){ out[fbEncodeKey(origKey)]=fbSanitizeForCloud(v[origKey]); });
+  return out;
+}
+function fbUnsanitizeFromCloud(v){
+  if(v===null||typeof v!=="object") return v;
+  if(Array.isArray(v)) return v.map(fbUnsanitizeFromCloud);
+  var out={};
+  Object.keys(v).forEach(function(origKey){ out[fbDecodeKey(origKey)]=fbUnsanitizeFromCloud(v[origKey]); });
+  return out;
+}
+
+// The single choke point deciding what (if anything) gets mirrored to the cloud for a given
+// local save. Mirrors the deployed security rules exactly: admin mirrors everything
+// unrestricted; a claimed friend mirrors only their own slice of the few keys they're
+// allowed to touch (teams/captainMonths/wildcardSubs - i.e. captain picks + subs); an
+// unclaimed device never writes to the cloud at all.
+function fbMirrorWrite(k,v){
+  if(!CLOUD.ready || !CLOUD.uid || CLOUD.applyingRemote) return;
+  var db=firebase.database();
+  if(CLOUD.isAdmin){
+    db.ref("league/data/"+k).set(v===undefined?null:fbSanitizeForCloud(v)).catch(function(e){ console.log("fb admin write failed",k,e); });
+    return;
+  }
+  if(!CLOUD.ownerName) return; // device not yet claimed by any friend
+  if(FB_OWNER_SPLIT_KEYS[k]){
+    var slice=(v && v[CLOUD.ownerName]!==undefined) ? v[CLOUD.ownerName] : null;
+    db.ref("league/data/"+k+"/"+CLOUD.ownerName).set(fbSanitizeForCloud(slice)).catch(function(e){ console.log("fb friend write failed",k,e); });
+  }
+  // any other key: friends have no write path for it (and no need for one) - skipped.
+}
+
+function fbStartListening(){
+  if(_fbListenersStarted || !CLOUD.ready || !CLOUD.uid) return;
+  _fbListenersStarted=true;
+  // Anyone signed in (admin or a claimed friend) can read the whole shared tree - this is
+  // how a friend sees admin's score refreshes, and how admin sees a captain pick or wildcard
+  // sub a friend just made on their own phone.
+  firebase.database().ref("league/data").on("value", function(snap){
+    var remote=snap.val();
+    if(!remote) return; // nothing uploaded to the cloud yet - never overwrite local data
+    fbApplyRemote(remote);
+  }, function(e){ console.log("fb listen failed",e); });
+}
+
+// Applies an incoming remote snapshot to localStorage + in-memory state, without echoing it
+// straight back to the cloud. Only touches a key if the incoming value actually differs from
+// what's already stored locally, so this is safe to call on every remote update and never
+// fights with a save that's mid-flight on this device.
+function fbApplyRemote(remote){
+  CLOUD.applyingRemote=true;
+  try{
+    Object.keys(remote).forEach(function(k){
+      var incoming=fbUnsanitizeFromCloud(remote[k]);
+      var current=ld(k,undefined);
+      if(k==="cfg" && incoming && typeof incoming==="object"){
+        // myName/apiKey identify WHICH PERSON this device belongs to - that must never
+        // be replaced by whatever another device (e.g. admin's own phone) last pushed,
+        // or a friend's "My Team" tab ends up showing someone else's team. Everything
+        // else in cfg (draftOrder, clubMax, hideDraft, draftDone) is genuinely shared
+        // league-wide state and should still sync normally.
+        var currentCfg=current||{};
+        incoming.myName=currentCfg.myName||"";
+        incoming.apiKey=currentCfg.apiKey||"";
+      }
+      if(JSON.stringify(incoming)===JSON.stringify(current)) return;
+      _origSv(k,incoming);
+    });
+    loadAll();
+    updateDraftNavVisibility();
+    // If this device is still sitting on the welcome screen (e.g. a brand-new, unclaimed
+    // device that just had a friend's/admin's real data quietly arrive for the first time),
+    // refresh it too - otherwise it'd be stuck showing "Download Players" even though real
+    // data just landed locally, until the person manually reloads the page.
+    var welcomeEl=document.getElementById("welcome-screen");
+    if(welcomeEl && welcomeEl.classList.contains("active") && typeof renderWelcomeScreen==="function"){
+      renderWelcomeScreen();
+    }
+    var activeBtn=document.querySelector(".nav-btn.active");
+    var tabId=activeBtn && activeBtn.getAttribute("data-tab");
+    var renderFn={
+      draft:(typeof renderDraftTab==="function")?renderDraftTab:null,
+      myteam:(typeof renderMyTeamTab==="function")?renderMyTeamTab:null,
+      friends:(typeof renderFriendsTab==="function")?renderFriendsTab:null,
+      league:(typeof renderLeagueTab==="function")?renderLeagueTab:null,
+      advice:(typeof renderAdviceTab==="function")?renderAdviceTab:null,
+      settings:(typeof renderSettingsTab==="function")?renderSettingsTab:null,
+      pool:(typeof renderPoolTab==="function")?renderPoolTab:null,
+      stats:(typeof renderStatsTab==="function")?renderStatsTab:null,
+      cup:(typeof renderCupTab==="function")?renderCupTab:null,
+      rules:(typeof renderRulesTab==="function")?renderRulesTab:null,
+      thirdsub:(typeof renderThirdSubTab==="function")?renderThirdSubTab:null
+    }[tabId];
+    if(renderFn) renderFn();
+  } finally {
+    CLOUD.applyingRemote=false;
+  }
+}
+
+function sv(k,v){
+  _origSv(k,v);        // localStorage save happens first, exactly as before - untouched
+  fbMirrorWrite(k,v);   // cloud mirror is purely additive, never blocks or replaces this
+}
+
 function saveAll(){
   sv("cfg",{apiKey:S.apiKey,myName:S.myName,draftOrder:S.draftOrder,clubMax:S.clubMax,defaultTab:S.defaultTab,hideDraft:S.hideDraft,draftDone:S.draftDone});
   sv("pool",S.playerPool); sv("picked",S.pickedMap); sv("teams",S.teams);
   sv("snake",{snakeOrder:S.snakeOrder,pickIdx:S.pickIdx});
   sv("captains",S.captains); sv("captainHistory",S.captainHistory); sv("wildcards",S.wildcardSubs);
   sv("captainMonths",S.captainMonths); sv("gwMonthMap",S.gwMonthMap);
+  sv("pendingCaptains",S.pendingCaptains); sv("pendingWildcardSubs",S.pendingWildcardSubs);
   sv("scores",S.scores); sv("scoresFetched",S.scoresFetched); sv("scoreOverrides",S.scoreOverrides);
   sv("meta",{lastRefreshed:S.lastRefreshed,currentGW:S.currentGW});
   sv("cups",S.cups);
@@ -515,6 +825,7 @@ function loadAll(){
   var sn=ld("snake",{}); S.snakeOrder=sn.snakeOrder||[]; S.pickIdx=sn.pickIdx||0;
   S.captains=ld("captains",{}); S.captainHistory=ld("captainHistory",{}); S.wildcardSubs=ld("wildcards",{});
   S.captainMonths=ld("captainMonths",{}); S.gwMonthMap=ld("gwMonthMap",{});
+  S.pendingCaptains=ld("pendingCaptains",{}); S.pendingWildcardSubs=ld("pendingWildcardSubs",{});
   // One-off repair, confirmed with James: Gareth's Odegaard-for-Sarr wildcard sub was made
   // in the gap between GW2 and GW3 (after GW2 had already been played), but got stamped
   // gameweek:2 by the off-by-one bug described at nextEffectiveWildcardGW() below - which
@@ -890,7 +1201,7 @@ function askClubListConfirmation(clubs){
     var loadWrap = document.querySelector("#loading-screen > div");
     if(loadWrap) loadWrap.style.alignItems = "flex-start";
     document.getElementById("load-title").textContent = "Confirm Premier League Clubs";
-    document.getElementById("load-subtitle").textContent = "Pulled from the official FPL API. This can lag behind real promotion/relegation results for weeks during the close season \u2014 please confirm these 20 clubs are correct.";
+    document.getElementById("load-subtitle").textContent = "Pulled from the official FPL API. This can lag behind real promotion/relegation results for weeks during the close season — please confirm these 20 clubs are correct.";
     document.getElementById("load-bar").style.width = "100%";
     document.getElementById("load-pct").textContent = "";
     document.getElementById("load-total").textContent = "";
@@ -931,7 +1242,7 @@ function askClubCorrections(clubs){
       CHAMPIONSHIP_CLUBS_2025_26.map(function(c){
         return '<label style="display:flex;align-items:center;gap:8px;padding:6px 4px;font-size:13px;color:#f0f6fc;"><input type="checkbox" class="promo-cb" value="'+c.replace(/"/g,"&quot;")+'"> '+c+'</label>';
       }).join("")+
-      '<label class="lbl">Other promoted club not listed above \u2014 one per line</label>'+
+      '<label class="lbl">Other promoted club not listed above — one per line</label>'+
       '<textarea class="inp" id="promo-other-input" rows="2" style="font-family:monospace;font-size:13px;" placeholder="e.g. Luton Town"></textarea>'+
       '</div>';
     document.getElementById("load-errors").innerHTML =
@@ -1065,7 +1376,7 @@ async function loadAllPlayers(){
       throw new Error("FPL API returned too few players ("+(fplPool?fplPool.length:0)+")");
     }catch(fplErr){
       console.warn("FPL API load failed, falling back to AI-search loading:", fplErr.message);
-      setLoadUI(8, "Official FPL data unavailable \u2014 continuing with backup method in a few seconds...",
+      setLoadUI(8, "Official FPL data unavailable — continuing with backup method in a few seconds...",
         {}, ["Why it failed: "+fplErr.message], 0, null);
       await new Promise(function(r){ setTimeout(r,3500); });
     }
@@ -1238,6 +1549,10 @@ function updateDraftNavVisibility(){
   document.querySelectorAll(".nav-btn[data-tab='stats']").forEach(function(b){b.style.display=S.draftDone?"":"none";});
   // Advice is only relevant while actively drafting - hide it once the draft is complete.
   document.querySelectorAll(".nav-btn[data-tab='advice']").forEach(function(b){b.style.display=S.draftDone?"none":"";});
+  // The Draft tab is an admin/management view (reviewing picks, running a fresh draft) - a
+  // friend never needs it, regardless of the admin's own "Draft Tab" Settings preference
+  // (hideDraft is a shared cfg value that would otherwise apply to every synced device).
+  document.querySelectorAll(".nav-btn[data-tab='draft']").forEach(function(b){b.style.display=(CLOUD.isAdmin && !S.hideDraft)?"":"none";});
 }
 
 function proceedToApp(){
@@ -1906,7 +2221,7 @@ function renderTopBar(){
   document.getElementById("topbar-info").textContent=info;
   var undoBtn=document.getElementById("undo-btn");
   undoBtn.style.display=(S.history.length>0&&!S.draftDone)?"block":"none";
-  document.querySelectorAll(".nav-btn[data-tab='draft']").forEach(function(b){b.style.display=S.hideDraft?"none":"";});
+  updateDraftNavVisibility();
   document.querySelectorAll(".nav-btn[data-tab='advice']").forEach(function(b){b.classList.toggle("my-turn",myT&&!S.draftDone&&!allDone);});
 }
 function checkAdviceBanner(){
@@ -2299,6 +2614,7 @@ function renderMyTeamTab(){
     var myReason=noCaptainReason(S.myName,vGW);
     html+='<div class="warn">&#x26A0;&#xFE0F; '+(myReason?myReason+" - choose a new captain":"No captain"+(isPastView?" as of GW"+vGW:""))+'!'+(isPastView?'':'<button class="btn btn-blue" style="margin-top:6px;padding:6px;" onclick="openMyCaptainModal()">Nominate</button>')+'</div>';
   }
+  html+=renderPendingCaptainBanner(S.myName)+renderPendingSubBanners(S.myName);
 
   html+=renderSquadSection(S.myName, vGW, capForVGW);
   html+="</div>";
@@ -2364,6 +2680,7 @@ function renderFriendDetail(el,name){
     var friendReason=noCaptainReason(name,vGW);
     html+='<div class="warn">&#x26A0;&#xFE0F; '+(friendReason?friendReason+" - choose a new captain":"No captain"+(isPastView?" as of GW"+vGW:""))+'!'+(isPastView?'':'<button class="btn btn-blue" style="margin-top:6px;padding:6px;" onclick="openCaptainModal(\''+safeName.replace(/'/g,"\\'")+'\')">Nominate</button>')+'</div>';
   }
+  html+=renderPendingCaptainBanner(name)+renderPendingSubBanners(name);
 
   html+=renderSquadSection(name, vGW, capForVGW);
   html+="</div>";
@@ -2385,9 +2702,40 @@ function friendGWFwd(){
 
 // ── CAPTAIN MODAL ──────────────────────────────────────────────────────────────
 function openMyCaptainModal(){ openCaptainModal(S.myName); }
+// An owner's picks in true draft order, as "Name|Club" keys. This is derived from each
+// player's own stored pickNumber (set at draft time, inherited by free pre-season
+// replacements) - NOT from the key order of S.pickedMap. Object key order does not survive a
+// round trip through Firebase Realtime Database (it hands objects back sorted alphabetically),
+// so once cloud sync went live the old "first key in pickedMap" approach quietly turned "first
+// pick" into "first alphabetically" - wrong Pick # labels, and the wrong player excluded by
+// the "can't be their first pick" captain rule. Players without a pickNumber (late joiners,
+// third-sub picks) go after, in pickedMap order, as a last-resort fallback.
+function ownerPicksInOrder(ownerName){
+  var team=S.teams[ownerName]||{};
+  var numbered=[], unnumbered=[];
+  ["GK","DEF","MID","ATT","WC"].forEach(function(pos){
+    (team[pos]||[]).forEach(function(p){
+      var key=p.name+"|"+p.club;
+      if(typeof p.pickNumber==="number") numbered.push({key:key,n:p.pickNumber});
+      else unnumbered.push(key);
+    });
+  });
+  numbered.sort(function(a,b){return a.n-b.n;});
+  var keys=numbered.map(function(x){return x.key;});
+  if(unnumbered.length){
+    // keep pickedMap's own order for the stragglers, only for keys actually owned by this person
+    Object.keys(S.pickedMap).forEach(function(k){
+      if(S.pickedMap[k]===ownerName && unnumbered.indexOf(k)!==-1 && keys.indexOf(k)===-1) keys.push(k);
+    });
+  }
+  if(!keys.length){
+    // no team data to go on at all - fall back to the legacy behaviour
+    keys=Object.keys(S.pickedMap).filter(function(k){return S.pickedMap[k]===ownerName;});
+  }
+  return keys;
+}
 function getPersonalPickOrder(ownerName, key){
-  var myPicks=Object.entries(S.pickedMap).filter(function(e){return e[1]===ownerName;}).map(function(e){return e[0];});
-  var idx=myPicks.indexOf(key);
+  var idx=ownerPicksInOrder(ownerName).indexOf(key);
   return idx>=0?idx+1:null;
 }
 function openCaptainModal(personName, month){
@@ -2405,11 +2753,12 @@ function openCaptainModal(personName, month){
   var team=S.teams[personName]||{};
   var existingForMonth=(S.captainMonths[personName]||[]).find(function(e){return e.month===month;});
   var isLateJoiner=!!(S.lateJoiners && S.lateJoiners[personName]);
-  var myPicks=Object.entries(S.pickedMap).filter(function(e){return e[1]===personName;}).map(function(e){return e[0];});
+  var myPicks=ownerPicksInOrder(personName);
   // Late joiners never had a genuine "first pick" - they were choosing from whatever was
   // left after everyone else already drafted, so the restriction doesn't apply to them.
   var firstPickKey=isLateJoiner?null:(myPicks[0]||null);
   var html='<h3>Nominate Captain for '+personName+'</h3>';
+  html+=renderPendingCaptainBanner(personName);
   html+='<label class="lbl">Month</label><select class="inp" id="cap-month-select" style="margin-bottom:12px;" onchange="openCaptainModal(\''+personName.replace(/'/g,"\\'")+'\',this.value)">'+
     months.map(function(m){return '<option value="'+m+'"'+(m===month?" selected":"")+'>'+monthLabel(m)+'</option>';}).join("")+
     '</select>';
@@ -2434,16 +2783,32 @@ function setCaptainForMonth(personName,month,pName,pClub){
   ["GK","DEF","MID","ATT"].forEach(function(pos){(team[pos]||[]).forEach(function(p){if(p.name===pName&&p.club===pClub)player=p;});});
   if(!player) return;
   var key=pName+"|"+pClub;
-  if(!S.captainMonths[personName]) S.captainMonths[personName]=[];
-  var existingForMonth=S.captainMonths[personName].find(function(e){return e.month===month;});
+  var existingForMonth=(S.captainMonths[personName]||[]).find(function(e){return e.month===month;});
   var alreadyThisPlayerThisMonth=existingForMonth&&existingForMonth.player.name===pName&&existingForMonth.player.club===pClub;
   var budget=getCaptainBudget(personName,key);
   if(!alreadyThisPlayerThisMonth && budget.remainingMonths<=0 && budget.hasEverBeenCaptain){
     showToast(pName+" has already used all 3 of their captain months.");
     return;
   }
+  if(!CLOUD.isAdmin){
+    // A friend's own device: this submits into a holding pen for admin sign-off rather than
+    // taking effect immediately - matches the monthly approval workflow. Admin (this device,
+    // or James acting directly) still applies changes immediately, exactly as before.
+    if(!CLOUD.ownerName){ showToast("Sign-in required to change a captain."); return; }
+    if(personName!==CLOUD.ownerName){ showToast("You can only nominate a captain for your own team."); return; }
+    S.pendingCaptains[personName]={player:player, month:month, submittedAt:new Date().toISOString(), status:"pending", rejectNote:null};
+    sv("pendingCaptains",S.pendingCaptains);
+    closeModal();
+    showToast(pName+" submitted as captain for "+monthLabel(month)+" - awaiting admin approval.");
+    renderMyTeamTab(); renderFriendsTab();
+    return;
+  }
+  if(!S.captainMonths[personName]) S.captainMonths[personName]=[];
   if(existingForMonth) existingForMonth.player=player;
   else S.captainMonths[personName].push({month:month, player:player});
+  // Clear any pending/rejected request for this person now admin has directly applied one -
+  // avoids the holding pen showing a stale item after a direct admin override.
+  if(S.pendingCaptains[personName]){ delete S.pendingCaptains[personName]; sv("pendingCaptains",S.pendingCaptains); }
   sv("captainMonths",S.captainMonths);
   closeModal(); checkCaptainBanner();
   showToast(pName+" nominated as captain for "+monthLabel(month)+".");
@@ -2457,6 +2822,7 @@ function openSubModal(personName,wcIdx){
   if(!wcPlayer) return;
   var wcPos=wcPlayer.position;
   var html='<h3>Sub In '+wcPlayer.name+'</h3><p style="color:#8b949e;font-size:13px;margin-bottom:14px;">Select a '+(wcPos||"matching-position")+' player to permanently replace. They will stop scoring from now.</p>';
+  html+=renderPendingSubBanners(personName);
   if(!wcPos || !["GK","DEF","MID","ATT"].includes(wcPos)){
     html+='<div class="warn">This player\'s position isn\'t confirmed yet. Resolve them first if they\'re a non-PL signing.</div>';
     showModal(html); return;
@@ -2505,12 +2871,141 @@ function executeSub(personName,wcIdx,outName,outClub,outPos,outIdx){
   var wcPlayer=(team.WC||[])[wcIdx];
   var outPlayer=(team[outPos]||[])[outIdx];
   if(!wcPlayer||!outPlayer){closeModal();return;}
+  if(!CLOUD.isAdmin){
+    // Friend's own device: submit into the holding pen - no time-window restriction here
+    // (unlike captains), a sub can be proposed at any point, it just waits for admin
+    // sign-off before it actually takes effect and starts scoring.
+    if(!CLOUD.ownerName){ showToast("Sign-in required to make a substitution."); return; }
+    if(personName!==CLOUD.ownerName){ showToast("You can only make subs for your own team."); return; }
+    if(!S.pendingWildcardSubs[personName]) S.pendingWildcardSubs[personName]=[];
+    var entry={inPlayer:wcPlayer,outPlayer:outPlayer,wcIdx:wcIdx,outPos:outPos,outIdx:outIdx,submittedAt:new Date().toISOString(),status:"pending",rejectNote:null};
+    var existingIdx=S.pendingWildcardSubs[personName].findIndex(function(e){return e.wcIdx===wcIdx;});
+    if(existingIdx>=0) S.pendingWildcardSubs[personName][existingIdx]=entry;
+    else S.pendingWildcardSubs[personName].push(entry);
+    sv("pendingWildcardSubs",S.pendingWildcardSubs);
+    closeModal();
+    showToast("Submitted: "+outPlayer.name+" → "+wcPlayer.name+" - awaiting admin approval.");
+    renderMyTeamTab();
+    if(viewingFriend===personName) renderFriendDetail(document.getElementById("tab-friends"),personName);
+    return;
+  }
   if(!S.wildcardSubs[personName]) S.wildcardSubs[personName]=[];
   S.wildcardSubs[personName].push({inPlayer:wcPlayer,outPlayer:outPlayer,gameweek:nextEffectiveWildcardGW(),wcIdx:wcIdx,outPos:outPos,outIdx:outIdx});
   sv("wildcards",S.wildcardSubs);
   closeModal(); renderMyTeamTab();
   if(viewingFriend===personName) renderFriendDetail(document.getElementById("tab-friends"),personName);
 }
+
+// ── PENDING APPROVALS (holding pen) ─────────────────────────────────────────────
+// Small on-screen banners so a friend (or anyone viewing their team) can see at a glance
+// that a captain/sub choice has been submitted but isn't live yet, or was rejected and why.
+function renderPendingCaptainBanner(owner){
+  var req=S.pendingCaptains[owner];
+  if(!req) return '';
+  if(req.status==="pending"){
+    return '<div class="card" style="border-color:#f59e0b;padding:8px 12px;margin-bottom:8px;"><div style="font-size:12px;color:#fbbf24;">&#x23F3; Awaiting approval: <strong>'+req.player.name+'</strong> as captain for '+monthLabel(req.month)+'</div></div>';
+  }
+  if(req.status==="rejected"){
+    return '<div class="card" style="border-color:#ef4444;padding:8px 12px;margin-bottom:8px;"><div style="font-size:12px;color:#f87171;">&#x2717; Captain request ('+req.player.name+' for '+monthLabel(req.month)+') was rejected: '+(req.rejectNote||"")+'</div></div>';
+  }
+  return '';
+}
+function renderPendingSubBanners(owner){
+  var list=(S.pendingWildcardSubs[owner]||[]).filter(function(s){return s.status==="pending"||s.status==="rejected";});
+  if(list.length===0) return '';
+  var html='';
+  list.forEach(function(s){
+    if(s.status==="pending"){
+      html+='<div class="card" style="border-color:#f59e0b;padding:8px 12px;margin-bottom:8px;"><div style="font-size:12px;color:#fbbf24;">&#x23F3; Awaiting approval: sub '+s.outPlayer.name+' &rarr; '+s.inPlayer.name+'</div></div>';
+    } else {
+      html+='<div class="card" style="border-color:#ef4444;padding:8px 12px;margin-bottom:8px;"><div style="font-size:12px;color:#f87171;">&#x2717; Sub request ('+s.outPlayer.name+' &rarr; '+s.inPlayer.name+') was rejected: '+(s.rejectNote||"")+'</div></div>';
+    }
+  });
+  return html;
+}
+
+// Admin-only: builds the "Pending Approvals" section shown in Settings. Returns '' (nothing
+// rendered) for a non-admin device, and also '' if there's simply nothing waiting right now.
+function renderPendingApprovalsSection(){
+  if(!CLOUD.isAdmin) return '';
+  var pendingCapOwners=Object.keys(S.pendingCaptains||{}).filter(function(o){return S.pendingCaptains[o]&&S.pendingCaptains[o].status==="pending";});
+  var pendingSubEntries=[];
+  Object.keys(S.pendingWildcardSubs||{}).forEach(function(owner){
+    (S.pendingWildcardSubs[owner]||[]).forEach(function(s,idx){
+      if(s.status==="pending") pendingSubEntries.push({owner:owner,idx:idx,sub:s});
+    });
+  });
+  if(pendingCapOwners.length===0 && pendingSubEntries.length===0) return '';
+  var html='<div class="sec-hdr">&#x1F4E5; Pending Approvals</div><div class="card" style="border-color:#f59e0b;">';
+  pendingCapOwners.forEach(function(owner){
+    var req=S.pendingCaptains[owner];
+    var ownerEsc=owner.replace(/'/g,"\\'");
+    html+='<div class="roster-slot" style="margin-bottom:8px;"><div style="font-size:13px;font-weight:700;">'+owner+' &rarr; Captain: '+req.player.name+' ('+monthLabel(req.month)+')</div>'+
+      '<div style="display:flex;gap:6px;margin-top:6px;">'+
+      '<button class="btn btn-blue" style="width:auto;padding:5px 10px;font-size:12px;" onclick="approvePendingCaptainFromSettings(\''+ownerEsc+'\')">&#x2713; Approve</button>'+
+      '<button class="btn btn-gray" style="width:auto;padding:5px 10px;font-size:12px;border-color:#ef4444;color:#ef4444;" onclick="openRejectCaptainModal(\''+ownerEsc+'\')">&#x2717; Reject</button>'+
+      '</div></div>';
+  });
+  pendingSubEntries.forEach(function(e){
+    var ownerEsc=e.owner.replace(/'/g,"\\'");
+    html+='<div class="roster-slot" style="margin-bottom:8px;"><div style="font-size:13px;font-weight:700;">'+e.owner+' &rarr; Sub: '+e.sub.outPlayer.name+' out, '+e.sub.inPlayer.name+' in</div>'+
+      '<div style="display:flex;gap:6px;margin-top:6px;">'+
+      '<button class="btn btn-blue" style="width:auto;padding:5px 10px;font-size:12px;" onclick="approvePendingSubFromSettings(\''+ownerEsc+'\','+e.idx+')">&#x2713; Approve</button>'+
+      '<button class="btn btn-gray" style="width:auto;padding:5px 10px;font-size:12px;border-color:#ef4444;color:#ef4444;" onclick="openRejectSubModal(\''+ownerEsc+'\','+e.idx+')">&#x2717; Reject</button>'+
+      '</div></div>';
+  });
+  html+='</div>';
+  return html;
+}
+function approvePendingCaptainFromSettings(owner){
+  var pending=S.pendingCaptains[owner];
+  if(!pending||pending.status!=="pending") return;
+  // Re-runs the exact same admin-path logic as a direct nomination (re-validates budget
+  // etc at the moment of approval, not submission) - this device is admin, so
+  // setCaptainForMonth takes the "apply directly" branch and clears the pending entry itself.
+  setCaptainForMonth(owner, pending.month, pending.player.name, pending.player.club);
+  renderSettingsTab();
+}
+function openRejectCaptainModal(owner){
+  showModal('<h3>Reject Captain Request</h3><p style="color:#8b949e;font-size:13px;margin-bottom:10px;">Let '+owner+' know why - this note is shown to them.</p><textarea class="inp" id="reject-note" rows="3" placeholder="e.g. that player is injured this week" style="margin-bottom:14px;"></textarea><button class="btn btn-red" onclick="submitRejectCaptain(\''+owner.replace(/'/g,"\\'")+'\')">Reject with Note</button><button class="btn btn-gray" style="margin-top:8px;" onclick="closeModal()">Cancel</button>');
+}
+function submitRejectCaptain(owner){
+  var note=(document.getElementById("reject-note").value||"").trim();
+  if(!note){ showToast("Please add a short reason."); return; }
+  var pending=S.pendingCaptains[owner];
+  if(!pending) return;
+  pending.status="rejected"; pending.rejectNote=note;
+  sv("pendingCaptains",S.pendingCaptains);
+  closeModal();
+  showToast("Rejected "+owner+"'s captain request.");
+  renderSettingsTab();
+}
+function approvePendingSubFromSettings(owner,idx){
+  var list=S.pendingWildcardSubs[owner]||[];
+  var pending=list[idx];
+  if(!pending||pending.status!=="pending") return;
+  // This device is admin, so executeSub takes the "apply directly" branch immediately.
+  executeSub(owner, pending.wcIdx, pending.outPlayer.name, pending.outPlayer.club, pending.outPos, pending.outIdx);
+  list.splice(idx,1);
+  sv("pendingWildcardSubs",S.pendingWildcardSubs);
+  renderSettingsTab();
+}
+function openRejectSubModal(owner,idx){
+  showModal('<h3>Reject Sub Request</h3><p style="color:#8b949e;font-size:13px;margin-bottom:10px;">Let '+owner+' know why - this note is shown to them.</p><textarea class="inp" id="reject-note" rows="3" placeholder="e.g. wait until after this gameweek" style="margin-bottom:14px;"></textarea><button class="btn btn-red" onclick="submitRejectSub(\''+owner.replace(/'/g,"\\'")+'\','+idx+')">Reject with Note</button><button class="btn btn-gray" style="margin-top:8px;" onclick="closeModal()">Cancel</button>');
+}
+function submitRejectSub(owner,idx){
+  var note=(document.getElementById("reject-note").value||"").trim();
+  if(!note){ showToast("Please add a short reason."); return; }
+  var list=S.pendingWildcardSubs[owner]||[];
+  var pending=list[idx];
+  if(!pending) return;
+  pending.status="rejected"; pending.rejectNote=note;
+  sv("pendingWildcardSubs",S.pendingWildcardSubs);
+  closeModal();
+  showToast("Rejected sub request.");
+  renderSettingsTab();
+}
+
 function resolveWildcard(personName,pos,idx){
   var team=S.teams[personName]||{};
   var player=(team[pos]||[])[idx];
@@ -2958,7 +3453,7 @@ async function doSyncPlayerClubs(){
       if(p.fplId==null) return; // non-PL free-typed entries have no fplId - not applicable
       var realClub=clubById[p.fplId];
       if(!realClub || realClub===p.club) return;
-      changes.push(ownerLabel+": "+p.name+" ("+p.club+" \u2192 "+realClub+")");
+      changes.push(ownerLabel+": "+p.name+" ("+p.club+" → "+realClub+")");
       p.club=realClub;
     }
     S.playerPool.forEach(function(p){ syncPlayer(p,"Pool"); });
@@ -3080,8 +3575,60 @@ function exportTeamsCSV(){
 }
 
 // ── RENDER: SETTINGS ───────────────────────────────────────────────────────────
+// Cloud Sync card is identical for admin and friend views - built once, used in both.
+function cloudSyncCardHtml(){
+  var html='<div class="sec-hdr">Cloud Sync</div><div class="card">';
+  if(!CLOUD.ready){
+    html+='<div style="color:#8b949e;font-size:12px;margin-bottom:8px;">Connecting...</div>';
+  } else if(CLOUD.isAdmin){
+    html+='<div style="color:#10b981;font-size:12px;margin-bottom:8px;">&#x2705; This device is an admin.</div>';
+  } else if(CLOUD.ownerName){
+    html+='<div style="color:#10b981;font-size:12px;margin-bottom:8px;">&#x2705; Linked as '+CLOUD.ownerName+'.</div>';
+  } else {
+    html+='<div style="color:#f59e0b;font-size:12px;margin-bottom:8px;">&#x26A0; Not yet linked to a team. Send your Device ID below to the league admin so they can link this device.</div>';
+  }
+  if(CLOUD.uid){
+    html+='<label class="lbl" style="margin-top:0;">Your Device ID</label>';
+    html+='<div style="display:flex;gap:8px;align-items:center;">';
+    html+='<input class="inp" id="s-deviceid" readonly value="'+CLOUD.uid+'" style="margin:0;font-size:11px;" onclick="this.select();">';
+    html+='<button class="btn btn-gray" style="width:auto;padding:9px 14px;margin:0;flex-shrink:0;" onclick="copyDeviceId()">Copy</button>';
+    html+='</div>';
+  } else {
+    html+='<div style="color:#8b949e;font-size:12px;">Device ID not available yet - check back in a moment.</div>';
+  }
+  html+='</div>';
+  return html;
+}
+// Shows which build is running, with a one-tap way to force the newest version - clears the
+// service worker + its caches (never localStorage or the cloud sign-in) and reloads.
+function appVersionCardHtml(){
+  return '<div class="sec-hdr">App</div><div class="card">'+
+    '<div style="color:#8b949e;font-size:12px;margin-bottom:10px;">Version v'+APP_VERSION+'</div>'+
+    '<button class="btn btn-gray" onclick="forceRefreshApp()">&#x1F504; Reload latest version</button></div>';
+}
+function forceRefreshApp(){
+  showToast("Reloading...");
+  var tasks=[];
+  try{ if(window.caches) tasks.push(caches.keys().then(function(ks){return Promise.all(ks.map(function(k){return caches.delete(k);}));})); }catch(e){}
+  try{ if(navigator.serviceWorker) tasks.push(navigator.serviceWorker.getRegistrations().then(function(rs){return Promise.all(rs.map(function(r){return r.unregister();}));})); }catch(e){}
+  Promise.all(tasks).catch(function(){}).then(function(){ location.reload(); });
+}
 function renderSettingsTab(){
   var el=document.getElementById("tab-settings");
+  // Friends get a deliberately minimal Settings screen - just how to link this device, and
+  // a reference to the rules. Everything else here (API key, draft config, score/backup
+  // tools, resets) is an admin/league-management concern they never need to touch.
+  if(!CLOUD.isAdmin){
+    var fhtml='<div style="padding:14px;overflow-y:auto;flex:1;">';
+    fhtml+='<div class="sec-hdr">Settings</div>';
+    fhtml+=cloudSyncCardHtml();
+    fhtml+=appVersionCardHtml();
+    fhtml+='<div class="sec-hdr">League Rules</div>';
+    fhtml+='<div class="card"><button class="btn btn-gray" style="border:1px solid #6366f1;color:#818cf8;" onclick="showTab(\'rules\')">&#x1F4D6; League Rules</button></div>';
+    fhtml+='</div>';
+    el.innerHTML=fhtml;
+    return;
+  }
   var html='<div style="display:flex;flex-direction:column;flex:1;overflow:hidden;"><div style="padding:10px 14px 0;flex-shrink:0;"><input class="inp" id="pool-srch" placeholder="Search players or clubs..." oninput="searchQuery=this.value;renderPoolTab();" value="'+searchQuery+'"></div><div style="padding:14px;overflow-y:auto;flex:1;">';
   html+='<div class="sec-hdr">Settings</div>';
   html+='<div class="card">';
@@ -3109,6 +3656,10 @@ function renderSettingsTab(){
     html+='</div>';
   }
 
+  // ── Cloud Sync ──
+  html+=cloudSyncCardHtml();
+  html+=appVersionCardHtml();
+
   // ── Data & Scoring ──
   html+='<div class="sec-hdr">Data & Scoring</div>';
   html+='<div class="card">';
@@ -3134,6 +3685,8 @@ function renderSettingsTab(){
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #22d3ee;color:#22d3ee;" onclick="openEditPositionTeamSelect()">&#x270F; Edit Player Position</button>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #fbbf24;color:#fbbf24;" onclick="shareCaptainsWhatsApp()">&#x1F451; Share Captains (WhatsApp)</button>';
   html+='</div>';
+
+  html+=renderPendingApprovalsSection();
 
   // ── Backup & Restore ──
   html+='<div class="sec-hdr">Backup & Restore</div>';
@@ -3165,6 +3718,21 @@ function saveSettings(){
   sv("cfg",{apiKey:S.apiKey,myName:S.myName,draftOrder:S.draftOrder,clubMax:S.clubMax,defaultTab:S.defaultTab,hideDraft:S.hideDraft,draftDone:S.draftDone});
   showToast("Settings saved");
   renderTopBar();
+}
+function copyDeviceId(elId){
+  if(!CLOUD.uid){ showToast("Not connected yet - try again in a moment."); return; }
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(CLOUD.uid).then(function(){ showToast("Device ID copied!"); }).catch(function(){ fallbackCopyDeviceId(elId); });
+  } else {
+    fallbackCopyDeviceId(elId);
+  }
+}
+function fallbackCopyDeviceId(elId){
+  var el=document.getElementById(elId||"s-deviceid");
+  if(!el){ showToast("Could not copy - long-press the ID above to select it."); return; }
+  el.select(); el.setSelectionRange(0,99999);
+  try{ document.execCommand("copy"); showToast("Device ID copied!"); }
+  catch(e){ showToast("Could not copy - long-press the ID above to select it."); }
 }
 function confirmReset(){
   showModal('<h3>Reset Data</h3><p style="color:#8b949e;font-size:13px;margin-bottom:16px;">All actions are permanent.</p><div class="card" style="margin-bottom:8px;"><div style="font-weight:700;margin-bottom:4px;">Reset Draft Only</div><div style="color:#8b949e;font-size:12px;margin-bottom:8px;">Clears picks and teams. Keeps API key, names and scores.</div><button class="btn btn-gray" style="border:1px solid #f59e0b;color:#f59e0b;" onclick="doResetDraft()">Reset Draft</button></div><div class="card" style="margin-bottom:8px;"><div style="font-weight:700;margin-bottom:4px;">Reset Season Scores</div><div style="color:#8b949e;font-size:12px;margin-bottom:8px;">Clears score data only.</div><button class="btn btn-gray" style="border:1px solid #f59e0b;color:#f59e0b;" onclick="doResetScores()">Reset Scores</button></div><div class="card" style="margin-bottom:8px;"><div style="font-weight:700;margin-bottom:4px;">Full Reset</div><div style="color:#8b949e;font-size:12px;margin-bottom:8px;">Clears everything including API key.</div><button class="btn btn-red" onclick="doResetFull()">Full Reset</button></div><button class="btn btn-gray" style="margin-top:4px;" onclick="closeModal()">Cancel</button>');
@@ -4272,7 +4840,6 @@ function renderStatsTab(){
 
 
 
-
 function resumeInterruptedLoad(){
   // Restore setup state from saved config
   var cfg = ld("cfg", {});
@@ -4416,6 +4983,9 @@ function exitBrowseMode(){
 
 
 function checkBackupPrompt(){
+  // Backups are an admin/league-data concern - a friend's own device has nothing that
+  // needs backing up locally (everything they can change lives in the cloud/holding pen).
+  if(!CLOUD.isAdmin) return;
   // Only show if there's meaningful data to back up
   if(!S.myName || S.draftOrder.length < 2) return;
 
@@ -4704,16 +5274,16 @@ function renderWelcomeScreen(){
   var html = '';
 
   if(isDraftDone){
+    html += makeWelcomeBtn('&#x1F464; My Team','#1f6feb',function(){showScreen('main');showTab('myteam');},true);
     html += makeWelcomeBtn('&#x1F4CA; View League Table','#10b981',function(){showScreen('main');showTab('league');});
-    html += makeWelcomeBtn('&#x1F464; My Team','#1f6feb',function(){showScreen('main');showTab('myteam');});
     html += makeWelcomeBtn('&#x1F30D; Player Pool','#8b5cf6',function(){showScreen('main');showTab('pool');});
     html += makeWelcomeBtn('&#x1F465; Friends Teams','#30363d',function(){showScreen('main');showTab('friends');});
-    html += makeWelcomeBtn('&#x1F504; Start New Draft','#21262d',function(){confirmNewDraft();});
+    if(CLOUD.isAdmin) html += makeWelcomeBtn('&#x1F504; Start New Draft','#21262d',function(){confirmNewDraft();});
     if(S.currentGW>=38) html += makeWelcomeBtn('&#x1F3C6; Season Summary','#f59e0b',function(){renderSeasonSummary();});
   } else if(isDraftInProgress){
+    html += makeWelcomeBtn('&#x1F464; My Team So Far','#1f6feb',function(){showScreen('main');showTab('myteam');},true);
     html += makeWelcomeBtn('&#x25B6; Continue Draft','#10b981',function(){showScreen('main');showTab('draft');});
-    html += makeWelcomeBtn('&#x1F464; My Team So Far','#1f6feb',function(){showScreen('main');showTab('myteam');});
-    html += makeWelcomeBtn('&#x1F504; Start New Draft','#21262d',function(){confirmNewDraft();});
+    if(CLOUD.isAdmin) html += makeWelcomeBtn('&#x1F504; Start New Draft','#21262d',function(){confirmNewDraft();});
     if(S.currentGW>=38) html += makeWelcomeBtn('&#x1F3C6; Season Summary','#f59e0b',function(){renderSeasonSummary();});
     html += makeWelcomeBtn('&#x2699; Settings','#30363d',function(){showScreen('main');showTab('settings');});
   } else if(hasDraft){
@@ -4739,11 +5309,11 @@ function renderWelcomeScreen(){
     html += makeWelcomeBtn('&#x1F3AF; Set Up Draft','#10b981',function(){showDraftSetup();});
     html += makeWelcomeBtn('&#x1F50D; Browse Players','#10b981',function(){browseLoadedPlayers();});
     html += makeWelcomeBtn('&#x2B07; Reload Players','#30363d',function(){showScreen('setup');});
-    html += makeWelcomeBtn('&#x2B06; Restore Backup','#30363d',function(){importBackup();});
+    if(CLOUD.isAdmin) html += makeWelcomeBtn('&#x2B06; Restore Backup','#30363d',function(){importBackup();});
   } else {
     // Completely fresh - no players loaded yet
     html += makeWelcomeBtn('&#x2B07; Download Players','#10b981',function(){showScreen('setup');});
-    html += makeWelcomeBtn('&#x2B06; Restore Backup','#30363d',function(){importBackup();});
+    if(CLOUD.isAdmin) html += makeWelcomeBtn('&#x2B06; Restore Backup','#30363d',function(){importBackup();});
   }
 
   // Always show settings access
@@ -4756,24 +5326,75 @@ function renderWelcomeScreen(){
 
 // Neon button colours for welcome screen - Arcane palette
 
-function makeWelcomeBtn(label, color, fn){
+function makeWelcomeBtn(label, color, fn, fullWidth){
   var idx = Object.keys(welcomeBtnFns).length;
   var id = 'wb'+idx;
   welcomeBtnFns[id] = fn;
   var nc = welcomeNeonColors[idx % welcomeNeonColors.length];
-  var style = ['width:100%','padding:12px 8px','background:'+nc.bg,'color:'+nc.text,'border:1px solid '+nc.border,'border-radius:10px','font-size:18px','font-family:Bangers,cursive','letter-spacing:2px','cursor:pointer','line-height:1.2','text-shadow:0 0 8px '+nc.glow+',0 0 16px '+nc.glow,'box-shadow:0 0 10px '+nc.glow+',inset 0 0 10px rgba(255,255,255,0.03)'].join(';');
-  return '<button onclick="welcomeBtnFns[\'' + id + '\']();" style="'+style+'">'+label+'</button>';
+  var style = ['width:100%','padding:12px 8px','background:'+nc.bg,'color:'+nc.text,'border:1px solid '+nc.border,'border-radius:10px','font-size:18px','font-family:Bangers,cursive','letter-spacing:2px','cursor:pointer','line-height:1.2','text-shadow:0 0 8px '+nc.glow+',0 0 16px '+nc.glow,'box-shadow:0 0 10px '+nc.glow+',inset 0 0 10px rgba(255,255,255,0.03)'];
+  // #welcome-buttons is a 2-column grid - spanning both columns puts this button on its
+  // own full-width row, useful for a lone "odd one out" button (e.g. My Team) so the
+  // remaining buttons pair up evenly underneath instead of leaving a lopsided last row.
+  if(fullWidth) style.push('grid-column:1 / -1');
+  return '<button onclick="welcomeBtnFns[\'' + id + '\']();" style="'+style.join(';')+'">'+label+'</button>';
+}
+
+// ── ACCESS GATE (SYNC TEST BUILD) ────────────────────────────────────────────────
+// A soft deterrent, not real security - the passcode lives in this file's source, so
+// anyone determined enough to view-source can read it. The point is just to stop the
+// link being accidentally/casually opened by someone outside the group: nothing here
+// (no local data render, no Firebase sign-in, no cloud read) runs until it's entered
+// correctly on this device. Stored under a plain (non "da_"-prefixed) key so it's never
+// swept up by Reset Data/Full Reset and never pushed to the cloud as part of local data.
+var LEAGUE_PASSCODE = "qwerty12345";
+var GATE_KEY = "draftAdvisorGateOK_v1";
+function gatePassed(){
+  try{ return localStorage.getItem(GATE_KEY)==="1"; }catch(e){ return false; }
+}
+function checkGatePasscode(){
+  var input=document.getElementById("gate-input");
+  var val=input?input.value:"";
+  if(val===LEAGUE_PASSCODE){
+    try{ localStorage.setItem(GATE_KEY,"1"); }catch(e){}
+    var g=document.getElementById("gate-screen");
+    if(g) g.remove();
+    startApp();
+  } else {
+    var err=document.getElementById("gate-err");
+    if(err) err.style.display="";
+    if(input){ input.value=""; input.focus(); }
+  }
+}
+function showGateScreen(){
+  var div=document.createElement("div");
+  div.id="gate-screen";
+  div.style.cssText="position:fixed;inset:0;z-index:9999;background:#0d1117;display:flex;align-items:center;justify-content:center;padding:20px;";
+  div.innerHTML='<div style="max-width:320px;width:100%;text-align:center;">'+
+    '<div style="font-family:Bangers,cursive;font-size:28px;letter-spacing:2px;color:#10b981;margin-bottom:6px;">Draft Advisor</div>'+
+    '<div style="color:#8b949e;font-size:13px;margin-bottom:16px;">Enter the league passcode to continue</div>'+
+    '<input class="inp" id="gate-input" type="password" placeholder="Passcode" style="margin-bottom:10px;text-align:center;" autocomplete="off">'+
+    '<div id="gate-err" style="color:#ef4444;font-size:12px;margin-bottom:10px;display:none;">Incorrect passcode</div>'+
+    '<button class="btn btn-blue" onclick="checkGatePasscode()">Enter</button></div>';
+  document.body.appendChild(div);
+  var input=document.getElementById("gate-input");
+  input.addEventListener("keydown",function(e){ if(e.key==="Enter") checkGatePasscode(); });
+  input.focus();
 }
 
 // ── BOOT ───────────────────────────────────────────────────────────────────────
-document.addEventListener("DOMContentLoaded",function(){
+function startApp(){
   loadAll();
-  if(S.apiKey){ var ak=document.getElementById("setup-apikey"); if(ak) ak.value=S.apiKey; }
-  // Tab visibility
+  // Tab visibility (safe to compute now - it only touches nav buttons, no real data shown yet)
   updateDraftNavVisibility();
-  // Always show welcome screen first
-  renderWelcomeScreen();
-  showScreen("welcome");
+  // The real app (welcome screen included) does NOT render yet - an unlinked device must
+  // never see any of it, only its own Device ID. enterFullApp()/showUnlinkedScreen() in
+  // fbBoot decide which one actually appears, once link status is known.
+  showConnectingScreen();
+  try{ fbBoot(); }catch(e){ console.log("fbBoot failed",e); enterFullApp(); }
+}
+document.addEventListener("DOMContentLoaded",function(){
+  if(!gatePassed()){ showGateScreen(); return; }
+  startApp();
 });
 
 // ── SERVICE WORKER ─────────────────────────────────────────────────────────────
@@ -5098,50 +5719,6 @@ function drawMonthlyChart(){
   });
   new Chart(ctx,{type:"bar",data:{labels:labels,datasets:datasets},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{labels:{color:"#8b949e",font:{size:11}}}},scales:{x:{ticks:{color:"#484f58"}},y:{ticks:{color:"#484f58"},grid:{color:"#21262d"}}}}});
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 </script>
 </body>
 </html>

@@ -8,7 +8,7 @@
 // Combined with the old cache-first strategy for the HTML shell below (serve whatever was
 // cached at install time, never check the network), that meant new deploys could silently
 // never reach a device at all. This version fixes both halves of that problem.
-const SW_VERSION = 'v2';
+const SW_VERSION = 'v3';
 const CACHE = 'draft-advisor-' + SW_VERSION;
 const ASSETS = [
   '/draft-advisor/',
