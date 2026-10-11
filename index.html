@@ -401,7 +401,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-10-11.2";
+const APP_VERSION = "2026-10-11.4";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -1688,7 +1688,7 @@ async function autoRefreshIfNeeded(){
   // the proxy chain and no longer calls the Anthropic API at all.
   checkSeasonEnd();
   checkThirdSubWindowPrompt();
-  var sixHours = 6 * 60 * 60 * 1000;
+  var sixHours = 30 * 60 * 1000; // refresh if scores are more than 30 minutes old
   var lastRefresh = S.lastRefreshed ? new Date(S.lastRefreshed).getTime() : 0;
   if(Date.now() - lastRefresh < sixHours) return;
   // Silent background refresh - no toast on success, only on failure
@@ -2796,6 +2796,16 @@ function blockedByFreeze(){
   showToast("Changes are paused: "+freezeMessage());
   return true;
 }
+function toggleFreeze(){
+  if(!CLOUD.isAdmin) return;
+  var turningOn=!isFrozen();
+  S.freeze=turningOn?true:false;
+  sv("freeze",S.freeze);
+  logChange(turningOn?"Freeze ON":"Freeze OFF","","","","",{});
+  updateFreezeBanner();
+  showToast(turningOn?"Change freeze ON - friends can't submit captains or subs.":"Change freeze OFF - friends can submit again.");
+  renderSettingsTab();
+}
 function updateFreezeBanner(){
   var b=document.getElementById("freeze-banner");
   if(!isFrozen()){ if(b) b.style.display="none"; return; }
@@ -3843,6 +3853,7 @@ function renderSettingsTab(){
   if(S.draftDone){
     html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #14b8a6;color:#2dd4bf;" onclick="showTab(\'thirdsub\')">&#x1F501; Third Sub Window</button>';
   }
+  html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid '+(isFrozen()?'#ef4444;color:#ef4444;':'#6b7280;color:#9ca3af;')+'" onclick="toggleFreeze()">'+(isFrozen()?'&#x23F8; Change Freeze is ON - tap to turn OFF':'&#x25B6; Change Freeze is OFF - tap to turn ON')+'</button>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #f59e0b;color:#f59e0b;" onclick="showTab(\'cup\')">&#x1F3C6; Knockout Cup</button>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #ec4899;color:#f472b6;" onclick="openAddLateTeam()">&#x1F465; Add Late Team</button>';
   if(emergencyReplaceWindowOpen()){
@@ -5596,6 +5607,37 @@ if("serviceWorker" in navigator){
     window.location.reload();
   });
 }
+
+
+// ── AUTO-UPDATE + AUTO-REFRESH ON OPEN / RESUME ────────────────────────────────
+// Compares the running version with what is live on GitHub Pages. On app open it reloads
+// itself once automatically (guarded so a slow CDN can never cause a reload loop); on resume
+// from background it shows a tap-to-update banner instead of yanking the screen away.
+function checkForNewVersion(auto){
+  try{
+    fetch("/draft-advisor/index.html?cb="+Date.now(),{cache:"no-store"}).then(function(r){return r.text();}).then(function(t){
+      var m=t.match(/APP_VERSION = "(\d{4}-\d{2}-\d{2}\.\d+)"/);
+      if(!m || m[1]===APP_VERSION) return;
+      var seen=null; try{ seen=sessionStorage.getItem("da_autoupd"); }catch(e){}
+      if(auto && seen!==m[1]){ try{ sessionStorage.setItem("da_autoupd",m[1]); }catch(e){} forceRefreshApp(); return; }
+      showUpdateBanner(m[1]);
+    }).catch(function(){});
+  }catch(e){}
+}
+function showUpdateBanner(v){
+  if(document.getElementById("update-banner")) return;
+  var b=document.createElement("div"); b.id="update-banner";
+  b.style.cssText="position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:#10b981;color:#0d1117;padding:10px 16px;border-radius:20px;font-size:13px;font-weight:700;z-index:999;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,0.4);";
+  b.textContent="\u2B06 New version available - tap to update";
+  b.onclick=forceRefreshApp;
+  document.body.appendChild(b);
+}
+window.addEventListener("load",function(){ setTimeout(function(){ checkForNewVersion(true); },3000); });
+document.addEventListener("visibilitychange",function(){
+  if(document.visibilityState!=="visible") return;
+  checkForNewVersion(false);
+  try{ if(S.draftDone) autoRefreshIfNeeded(); }catch(e){}
+});
 
 // ── POOL TAB ───────────────────────────────────────────────────────────────────
 var poolClubFilter="ALL",poolPosFilter="ALL",poolSort="pts_desc",poolShow="all";
