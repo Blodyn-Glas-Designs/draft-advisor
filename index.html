@@ -401,7 +401,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-10-10.2";
+const APP_VERSION = "2026-10-11.1";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -456,7 +456,7 @@ let S = {
   advice:null, adviceLoading:false, defaultTab:"myteam",
   lastBackup:null, postDraftSnapshot:null,
   thirdSubWindow:null, thirdSubPriorityOrder:null, thirdSubTurnIdx:0, thirdSubPicks:{},
-  lateJoiners:{}
+  lateJoiners:{}, changeLog:[]
 };
 
 // Neon button colours - declared early as used by renderWelcomeScreen on boot
@@ -814,6 +814,7 @@ function saveAll(){
   sv("postDraftSnapshot",S.postDraftSnapshot);
   sv("thirdSub",{window:S.thirdSubWindow,priorityOrder:S.thirdSubPriorityOrder,turnIdx:S.thirdSubTurnIdx,picks:S.thirdSubPicks});
   sv("lateJoiners",S.lateJoiners);
+  sv("changeLog",S.changeLog);
   sv("clubs",PL_CLUBS);
 }
 function loadAll(){
@@ -825,6 +826,7 @@ function loadAll(){
   var sn=ld("snake",{}); S.snakeOrder=sn.snakeOrder||[]; S.pickIdx=sn.pickIdx||0;
   S.captains=ld("captains",{}); S.captainHistory=ld("captainHistory",{}); S.wildcardSubs=ld("wildcards",{});
   S.captainMonths=ld("captainMonths",{}); S.gwMonthMap=ld("gwMonthMap",{});
+  S.changeLog=ld("changeLog",[]); if(!Array.isArray(S.changeLog)) S.changeLog=Object.keys(S.changeLog||{}).map(function(k){return S.changeLog[k];});
   S.pendingCaptains=ld("pendingCaptains",{}); S.pendingWildcardSubs=ld("pendingWildcardSubs",{});
   // One-off repair, confirmed with James: Gareth's Odegaard-for-Sarr wildcard sub was made
   // in the gap between GW2 and GW3 (after GW2 had already been played), but got stamped
@@ -2778,6 +2780,20 @@ function openCaptainModal(personName, month){
   });
   showModal(html);
 }
+// ── CHANGE LOG (audit trail) ───────────────────────────────────────────────────
+// Append-only record of every captain / sub / squad change made on an ADMIN device (friends
+// only ever submit requests; the change takes effect, and is logged, when an admin applies it).
+// Purely additive: nothing else in the app reads this except the Change Report export.
+function logChange(type, owner, from, to, effective, extra){
+  try{
+    if(!CLOUD.isAdmin) return;
+    if(!Array.isArray(S.changeLog)) S.changeLog=[];
+    var e={t:new Date().toISOString(), by:(S.myName||"admin"), type:type, owner:owner||"",
+           from:from||"", to:to||"", effective:effective||"", submittedAt:(extra&&extra.submittedAt)||"", note:(extra&&extra.note)||""};
+    S.changeLog.push(e);
+    sv("changeLog",S.changeLog);
+  }catch(err){ console.log("logChange failed",err); }
+}
 function setCaptainForMonth(personName,month,pName,pClub){
   var team=S.teams[personName]||{},player=null;
   ["GK","DEF","MID","ATT"].forEach(function(pos){(team[pos]||[]).forEach(function(p){if(p.name===pName&&p.club===pClub)player=p;});});
@@ -2804,8 +2820,11 @@ function setCaptainForMonth(personName,month,pName,pClub){
     return;
   }
   if(!S.captainMonths[personName]) S.captainMonths[personName]=[];
+  var _prevCap=existingForMonth?existingForMonth.player.name:"";
+  var _capSubmitted=(S.pendingCaptains[personName]&&S.pendingCaptains[personName].submittedAt)||"";
   if(existingForMonth) existingForMonth.player=player;
   else S.captainMonths[personName].push({month:month, player:player});
+  logChange(existingForMonth?"Captain changed":"Captain set", personName, _prevCap, pName, month, {submittedAt:_capSubmitted});
   // Clear any pending/rejected request for this person now admin has directly applied one -
   // avoids the holding pen showing a stale item after a direct admin override.
   if(S.pendingCaptains[personName]){ delete S.pendingCaptains[personName]; sv("pendingCaptains",S.pendingCaptains); }
@@ -2890,8 +2909,10 @@ function executeSub(personName,wcIdx,outName,outClub,outPos,outIdx){
     return;
   }
   if(!S.wildcardSubs[personName]) S.wildcardSubs[personName]=[];
-  S.wildcardSubs[personName].push({inPlayer:wcPlayer,outPlayer:outPlayer,gameweek:nextEffectiveWildcardGW(),wcIdx:wcIdx,outPos:outPos,outIdx:outIdx});
+  var _subGW=nextEffectiveWildcardGW();
+  S.wildcardSubs[personName].push({inPlayer:wcPlayer,outPlayer:outPlayer,gameweek:_subGW,wcIdx:wcIdx,outPos:outPos,outIdx:outIdx});
   sv("wildcards",S.wildcardSubs);
+  logChange("Sub made", personName, outPlayer.name, wcPlayer.name, "GW"+_subGW, {submittedAt:window._logSubmittedAt||""});
   closeModal(); renderMyTeamTab();
   if(viewingFriend===personName) renderFriendDetail(document.getElementById("tab-friends"),personName);
 }
@@ -2976,6 +2997,7 @@ function submitRejectCaptain(owner){
   if(!pending) return;
   pending.status="rejected"; pending.rejectNote=note;
   sv("pendingCaptains",S.pendingCaptains);
+  logChange("Captain request rejected", owner, "", pending.player.name, pending.month, {submittedAt:pending.submittedAt||"", note:note});
   closeModal();
   showToast("Rejected "+owner+"'s captain request.");
   renderSettingsTab();
@@ -2985,7 +3007,9 @@ function approvePendingSubFromSettings(owner,idx){
   var pending=list[idx];
   if(!pending||pending.status!=="pending") return;
   // This device is admin, so executeSub takes the "apply directly" branch immediately.
+  window._logSubmittedAt=pending.submittedAt||"";
   executeSub(owner, pending.wcIdx, pending.outPlayer.name, pending.outPlayer.club, pending.outPos, pending.outIdx);
+  window._logSubmittedAt="";
   list.splice(idx,1);
   sv("pendingWildcardSubs",S.pendingWildcardSubs);
   renderSettingsTab();
@@ -3001,6 +3025,7 @@ function submitRejectSub(owner,idx){
   if(!pending) return;
   pending.status="rejected"; pending.rejectNote=note;
   sv("pendingWildcardSubs",S.pendingWildcardSubs);
+  logChange("Sub request rejected", owner, pending.outPlayer.name, pending.inPlayer.name, "", {submittedAt:pending.submittedAt||"", note:note});
   closeModal();
   showToast("Rejected sub request.");
   renderSettingsTab();
@@ -3574,6 +3599,117 @@ function exportTeamsCSV(){
   showToast("Teams exported! Opens directly in Excel/Sheets.");
 }
 
+// ── CHANGE REPORT (Excel) ──────────────────────────────────────────────────────
+// Builds a shareable .xlsx: the change log, a week-by-week captain/sub timeline per person,
+// a captains-by-month grid, a subs list and automatic data checks. Everything except the log
+// is derived live from current data, so it can validate state even for changes made before
+// logging began. SheetJS is loaded on demand; falls back to CSV if it can't load (offline).
+function loadSheetJS(cb){
+  if(window.XLSX){ cb(true); return; }
+  var sc=document.createElement("script");
+  sc.src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
+  sc.onload=function(){ cb(!!window.XLSX); };
+  sc.onerror=function(){ cb(false); };
+  document.head.appendChild(sc);
+}
+function buildChangeReportData(){
+  var owners=(S.draftOrder||[]).slice();
+  var maxGW=Math.max(S.currentGW||1,1);
+  var pk=function(p){return p.name+"|"+p.club;};
+  // 1. Change log
+  var log=(S.changeLog||[]).slice().sort(function(a,b){return (b.t||"")<(a.t||"")?-1:((b.t||"")>(a.t||"")?1:0);});
+  var logRows=[["When (UTC)","Person","Change","From","To","Effective (month / GW)","Friend submitted at","Applied by","Note"]];
+  log.forEach(function(e){
+    logRows.push([e.t?e.t.replace("T"," ").slice(0,19):"Before logging began (date not recorded)",e.owner,e.type,e.from,e.to,e.effective,e.submittedAt?String(e.submittedAt).replace("T"," ").slice(0,19):"",e.by,e.note]);
+  });
+  // 2. GW timeline
+  var tl=[["Person","GW","Month","Captain","Subs in effect (out → in)","GW points (incl. captain x2)"]];
+  owners.forEach(function(o){
+    for(var gw=1;gw<=maxGW;gw++){
+      var cap=getCaptainForGW(o,gw);
+      var subs=(S.wildcardSubs[o]||[]).filter(function(s){return s.gameweek<=gw;}).map(function(s){return s.outPlayer.name+" → "+s.inPlayer.name+" (from GW"+s.gameweek+")";}).join("; ");
+      tl.push([o,gw,S.gwMonthMap[gw]||"?",cap?cap.name:"(none)",subs,getPersonGWPts(o,gw)]);
+    }
+  });
+  // 3. Captains by month
+  var months=[]; owners.forEach(function(o){(S.captainMonths[o]||[]).forEach(function(e){ if(months.indexOf(e.month)===-1) months.push(e.month); });});
+  months.sort();
+  var cm=[["Person"].concat(months)];
+  owners.forEach(function(o){
+    cm.push([o].concat(months.map(function(m){var e=(S.captainMonths[o]||[]).find(function(x){return x.month===m;});return e?e.player.name:"";})));
+  });
+  // 4. Subs
+  var subRows=[["Person","Out","In","Effective GW","Logged at (UTC)"]];
+  owners.forEach(function(o){
+    (S.wildcardSubs[o]||[]).forEach(function(s){
+      var l=(S.changeLog||[]).filter(function(e){return e.type==="Sub made"&&e.owner===o&&e.to===s.inPlayer.name;})[0];
+      subRows.push([o,s.outPlayer.name,s.inPlayer.name,s.gameweek,l&&l.t?l.t.replace("T"," ").slice(0,19):"not recorded"]);
+    });
+  });
+  // 5. Data checks
+  var chk=[["Person","Check","Result","Detail"]];
+  var issues=0;
+  function add(o,c,ok,d){ chk.push([o,c,ok?"OK":"PROBLEM",d||""]); if(!ok) issues++; }
+  owners.forEach(function(o){
+    var t=S.teams[o]||{}, keys=[];
+    ["GK","DEF","MID","ATT","WC"].forEach(function(pos){(t[pos]||[]).forEach(function(p){keys.push(pk(p));});});
+    var count=keys.length;
+    add(o,"Squad size is 17",count===17,count+" players");
+    var firstPick=(S.lateJoiners&&S.lateJoiners[o])?null:ownerPicksInOrder(o)[0];
+    var caps=S.captainMonths[o]||[];
+    var seen={}, dup=false; caps.forEach(function(e){ if(seen[e.month]) dup=true; seen[e.month]=1; });
+    add(o,"One captain per month",!dup,dup?"duplicate month entry":"");
+    var bad=[]; var budget={};
+    caps.forEach(function(e){
+      var k=pk(e.player); budget[k]=(budget[k]||0)+1;
+      if(keys.indexOf(k)===-1) bad.push(e.player.name+" ("+e.month+") not in squad");
+      if(firstPick&&k===firstPick) bad.push(e.player.name+" ("+e.month+") is first pick");
+    });
+    Object.keys(budget).forEach(function(k){ if(budget[k]>CAPTAIN_BUDGET_MONTHS) bad.push(k.split("|")[0]+" captained "+budget[k]+" months"); });
+    add(o,"Captains valid (in squad, not first pick, max 3 months)",bad.length===0,bad.join("; "));
+    var curCap=getCaptainForGW(o,S.currentGW);
+    add(o,"Has a captain for the current gameweek",!!curCap,curCap?curCap.name:"none set for "+(S.gwMonthMap[S.currentGW]||"?"));
+    var sbad=[];
+    (S.wildcardSubs[o]||[]).forEach(function(s){
+      if(keys.indexOf(pk(s.inPlayer))===-1) sbad.push(s.inPlayer.name+" (in) not in squad");
+      if(keys.indexOf(pk(s.outPlayer))===-1) sbad.push(s.outPlayer.name+" (out) not in squad");
+    });
+    add(o,"Subs reference players in the squad",sbad.length===0,sbad.join("; "));
+    var pbad=[];
+    keys.forEach(function(k){ if(S.pickedMap[k]!==o) pbad.push(k+" not marked picked by "+o); });
+    Object.keys(S.pickedMap).forEach(function(k){ if(S.pickedMap[k]===o&&keys.indexOf(k)===-1) pbad.push(k+" marked picked but not in squad"); });
+    add(o,"Squad matches picked list",pbad.length===0,pbad.join("; "));
+  });
+  var summary=[["Draft Advisor – Change Report"],["Generated (UTC)",new Date().toISOString().replace("T"," ").slice(0,19)],["App version",APP_VERSION],["Current gameweek",S.currentGW],["Changes logged",(S.changeLog||[]).length],["Data check problems",issues],[],["Sheets: Change Log, GW Timeline, Captains by Month, Subs, Data Checks"],["Note: changes made before logging began have no recorded date; GW Timeline and Data Checks still reflect them."]];
+  return {summary:summary,log:logRows,timeline:tl,captains:cm,subs:subRows,checks:chk,issues:issues};
+}
+function exportChangeReport(){
+  var d;
+  try{ d=buildChangeReportData(); }catch(e){ console.log(e); showToast("Could not build report: "+e.message); return; }
+  showToast("Building report...");
+  loadSheetJS(function(ok){
+    var stamp=new Date().toISOString().slice(0,10);
+    if(ok){
+      var wb=XLSX.utils.book_new();
+      [["Summary",d.summary],["Change Log",d.log],["GW Timeline",d.timeline],["Captains by Month",d.captains],["Subs",d.subs],["Data Checks",d.checks]].forEach(function(s){
+        var ws=XLSX.utils.aoa_to_sheet(s[1]);
+        var w=[]; s[1].forEach(function(r){ r.forEach(function(c,i){ var l=String(c==null?"":c).length+2; if(!w[i]||w[i].wch<l) w[i]={wch:Math.min(l,60)}; }); });
+        ws["!cols"]=w;
+        XLSX.utils.book_append_sheet(wb,ws,s[0]);
+      });
+      XLSX.writeFile(wb,"DA - Change Report - GW"+S.currentGW+" - "+stamp+".xlsx");
+      showToast("Report downloaded"+(d.issues?" - "+d.issues+" data problem(s) flagged":" - no data problems found")+".");
+    } else {
+      var csv=d.log.concat([[]],d.checks).map(function(r){return r.map(csvEscapeField).join(",");}).join("\r\n");
+      var a=document.createElement("a");
+      a.href="data:text/csv;charset=utf-8,"+encodeURIComponent(csv);
+      a.download="DA - Change Report - "+stamp+".csv"; a.style.display="none";
+      document.body.appendChild(a); a.click(); setTimeout(function(){document.body.removeChild(a);},100);
+      showToast("Offline - downloaded a CSV version instead.");
+    }
+  });
+}
+
 // ── RENDER: SETTINGS ───────────────────────────────────────────────────────────
 // Cloud Sync card is identical for admin and friend views - built once, used in both.
 function cloudSyncCardHtml(){
@@ -3698,6 +3834,8 @@ function renderSettingsTab(){
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #10b981;color:#10b981;" onclick="importBackup()">&#x2B06; Import Backup</button>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;" onclick="restoreAutoBackup()">&#x1F504; Restore Silent Auto-Backup</button>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #22c55e;color:#4ade80;" onclick="exportTeamsCSV()">&#x1F4CA; Export All Teams (CSV/Excel)</button>';
+  html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #22c55e;color:#4ade80;" onclick="exportChangeReport()">&#x1F4D1; Export Change Report (Excel)</button>';
+  html+='<div style="color:#8b949e;font-size:11px;margin-bottom:8px;">'+(S.changeLog||[]).length+' change(s) logged. Report includes change log, week-by-week captain/sub timeline and data checks.</div>';
   html+='</div>';
 
   // ── Testing & Reset ──
@@ -3877,6 +4015,7 @@ function doAdminReposition(owner,posA,idxA,posB,idxB){
   team[posA][idxA]=team[posB][idxB];
   team[posB][idxB]=tmp;
   sv("teams",S.teams);
+  logChange("Admin reposition", owner, nameA, nameB, "", {note:"swapped slots"});
   closeModal();
   showToast("Swapped: "+nameA+" \u2194 "+nameB);
   renderMyTeamTab(); renderFriendsTab();
@@ -4020,6 +4159,7 @@ function doEmergencyReplace(owner,pos,idx,newName,newClub){
     });
   }
   sv("teams",S.teams); sv("picked",S.pickedMap); sv("captainMonths",S.captainMonths);
+  logChange("Emergency replace", owner, outgoing.name, newName, "", {});
   closeModal();
   showToast(outgoing.name+" replaced with "+newName+" - free pre-season swap.");
   renderMyTeamTab(); renderFriendsTab();
@@ -4060,6 +4200,7 @@ function startLateTeam(){
   // Flag as a late joiner - they never had a genuine "first pick" (picking from
   // leftovers after everyone else already drafted), so the captain rule exempts them.
   S.lateJoiners[name]=true;
+  logChange("Late team added", name, "", name, "", {});
   saveAll();
   closeModal();
   continueLateTeam(name);
