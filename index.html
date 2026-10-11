@@ -401,7 +401,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-10-11.1";
+const APP_VERSION = "2026-10-11.2";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -456,7 +456,7 @@ let S = {
   advice:null, adviceLoading:false, defaultTab:"myteam",
   lastBackup:null, postDraftSnapshot:null,
   thirdSubWindow:null, thirdSubPriorityOrder:null, thirdSubTurnIdx:0, thirdSubPicks:{},
-  lateJoiners:{}, changeLog:[]
+  lateJoiners:{}, changeLog:[], freeze:false
 };
 
 // Neon button colours - declared early as used by renderWelcomeScreen on boot
@@ -623,6 +623,7 @@ function enterFullApp(){
   if(S.apiKey){ var ak=document.getElementById("setup-apikey"); if(ak) ak.value=S.apiKey; }
   renderWelcomeScreen();
   showScreen("welcome");
+  try{ updateFreezeBanner(); }catch(e){}
 }
 
 // One-time only: the very first time THIS device is recognised as admin, push everything
@@ -765,7 +766,10 @@ function fbApplyRemote(remote){
       if(JSON.stringify(incoming)===JSON.stringify(current)) return;
       _origSv(k,incoming);
     });
+    // A deleted Firebase node simply disappears from the snapshot - treat a missing freeze flag as "off".
+    if(remote.freeze===undefined && ld("freeze",false)) _origSv("freeze",false);
     loadAll();
+    updateFreezeBanner();
     updateDraftNavVisibility();
     // If this device is still sitting on the welcome screen (e.g. a brand-new, unclaimed
     // device that just had a friend's/admin's real data quietly arrive for the first time),
@@ -826,6 +830,7 @@ function loadAll(){
   var sn=ld("snake",{}); S.snakeOrder=sn.snakeOrder||[]; S.pickIdx=sn.pickIdx||0;
   S.captains=ld("captains",{}); S.captainHistory=ld("captainHistory",{}); S.wildcardSubs=ld("wildcards",{});
   S.captainMonths=ld("captainMonths",{}); S.gwMonthMap=ld("gwMonthMap",{});
+  S.freeze=ld("freeze",false);
   S.changeLog=ld("changeLog",[]); if(!Array.isArray(S.changeLog)) S.changeLog=Object.keys(S.changeLog||{}).map(function(k){return S.changeLog[k];});
   S.pendingCaptains=ld("pendingCaptains",{}); S.pendingWildcardSubs=ld("pendingWildcardSubs",{});
   // One-off repair, confirmed with James: Gareth's Odegaard-for-Sarr wildcard sub was made
@@ -2741,6 +2746,7 @@ function getPersonalPickOrder(ownerName, key){
   return idx>=0?idx+1:null;
 }
 function openCaptainModal(personName, month){
+  if(blockedByFreeze()) return;
   var months=getSeasonMonthsList();
   if(!month){
     // Always default to the actual current real-world month, not "the next month without
@@ -2780,6 +2786,27 @@ function openCaptainModal(personName, month){
   });
   showModal(html);
 }
+// ── CHANGE FREEZE ──────────────────────────────────────────────────────────────
+// Admin sets league/data/freeze to true (or to a text message) in the Firebase console to pause
+// captain/sub changes from friends' devices. Admin devices are never blocked. Missing/false = off.
+function isFrozen(){ return !!S.freeze && S.freeze!=="false"; }
+function freezeMessage(){ return (typeof S.freeze==="string" && S.freeze!=="true") ? S.freeze : "Changes are paused while the league is being updated."; }
+function blockedByFreeze(){
+  if(CLOUD.isAdmin || !isFrozen()) return false;
+  showToast("Changes are paused: "+freezeMessage());
+  return true;
+}
+function updateFreezeBanner(){
+  var b=document.getElementById("freeze-banner");
+  if(!isFrozen()){ if(b) b.style.display="none"; return; }
+  if(!b){
+    b=document.createElement("div"); b.id="freeze-banner";
+    b.style.cssText="position:fixed;top:0;left:0;right:0;z-index:998;background:#b45309;color:#fff;font-size:11px;font-weight:700;text-align:center;padding:3px 8px;pointer-events:none;";
+    document.body.appendChild(b);
+  }
+  b.textContent=(CLOUD.isAdmin?"FREEZE ON (admin changes still allowed): ":"\u23F8 ")+freezeMessage();
+  b.style.display="block";
+}
 // ── CHANGE LOG (audit trail) ───────────────────────────────────────────────────
 // Append-only record of every captain / sub / squad change made on an ADMIN device (friends
 // only ever submit requests; the change takes effect, and is logged, when an admin applies it).
@@ -2807,6 +2834,7 @@ function setCaptainForMonth(personName,month,pName,pClub){
     return;
   }
   if(!CLOUD.isAdmin){
+    if(blockedByFreeze()) return;
     // A friend's own device: this submits into a holding pen for admin sign-off rather than
     // taking effect immediately - matches the monthly approval workflow. Admin (this device,
     // or James acting directly) still applies changes immediately, exactly as before.
@@ -2836,6 +2864,7 @@ function setCaptainForMonth(personName,month,pName,pClub){
 
 // ── WILDCARD SUB ───────────────────────────────────────────────────────────────
 function openSubModal(personName,wcIdx){
+  if(blockedByFreeze()) return;
   var team=S.teams[personName]||{};
   var wcPlayer=(team.WC||[])[wcIdx];
   if(!wcPlayer) return;
@@ -2891,6 +2920,7 @@ function executeSub(personName,wcIdx,outName,outClub,outPos,outIdx){
   var outPlayer=(team[outPos]||[])[outIdx];
   if(!wcPlayer||!outPlayer){closeModal();return;}
   if(!CLOUD.isAdmin){
+    if(blockedByFreeze()) return;
     // Friend's own device: submit into the holding pen - no time-window restriction here
     // (unlike captains), a sub can be proposed at any point, it just waits for admin
     // sign-off before it actually takes effect and starts scoring.
