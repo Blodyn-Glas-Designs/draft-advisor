@@ -401,7 +401,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-10-11.4";
+const APP_VERSION = "2026-10-13.2";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -456,7 +456,7 @@ let S = {
   advice:null, adviceLoading:false, defaultTab:"myteam",
   lastBackup:null, postDraftSnapshot:null,
   thirdSubWindow:null, thirdSubPriorityOrder:null, thirdSubTurnIdx:0, thirdSubPicks:{},
-  lateJoiners:{}, changeLog:[], freeze:false
+  lateJoiners:{}, changeLog:[], freeze:false, scoresFinal:{}, shapeIssues:[]
 };
 
 // Neon button colours - declared early as used by renderWelcomeScreen on boot
@@ -624,6 +624,7 @@ function enterFullApp(){
   renderWelcomeScreen();
   showScreen("welcome");
   try{ updateFreezeBanner(); }catch(e){}
+  try{ updateHealthBanner(); }catch(e){}
 }
 
 // One-time only: the very first time THIS device is recognised as admin, push everything
@@ -770,6 +771,7 @@ function fbApplyRemote(remote){
     if(remote.freeze===undefined && ld("freeze",false)) _origSv("freeze",false);
     loadAll();
     updateFreezeBanner();
+    try{ updateHealthBanner(); }catch(e){}
     updateDraftNavVisibility();
     // If this device is still sitting on the welcome screen (e.g. a brand-new, unclaimed
     // device that just had a friend's/admin's real data quietly arrive for the first time),
@@ -819,7 +821,32 @@ function saveAll(){
   sv("thirdSub",{window:S.thirdSubWindow,priorityOrder:S.thirdSubPriorityOrder,turnIdx:S.thirdSubTurnIdx,picks:S.thirdSubPicks});
   sv("lateJoiners",S.lateJoiners);
   sv("changeLog",S.changeLog);
+  sv("scoresFinal",S.scoresFinal);
   sv("clubs",PL_CLUBS);
+}
+// Defensive shape check for the per-owner maps (subs, captains). A bad import once left the
+// "wildcards" node holding a whole copy of the league data instead of {owner:[...]}; the app
+// then silently found no subs for anyone. Now: anything that is not an owner in the draft
+// order, or not a list, is ignored (never applied) and reported via S.shapeIssues instead.
+function sanitizeOwnerMap(obj,label){
+  var out={};
+  if(!obj || typeof obj!=="object" || Array.isArray(obj)){
+    if(obj!=null) S.shapeIssues.push(label+": data is not in the expected format and was ignored");
+    return out;
+  }
+  var owners=S.draftOrder||[], dropped=[];
+  Object.keys(obj).forEach(function(k){
+    var v=obj[k];
+    // Firebase turns an array with a gap into an object with numeric keys - turn it back.
+    if(v && typeof v==="object" && !Array.isArray(v) && Object.keys(v).length && Object.keys(v).every(function(x){return /^\d+$/.test(x);})){
+      v=Object.keys(v).sort(function(a,b){return a-b;}).map(function(x){return v[x];});
+    }
+    if(owners.length && owners.indexOf(k)===-1){ dropped.push(k); return; }
+    if(!Array.isArray(v)){ dropped.push(k); return; }
+    out[k]=v;
+  });
+  if(dropped.length) S.shapeIssues.push(label+": ignored unexpected entries ("+dropped.slice(0,6).join(", ")+(dropped.length>6?", +"+(dropped.length-6)+" more":"")+")");
+  return out;
 }
 function loadAll(){
   var c=ld("cfg",{});
@@ -829,8 +856,12 @@ function loadAll(){
   S.playerPool=ld("pool",[]); S.pickedMap=ld("picked",{}); S.teams=ld("teams",{});
   var sn=ld("snake",{}); S.snakeOrder=sn.snakeOrder||[]; S.pickIdx=sn.pickIdx||0;
   S.captains=ld("captains",{}); S.captainHistory=ld("captainHistory",{}); S.wildcardSubs=ld("wildcards",{});
+  S.shapeIssues=[];
   S.captainMonths=ld("captainMonths",{}); S.gwMonthMap=ld("gwMonthMap",{});
+  S.wildcardSubs=sanitizeOwnerMap(S.wildcardSubs,"Subs (wildcards)");
+  S.captainMonths=sanitizeOwnerMap(S.captainMonths,"Captains (captainMonths)");
   S.freeze=ld("freeze",false);
+  S.scoresFinal=ld("scoresFinal",{});
   S.changeLog=ld("changeLog",[]); if(!Array.isArray(S.changeLog)) S.changeLog=Object.keys(S.changeLog||{}).map(function(k){return S.changeLog[k];});
   S.pendingCaptains=ld("pendingCaptains",{}); S.pendingWildcardSubs=ld("pendingWildcardSubs",{});
   // One-off repair, confirmed with James: Gareth's Odegaard-for-Sarr wildcard sub was made
@@ -1596,84 +1627,86 @@ function flagDepartedPlayers(bootstrap){
   if(changed) sv("teams", S.teams);
 }
 
+// ── SCORE REFRESH (single shared implementation) ───────────────────────────────
+// Used by BOTH the silent background refresh and the manual Settings button, so the caching
+// rules can never drift apart again. report(text) is optional progress text for a UI.
+// Returns {currentGW, fetched:[gw], failed:[gw], upToDate:bool}. lastRefreshed is only
+// stamped when nothing failed, so a partial failure is retried on the next open.
+async function refreshScoresCore(report){
+  report = report || function(){};
+  var bootstrap = await fetchWithFallback(
+    "https://fantasy.premierleague.com/api/bootstrap-static/",
+    function(data){ return data && Array.isArray(data.elements) && Array.isArray(data.teams); },
+    function(label){ report("Connecting via "+label+"..."); }
+  );
+  flagDepartedPlayers(bootstrap);
+  var events = bootstrap.events||[];
+  // gameweek -> calendar month map (deadline_time is just before the first game, which is
+  // what the monthly captain rule is keyed on).
+  events.forEach(function(e){ if(e.deadline_time) S.gwMonthMap[e.id] = e.deadline_time.slice(0,7); });
+  sv("gwMonthMap", S.gwMonthMap);
+  var currentEvt = events.find(function(e){ return e.is_current; });
+  var finishedIds = events.filter(function(e){ return e.finished; }).map(function(e){ return e.id; });
+  var currentGW = currentEvt ? currentEvt.id : (finishedIds.length ? Math.max.apply(null,finishedIds) : 1);
+  S.currentGW = currentGW;
+  // data_checked (not finished) is FPL's "bonus points and corrections are locked in" flag.
+  // scoresFinal[g] records that OUR copy was fetched after that point; without it a
+  // gameweek fetched mid-way (e.g. before Monday night's match) would be trusted forever once
+  // FPL later flipped data_checked.
+  var dataCheckedSet = {};
+  events.forEach(function(e){ if(e.data_checked) dataCheckedSet[e.id]=true; });
+  if(!S.scoresFinal || typeof S.scoresFinal!=="object") S.scoresFinal={};
+  if(Object.keys(S.scoresFinal).length===0){
+    for(var bg=1; bg<=currentGW-2; bg++){ if(dataCheckedSet[bg] && S.scoresFetched[bg]) S.scoresFinal[bg]=true; }
+  }
+  var needed = [];
+  for(var g = currentGW; g >= 1; g--){
+    if(!dataCheckedSet[g] || !S.scoresFetched[g] || !S.scoresFinal[g]) needed.push(g);
+    if(needed.length >= 3) break; // keep each refresh cheap
+  }
+  // fplId -> "Name|Club" for every drafted player (free-typed non-PL wildcards have no fplId
+  // and correctly score 0 until resolved).
+  var idToKey={};
+  getAllPlayers().forEach(function(p){ if(p.fplId!=null) idToKey[p.fplId]=p.name+"|"+p.club; });
+  var fetched=[], failed=[];
+  for(var ni = 0; ni < needed.length; ni++){
+    var gw = needed[ni];
+    report("Fetching GW"+gw+" scores ("+(ni+1)+"/"+needed.length+")...");
+    try{
+      var liveData = await fetchWithFallback(
+        "https://fantasy.premierleague.com/api/event/"+gw+"/live/",
+        function(data){ return data && Array.isArray(data.elements); },
+        function(label){ report("Connecting via "+label+"..."); }
+      );
+      var mapped = {};
+      liveData.elements.forEach(function(el){
+        var key=idToKey[el.id];
+        if(!key) return;
+        mapped[key]=(el.stats&&el.stats.total_points)||0;
+      });
+      // keep any value the admin deliberately overrode
+      var overrides=S.scoreOverrides[gw]||{};
+      Object.keys(overrides).forEach(function(key){
+        if((S.scores[gw]||{})[key]!=null) mapped[key]=S.scores[gw][key];
+      });
+      S.scores[gw] = mapped;
+      S.scoresFetched[gw] = true;
+      if(dataCheckedSet[gw]) S.scoresFinal[gw] = true;
+      fetched.push(gw);
+    }catch(e){
+      failed.push(gw);
+      console.warn('GW '+gw+' scores failed:', e.message);
+    }
+  }
+  if(failed.length===0) S.lastRefreshed = new Date().toISOString();
+  sv('scores', S.scores); sv('scoresFetched', S.scoresFetched); sv('scoresFinal', S.scoresFinal);
+  sv('meta', {lastRefreshed: S.lastRefreshed||null, currentGW: S.currentGW, lastBackup: S.lastBackup||null});
+  return {currentGW:currentGW, fetched:fetched, failed:failed, upToDate:needed.length===0};
+}
 async function refreshScores(){
   try{
-    // Get the REAL current gameweek from FPL's own bootstrap-static events array
-    // (is_current/finished flags), instead of asking the AI to guess today's gameweek.
-    var bootstrap = await fetchWithFallback(
-      "https://fantasy.premierleague.com/api/bootstrap-static/",
-      function(data){ return data && Array.isArray(data.elements) && Array.isArray(data.teams); },
-      function(){} // silent background refresh - no UI to report progress into
-    );
-    flagDepartedPlayers(bootstrap);
-    var events = bootstrap.events||[];
-    // Populate the gameweek -> calendar-month map from real FPL data, used by the monthly
-    // captain system to decide which month's nomination a given gameweek's doubling counts
-    // toward. deadline_time is shortly before kickoff of the gameweek's first game, which is
-    // what the rule is actually keyed on (even if later games in the same GW spill into the
-    // next calendar month).
-    events.forEach(function(e){
-      if(e.deadline_time){
-        S.gwMonthMap[e.id] = e.deadline_time.slice(0,7); // "YYYY-MM"
-      }
-    });
-    sv("gwMonthMap", S.gwMonthMap);
-    var currentEvt = events.find(function(e){ return e.is_current; });
-    var finishedIds = events.filter(function(e){ return e.finished; }).map(function(e){ return e.id; });
-    var currentGW = currentEvt ? currentEvt.id : (finishedIds.length ? Math.max.apply(null,finishedIds) : 1);
-    S.currentGW = currentGW;
-    // IMPORTANT: use data_checked, not finished, to decide whether a gameweek's scores
-    // are safe to stop re-fetching. FPL flips `finished` very soon after the last match
-    // ends, but bonus points (and any other stat corrections) aren't locked in until FPL
-    // separately marks the gameweek `data_checked` - which can be a day or more later.
-    // Caching on `finished` alone permanently freezes a pre-bonus score the moment it's
-    // first fetched, which is exactly what caused GW2 scores to stop matching the real
-    // FPL site even after multiple refreshes.
-    var dataCheckedSet = {};
-    events.forEach(function(e){ if(e.data_checked) dataCheckedSet[e.id]=true; });
-
-    var needed = [];
-    for(var g = currentGW; g >= 1; g--){
-      var isFinalized = !!dataCheckedSet[g];
-      if(!isFinalized || !S.scoresFetched[g]) needed.push(g);
-      // Only fetch up to 3 gameweeks per refresh to keep cost/time reasonable
-      if(needed.length >= 3) break;
-    }
-
-    var idToKey={};
-    getAllPlayers().forEach(function(p){ if(p.fplId!=null) idToKey[p.fplId]=p.name+"|"+p.club; });
-
-    for(var ni = 0; ni < needed.length; ni++){
-      var gw = needed[ni];
-      try{
-        var liveData = await fetchWithFallback(
-          "https://fantasy.premierleague.com/api/event/"+gw+"/live/",
-          function(data){ return data && Array.isArray(data.elements); },
-          function(){}
-        );
-        var mapped = {};
-        liveData.elements.forEach(function(el){
-          var key=idToKey[el.id];
-          if(!key) return;
-          mapped[key]=(el.stats&&el.stats.total_points)||0;
-        });
-        // Preserve any manually-overridden values for this gameweek rather than letting
-        // the real fetch silently clobber a correction the user deliberately made.
-        var overrides=S.scoreOverrides[gw]||{};
-        Object.keys(overrides).forEach(function(key){
-          if((S.scores[gw]||{})[key]!=null) mapped[key]=S.scores[gw][key];
-        });
-        S.scores[gw] = mapped;
-        S.scoresFetched[gw] = true;
-      }catch(e){
-        console.warn('GW ' + gw + ' scores failed:', e.message);
-      }
-    }
-
-    S.lastRefreshed = new Date().toISOString();
-    sv('scores', S.scores); sv('scoresFetched', S.scoresFetched);
-    sv('meta', {lastRefreshed: S.lastRefreshed, currentGW: S.currentGW});
-    return true;
+    var r = await refreshScoresCore();
+    return r.failed.length===0;
   }catch(e){
     console.error('Score refresh failed:', e.message);
     return false;
@@ -1688,7 +1721,9 @@ async function autoRefreshIfNeeded(){
   // the proxy chain and no longer calls the Anthropic API at all.
   checkSeasonEnd();
   checkThirdSubWindowPrompt();
-  var sixHours = 30 * 60 * 1000; // refresh if scores are more than 30 minutes old
+  // Admin devices keep scores fresh (30 min). Friends receive those via sync and only fetch
+  // themselves if everything is more than 2 hours old - avoids 14 phones hammering the proxy.
+  var sixHours = (CLOUD.isAdmin ? 30 : 120) * 60 * 1000;
   var lastRefresh = S.lastRefreshed ? new Date(S.lastRefreshed).getTime() : 0;
   if(Date.now() - lastRefresh < sixHours) return;
   // Silent background refresh - no toast on success, only on failure
@@ -2729,12 +2764,10 @@ function ownerPicksInOrder(ownerName){
   });
   numbered.sort(function(a,b){return a.n-b.n;});
   var keys=numbered.map(function(x){return x.key;});
-  if(unnumbered.length){
-    // keep pickedMap's own order for the stragglers, only for keys actually owned by this person
-    Object.keys(S.pickedMap).forEach(function(k){
-      if(S.pickedMap[k]===ownerName && unnumbered.indexOf(k)!==-1 && keys.indexOf(k)===-1) keys.push(k);
-    });
-  }
+  // Players without a pickNumber (late joiners, third-sub picks) were added in slot order,
+  // which is the order they sit in the team arrays. Do NOT use pickedMap order here: Firebase
+  // returns object keys alphabetically, so that order is meaningless after a cloud round-trip.
+  unnumbered.forEach(function(k){ if(keys.indexOf(k)===-1) keys.push(k); });
   if(!keys.length){
     // no team data to go on at all - fall back to the legacy behaviour
     keys=Object.keys(S.pickedMap).filter(function(k){return S.pickedMap[k]===ownerName;});
@@ -3311,94 +3344,25 @@ async function doRefreshScores(){
   msg+='<div class="spinner"><div class="dot"></div><div class="dot" style="animation-delay:0.2s"></div><div class="dot" style="animation-delay:0.4s"></div></div>';
   showModal(msg);
   function upd(t,col){ var el=document.getElementById("rfprog"); if(el){el.textContent=t; if(col)el.style.color=col;} }
-  // Local progress reporter for fetchWithFallback that writes into THIS modal instead of
-  // the player-loading screen's DOM (which isn't present here).
-  function modalProgress(label){ upd("Connecting via "+label+"..."); }
   try{
-    // Step 1: get the REAL current gameweek from FPL's own bootstrap-static events array
-    // (is_current/finished flags), instead of asking the AI to guess today's gameweek.
-    upd("Getting current gameweek from official FPL data...");
-    var bootstrap = await fetchWithFallback(
-      "https://fantasy.premierleague.com/api/bootstrap-static/",
-      function(data){ return data && Array.isArray(data.elements) && Array.isArray(data.teams); },
-      modalProgress
-    );
-    flagDepartedPlayers(bootstrap);
-    var events = bootstrap.events||[];
-    // Populate the gameweek -> calendar-month map from real FPL data, used by the monthly
-    // captain system to decide which month's nomination a given gameweek's doubling counts
-    // toward. deadline_time is shortly before kickoff of the gameweek's first game, which is
-    // what the rule is actually keyed on (even if later games in the same GW spill into the
-    // next calendar month).
-    events.forEach(function(e){
-      if(e.deadline_time){
-        S.gwMonthMap[e.id] = e.deadline_time.slice(0,7); // "YYYY-MM"
-      }
-    });
-    sv("gwMonthMap", S.gwMonthMap);
-    var currentEvt = events.find(function(e){ return e.is_current; });
-    var finishedIds = events.filter(function(e){ return e.finished; }).map(function(e){ return e.id; });
-    var cgw = currentEvt ? currentEvt.id : (finishedIds.length ? Math.max.apply(null,finishedIds) : 1);
-    S.currentGW=cgw;
-    // Same fix as the silent auto-refresh: cache on data_checked (FPL's real "fully
-    // final, bonus points settled" signal), not finished (which flips well before
-    // bonus points/stat corrections are locked in). Otherwise a refresh done shortly
-    // after full-time permanently freezes a pre-bonus score.
-    var dataCheckedSet = {};
-    events.forEach(function(e){ if(e.data_checked) dataCheckedSet[e.id]=true; });
-
-    var needed=[];
-    for(var g=cgw;g>=1;g--){
-      var isFinalized = !!dataCheckedSet[g];
-      if(!isFinalized || !S.scoresFetched[g]) needed.push(g);
-      if(needed.length>=3) break;
+    var r = await refreshScoresCore(function(t){ upd(t); });
+    if(r.failed.length){
+      upd("Some gameweeks could not be fetched (GW"+r.failed.join(", GW")+"). Try again in a minute.","#f59e0b");
+      var mc=document.getElementById("modal-content");
+      if(mc) mc.innerHTML+='<button class="btn btn-gray" style="margin-top:14px;" onclick="closeModal()">Close</button>';
+    } else if(r.upToDate){
+      upd("All up to date! GW"+r.currentGW,"#10b981");
+      setTimeout(closeModal,1500);
+    } else {
+      upd("Done! GW"+S.currentGW+" loaded from official FPL data.","#10b981");
+      setTimeout(closeModal,1500);
     }
-    if(needed.length===0){
-      upd("All up to date! GW"+cgw,"#10b981");
-      S.lastRefreshed=new Date().toISOString();
-      sv("meta",{lastRefreshed:S.lastRefreshed,currentGW:S.currentGW,lastBackup:S.lastBackup});
-      setTimeout(closeModal,1500); renderLeagueTab(); renderSettingsTab(); return;
-    }
-
-    // Build fplId -> playerKey lookup once from every drafted player (free-typed non-PL
-    // wildcards have no fplId and are intentionally excluded - they score 0 until subbed
-    // in, which is the existing, correct behaviour for those).
-    var idToKey={};
-    getAllPlayers().forEach(function(p){ if(p.fplId!=null) idToKey[p.fplId]=p.name+"|"+p.club; });
-
-    for(var ni=0;ni<needed.length;ni++){
-      var gw=needed[ni];
-      upd("Fetching GW"+gw+" scores ("+(ni+1)+"/"+needed.length+")...");
-      try{
-        var liveData = await fetchWithFallback(
-          "https://fantasy.premierleague.com/api/event/"+gw+"/live/",
-          function(data){ return data && Array.isArray(data.elements); },
-          modalProgress
-        );
-        var mapped={};
-        liveData.elements.forEach(function(el){
-          var key=idToKey[el.id];
-          if(!key) return; // player not on anyone's drafted roster - irrelevant to us
-          mapped[key]=(el.stats&&el.stats.total_points)||0;
-        });
-        // Preserve any manually-overridden values for this gameweek rather than letting
-        // the real fetch silently clobber a correction the user deliberately made.
-        var overrides=S.scoreOverrides[gw]||{};
-        Object.keys(overrides).forEach(function(key){
-          if((S.scores[gw]||{})[key]!=null) mapped[key]=S.scores[gw][key];
-        });
-        S.scores[gw]=mapped;
-        S.scoresFetched[gw]=true;
-      }catch(e2){ console.warn("GW"+gw+" failed: "+e2.message); }
-    }
-    S.lastRefreshed=new Date().toISOString();
-    sv("scores",S.scores); sv("scoresFetched",S.scoresFetched); sv("meta",{lastRefreshed:S.lastRefreshed,currentGW:S.currentGW});
-    upd("Done! GW"+S.currentGW+" loaded from official FPL data.","#10b981");
-    setTimeout(closeModal,1500); renderLeagueTab(); renderSettingsTab();
+    renderLeagueTab(); renderSettingsTab();
+    try{ updateHealthBanner(); }catch(e){}
   }catch(e){
     upd("Failed: "+e.message,"#ef4444");
-    var mc=document.getElementById("modal-content");
-    if(mc) mc.innerHTML+='<button class="btn btn-gray" style="margin-top:14px;" onclick="closeModal()">Close</button>';
+    var mc2=document.getElementById("modal-content");
+    if(mc2) mc2.innerHTML+='<button class="btn btn-gray" style="margin-top:14px;" onclick="closeModal()">Close</button>';
   }
 }
 
@@ -3639,6 +3603,90 @@ function exportTeamsCSV(){
   showToast("Teams exported! Opens directly in Excel/Sheets.");
 }
 
+// ── DATA HEALTH CHECKS ─────────────────────────────────────────────────────────
+// One place that decides whether the league data is internally consistent. Used by the
+// Excel report's Data Checks sheet AND the admin-only on-screen warning.
+//   structural = real integrity problems (shown in the warning pill)
+//   advisory   = things that simply need doing (e.g. a captain still to be chosen)
+function runDataChecks(){
+  var owners=(S.draftOrder||[]).slice();
+  var pk=function(p){return p.name+"|"+p.club;};
+  var rows=[["Person","Check","Result","Detail"]];
+  var structural=[], advisory=[];
+  function add(o,c,ok,d,kind){
+    rows.push([o,c,ok?"OK":(kind==="advisory"?"TO DO":"PROBLEM"),d||""]);
+    if(!ok){ (kind==="advisory"?advisory:structural).push((o?o+": ":"")+c+(d?" - "+d:"")); }
+  }
+  (S.shapeIssues||[]).forEach(function(m){ add("(league)","Data format",false,m); });
+  owners.forEach(function(o){
+    var t=S.teams[o]||{}, keys=[];
+    ["GK","DEF","MID","ATT","WC"].forEach(function(pos){(t[pos]||[]).forEach(function(p){keys.push(pk(p));});});
+    add(o,"Squad size is 17",keys.length===17,keys.length+" players","advisory");
+    var firstPick=(S.lateJoiners&&S.lateJoiners[o])?null:ownerPicksInOrder(o)[0];
+    var caps=S.captainMonths[o]||[];
+    var seen={}, dup=false; caps.forEach(function(e){ if(seen[e.month]) dup=true; seen[e.month]=1; });
+    add(o,"One captain per month",!dup,dup?"duplicate month entry":"");
+    var bad=[], budget={};
+    caps.forEach(function(e){
+      var k=pk(e.player); budget[k]=(budget[k]||0)+1;
+      if(keys.indexOf(k)===-1) bad.push(e.player.name+" ("+e.month+") not in squad");
+      if(firstPick&&k===firstPick) bad.push(e.player.name+" ("+e.month+") is first pick");
+    });
+    Object.keys(budget).forEach(function(k){ if(budget[k]>CAPTAIN_BUDGET_MONTHS) bad.push(k.split("|")[0]+" captained "+budget[k]+" months"); });
+    add(o,"Captains valid (in squad, not first pick, max 3 months)",bad.length===0,bad.join("; "));
+    var curCap=getCaptainForGW(o,S.currentGW);
+    var why=curCap?"":(noCaptainReason(o,S.currentGW)||("none set for "+(S.gwMonthMap[S.currentGW]||"?")));
+    add(o,"Has a captain for the current gameweek",!!curCap,curCap?curCap.name:why,"advisory");
+    var sbad=[];
+    (S.wildcardSubs[o]||[]).forEach(function(s2){
+      if(!s2||!s2.inPlayer||!s2.outPlayer){ sbad.push("incomplete sub entry"); return; }
+      if(keys.indexOf(pk(s2.inPlayer))===-1) sbad.push(s2.inPlayer.name+" (in) not in squad");
+      if(keys.indexOf(pk(s2.outPlayer))===-1) sbad.push(s2.outPlayer.name+" (out) not in squad");
+    });
+    add(o,"Subs reference players in the squad",sbad.length===0,sbad.join("; "));
+    var pbad=[];
+    keys.forEach(function(k){ if(S.pickedMap[k]!==o) pbad.push(k+" not marked picked by "+o); });
+    Object.keys(S.pickedMap).forEach(function(k){ if(S.pickedMap[k]===o&&keys.indexOf(k)===-1) pbad.push(k+" marked picked but not in squad"); });
+    add(o,"Squad matches picked list",pbad.length===0,pbad.join("; "));
+  });
+  return {rows:rows, structural:structural, advisory:advisory};
+}
+// Admin-only warning pill: shown only when something structural is wrong. Tap for details.
+function updateHealthBanner(){
+  var b=document.getElementById("health-banner");
+  var show=false, n=0;
+  try{
+    if(CLOUD.isAdmin && S.draftDone && (S.draftOrder||[]).length){
+      var r=runDataChecks(); n=r.structural.length; show=n>0;
+    }
+  }catch(e){ console.log("health check failed",e); }
+  if(!show){ if(b) b.style.display="none"; return; }
+  if(!b){
+    b=document.createElement("div"); b.id="health-banner";
+    b.style.cssText="position:fixed;bottom:70px;left:10px;z-index:998;background:#991b1b;color:#fff;font-size:12px;font-weight:700;padding:7px 12px;border-radius:16px;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.4);";
+    b.onclick=openDataHealthModal;
+    document.body.appendChild(b);
+  }
+  b.textContent="\u26A0 "+n+" data problem"+(n===1?"":"s")+" - tap";
+  b.style.display="block";
+}
+function openDataHealthModal(){
+  var r=runDataChecks();
+  var html='<h3>Data Health</h3>';
+  if(!r.structural.length) html+='<div style="color:#10b981;font-size:13px;margin-bottom:10px;">&#x2705; No data problems found.</div>';
+  else{
+    html+='<div style="color:#f87171;font-size:13px;font-weight:700;margin-bottom:6px;">Problems</div>';
+    r.structural.forEach(function(m){ html+='<div class="roster-slot" style="font-size:12px;margin-bottom:6px;">'+m.replace(/</g,"&lt;")+'</div>'; });
+  }
+  if(r.advisory.length){
+    html+='<div style="color:#fbbf24;font-size:13px;font-weight:700;margin:10px 0 6px;">To do</div>';
+    r.advisory.forEach(function(m){ html+='<div class="roster-slot" style="font-size:12px;margin-bottom:6px;">'+m.replace(/</g,"&lt;")+'</div>'; });
+  }
+  html+='<button class="btn btn-blue" style="margin-top:12px;" onclick="closeModal();exportChangeReport()">Export Change Report (Excel)</button>';
+  html+='<button class="btn btn-gray" style="margin-top:8px;" onclick="closeModal()">Close</button>';
+  showModal(html);
+}
+
 // ── CHANGE REPORT (Excel) ──────────────────────────────────────────────────────
 // Builds a shareable .xlsx: the change log, a week-by-week captain/sub timeline per person,
 // a captains-by-month grid, a subs list and automatic data checks. Everything except the log
@@ -3686,41 +3734,11 @@ function buildChangeReportData(){
       subRows.push([o,s.outPlayer.name,s.inPlayer.name,s.gameweek,l&&l.t?l.t.replace("T"," ").slice(0,19):"not recorded"]);
     });
   });
-  // 5. Data checks
-  var chk=[["Person","Check","Result","Detail"]];
-  var issues=0;
-  function add(o,c,ok,d){ chk.push([o,c,ok?"OK":"PROBLEM",d||""]); if(!ok) issues++; }
-  owners.forEach(function(o){
-    var t=S.teams[o]||{}, keys=[];
-    ["GK","DEF","MID","ATT","WC"].forEach(function(pos){(t[pos]||[]).forEach(function(p){keys.push(pk(p));});});
-    var count=keys.length;
-    add(o,"Squad size is 17",count===17,count+" players");
-    var firstPick=(S.lateJoiners&&S.lateJoiners[o])?null:ownerPicksInOrder(o)[0];
-    var caps=S.captainMonths[o]||[];
-    var seen={}, dup=false; caps.forEach(function(e){ if(seen[e.month]) dup=true; seen[e.month]=1; });
-    add(o,"One captain per month",!dup,dup?"duplicate month entry":"");
-    var bad=[]; var budget={};
-    caps.forEach(function(e){
-      var k=pk(e.player); budget[k]=(budget[k]||0)+1;
-      if(keys.indexOf(k)===-1) bad.push(e.player.name+" ("+e.month+") not in squad");
-      if(firstPick&&k===firstPick) bad.push(e.player.name+" ("+e.month+") is first pick");
-    });
-    Object.keys(budget).forEach(function(k){ if(budget[k]>CAPTAIN_BUDGET_MONTHS) bad.push(k.split("|")[0]+" captained "+budget[k]+" months"); });
-    add(o,"Captains valid (in squad, not first pick, max 3 months)",bad.length===0,bad.join("; "));
-    var curCap=getCaptainForGW(o,S.currentGW);
-    add(o,"Has a captain for the current gameweek",!!curCap,curCap?curCap.name:"none set for "+(S.gwMonthMap[S.currentGW]||"?"));
-    var sbad=[];
-    (S.wildcardSubs[o]||[]).forEach(function(s){
-      if(keys.indexOf(pk(s.inPlayer))===-1) sbad.push(s.inPlayer.name+" (in) not in squad");
-      if(keys.indexOf(pk(s.outPlayer))===-1) sbad.push(s.outPlayer.name+" (out) not in squad");
-    });
-    add(o,"Subs reference players in the squad",sbad.length===0,sbad.join("; "));
-    var pbad=[];
-    keys.forEach(function(k){ if(S.pickedMap[k]!==o) pbad.push(k+" not marked picked by "+o); });
-    Object.keys(S.pickedMap).forEach(function(k){ if(S.pickedMap[k]===o&&keys.indexOf(k)===-1) pbad.push(k+" marked picked but not in squad"); });
-    add(o,"Squad matches picked list",pbad.length===0,pbad.join("; "));
-  });
-  var summary=[["Draft Advisor – Change Report"],["Generated (UTC)",new Date().toISOString().replace("T"," ").slice(0,19)],["App version",APP_VERSION],["Current gameweek",S.currentGW],["Changes logged",(S.changeLog||[]).length],["Data check problems",issues],[],["Sheets: Change Log, GW Timeline, Captains by Month, Subs, Data Checks"],["Note: changes made before logging began have no recorded date; GW Timeline and Data Checks still reflect them."]];
+  // 5. Data checks (shared with the on-screen Data Health warning)
+  var dcr=runDataChecks();
+  var chk=dcr.rows;
+  var issues=dcr.structural.length;
+  var summary=[["Draft Advisor – Change Report"],["Generated (UTC)",new Date().toISOString().replace("T"," ").slice(0,19)],["App version",APP_VERSION],["Current gameweek",S.currentGW],["Changes logged",(S.changeLog||[]).length],["Data check problems",issues],["Things still to do",dcr.advisory.length],[],["Sheets: Change Log, GW Timeline, Captains by Month, Subs, Data Checks"],["Note: changes made before logging began have no recorded date; GW Timeline and Data Checks still reflect them."]];
   return {summary:summary,log:logRows,timeline:tl,captains:cm,subs:subRows,checks:chk,issues:issues};
 }
 function exportChangeReport(){
@@ -3876,6 +3894,7 @@ function renderSettingsTab(){
   html+='<button class="btn btn-gray" style="margin-bottom:8px;" onclick="restoreAutoBackup()">&#x1F504; Restore Silent Auto-Backup</button>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #22c55e;color:#4ade80;" onclick="exportTeamsCSV()">&#x1F4CA; Export All Teams (CSV/Excel)</button>';
   html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #22c55e;color:#4ade80;" onclick="exportChangeReport()">&#x1F4D1; Export Change Report (Excel)</button>';
+  html+='<button class="btn btn-gray" style="margin-bottom:8px;border:1px solid #22c55e;color:#4ade80;" onclick="openDataHealthModal()">&#x1FA7A; Data Health Check</button>';
   html+='<div style="color:#8b949e;font-size:11px;margin-bottom:8px;">'+(S.changeLog||[]).length+' change(s) logged. Report includes change log, week-by-week captain/sub timeline and data checks.</div>';
   html+='</div>';
 
