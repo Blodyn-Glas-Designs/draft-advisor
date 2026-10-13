@@ -401,7 +401,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-10-13.2";
+const APP_VERSION = "2026-10-13.3";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -4944,12 +4944,25 @@ var totwGW=null;
 
 function getBestXI(gwNum){
   var slots={GK:1,DEF:4,MID:4,ATT:2},result=[];
-  Object.keys(slots).forEach(function(pos){
-    var count=slots[pos],candidates=[];
-    S.draftOrder.forEach(function(name){
-      var team=S.teams[name]||{};
+  var pool={GK:[],DEF:[],MID:[],ATT:[]};
+  S.draftOrder.forEach(function(name){
+    var team=S.teams[name]||{};
+    var subs=S.wildcardSubs[name]||[];
+    ["GK","DEF","MID","ATT","WC"].forEach(function(pos){
       (team[pos]||[]).forEach(function(p){
         var key=p.name+"|"+p.club;
+        var subOut=subs.find(function(s){return (s.outPlayer.name+"|"+s.outPlayer.club)===key;});
+        var subIn=subs.find(function(s){return (s.inPlayer.name+"|"+s.inPlayer.club)===key;});
+        var slotPos=pos;
+        if(pos==="WC"){
+          // A bench (wildcard) player only counts once subbed in, and in their own position.
+          if(!subIn) return;
+          if(gwNum!==null && gwNum<subIn.gameweek) return;
+          slotPos=p.position;
+        } else if(gwNum!==null && subOut && gwNum>=subOut.gameweek){
+          return; // subbed out: no longer part of this team for this gameweek
+        }
+        if(!pool[slotPos]) return;
         var pts;
         if(gwNum===null){
           pts=getPlayerPts(key,name); // season total - getPlayerPts already doubles captain months internally
@@ -4959,11 +4972,14 @@ function getBestXI(gwNum){
           var isCap=capThisGW&&(capThisGW.name+"|"+capThisGW.club)===key;
           pts=isCap?raw*2:raw;
         }
-        candidates.push({name:p.name,club:p.club,pos:pos,owner:name,pts:pts,key:key});
+        pool[slotPos].push({name:p.name,club:p.club,pos:slotPos,owner:name,pts:pts,key:key});
       });
     });
+  });
+  Object.keys(slots).forEach(function(pos){
+    var candidates=pool[pos];
     candidates.sort(function(a,b){return b.pts!==a.pts?b.pts-a.pts:a.name.localeCompare(b.name);});
-    result=result.concat(candidates.slice(0,count));
+    result=result.concat(candidates.slice(0,slots[pos]));
   });
   return result;
 }
