@@ -401,7 +401,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-10-18.1";
+const APP_VERSION = "2026-10-18.2";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -752,9 +752,18 @@ function fbStartListening(){
 // straight back to the cloud. Only touches a key if the incoming value actually differs from
 // what's already stored locally, so this is safe to call on every remote update and never
 // fights with a save that's mid-flight on this device.
+// Order-insensitive comparison. Firebase hands objects back with their keys sorted, so a plain
+// JSON.stringify comparison called an UNCHANGED value "different" just because key order
+// differed - which made every echo of this device's own write look like a remote change.
+function stableStr(v){
+  if(v===null || typeof v!=="object") return JSON.stringify(v===undefined?null:v);
+  if(Array.isArray(v)) return "["+v.map(stableStr).join(",")+"]";
+  return "{"+Object.keys(v).sort().map(function(k){ return JSON.stringify(k)+":"+stableStr(v[k]); }).join(",")+"}";
+}
 function fbApplyRemote(remote){
   CLOUD.applyingRemote=true;
   try{
+    var changedAny=false;
     Object.keys(remote).forEach(function(k){
       var incoming=fbUnsanitizeFromCloud(remote[k]);
       var current=ld(k,undefined);
@@ -768,11 +777,17 @@ function fbApplyRemote(remote){
         incoming.myName=currentCfg.myName||"";
         incoming.apiKey=currentCfg.apiKey||"";
       }
-      if(JSON.stringify(incoming)===JSON.stringify(current)) return;
+      if(stableStr(incoming)===stableStr(current)) return;
       _origSv(k,incoming);
+      changedAny=true;
     });
     // A deleted Firebase node simply disappears from the snapshot - treat a missing freeze flag as "off".
-    if(remote.freeze===undefined && ld("freeze",false)) _origSv("freeze",false);
+    if(remote.freeze===undefined && ld("freeze",false)){ _origSv("freeze",false); changedAny=true; }
+    // Nothing genuinely new => this is just Firebase echoing a write this device made. Do NOT
+    // reload from storage then: an action that changes several saved items one after another
+    // (repairing clubs, approving a request, syncing clubs...) would have its unsaved in-memory
+    // changes silently overwritten by the older stored copies after its first save.
+    if(!changedAny) return;
     loadAll();
     updateFreezeBanner();
     try{ updateHealthBanner(); }catch(e){}
