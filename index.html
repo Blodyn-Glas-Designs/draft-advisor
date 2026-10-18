@@ -401,7 +401,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-10-18.2";
+const APP_VERSION = "2026-10-19.1";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -3963,7 +3963,7 @@ function renderSettingsTab(){
     el.innerHTML=fhtml;
     return;
   }
-  var html='<div style="display:flex;flex-direction:column;flex:1;overflow:hidden;"><div style="padding:10px 14px 0;flex-shrink:0;"><input class="inp" id="pool-srch" placeholder="Search players or clubs..." oninput="searchQuery=this.value;renderPoolTab();" value="'+searchQuery+'"></div><div style="padding:14px;overflow-y:auto;flex:1;">';
+  var html='<div style="display:flex;flex-direction:column;flex:1;overflow:hidden;"><div style="flex-shrink:0;"></div><div style="padding:14px;overflow-y:auto;flex:1;">';
   html+='<div class="sec-hdr">Settings</div>';
   html+='<div class="card">';
   html+='<label class="lbl" style="margin-top:0;">Anthropic API Key</label>';
@@ -5679,6 +5679,10 @@ function renderWelcomeScreen(){
   }
 
   btns.innerHTML = html;
+  // The buttons sit in a 2-column grid. If the normal-width buttons come to an odd number, the
+  // last one (Settings) would sit alone at half width - make it span the row so the grid is even.
+  var normal=[].slice.call(btns.children).filter(function(b){ return (b.getAttribute("style")||"").indexOf("grid-column")===-1; });
+  if(normal.length%2===1) normal[normal.length-1].style.gridColumn="1 / -1";
 }
 
 // Neon button colours for welcome screen - Arcane palette
@@ -5814,6 +5818,25 @@ document.addEventListener("visibilitychange",function(){
   try{ if(S.draftDone) autoRefreshIfNeeded(); }catch(e){}
 });
 
+
+// ── VIEWPORT FIX (bottom nav going missing) ────────────────────────────────────
+// On iPhone home-screen apps the page can start up (especially right after an automatic
+// reload for a new version) believing the screen is taller or shorter than it really is, or be
+// left scrolled a few pixels after the keyboard closes - either pushes the bottom navigation off
+// the visible screen until the app is closed and reopened. Pin the app to the real visible height
+// and re-check it whenever the screen could have changed.
+function fixAppHeight(){
+  try{
+    var app=document.getElementById("app"); if(!app) return;
+    var h=window.innerHeight; if(h && h>200) app.style.height=h+"px";
+    if(window.scrollY||document.documentElement.scrollTop||document.body.scrollTop) window.scrollTo(0,0);
+  }catch(e){}
+}
+["resize","orientationchange","pageshow","load","DOMContentLoaded"].forEach(function(ev){ window.addEventListener(ev,fixAppHeight); });
+document.addEventListener("visibilitychange",function(){ if(document.visibilityState==="visible"){ fixAppHeight(); setTimeout(fixAppHeight,300); } });
+document.addEventListener("focusout",function(){ setTimeout(fixAppHeight,120); setTimeout(fixAppHeight,500); });
+[0,150,600,1500,3000].forEach(function(ms){ setTimeout(fixAppHeight,ms); });
+
 // ── POOL TAB ───────────────────────────────────────────────────────────────────
 var poolClubFilter="ALL",poolPosFilter="ALL",poolSort="pts_desc",poolShow="all";
 var posFilter="ALL";
@@ -5826,7 +5849,7 @@ function renderPoolTab(){
   var el=document.getElementById("tab-pool");
   if(!el) return;
   var allPlayers=S.playerPool.slice();
-  if(searchQuery&&searchQuery.length>1){
+  if(searchQuery&&searchQuery.length>0){
     var sq=searchQuery.toLowerCase();
     allPlayers=allPlayers.filter(function(p){return p.name.toLowerCase().includes(sq)||p.club.toLowerCase().includes(sq);});
   }
@@ -5860,7 +5883,9 @@ function renderPoolTab(){
   });
 
   var posColors={GK:"#f59e0b",DEF:"#3b82f6",MID:"#10b981",ATT:"#ef4444"};
-  var html='<div style="display:flex;flex-direction:column;flex:1;overflow:hidden;"><div style="padding:10px 14px 0;flex-shrink:0;"><input class="inp" id="pool-srch" placeholder="Search players or clubs..." oninput="searchQuery=this.value;renderPoolTab();" value="'+searchQuery+'"></div><div style="padding:14px;overflow-y:auto;flex:1;">';
+  // Only the RESULTS are rebuilt while typing. The search box itself is created once and never
+  // replaced - replacing it on every keystroke is what dismissed the keyboard after each letter.
+  var html='';
 
   // Summary strip
   html+='<div class="stat-grid" style="margin-bottom:12px;">'
@@ -5916,8 +5941,12 @@ function renderPoolTab(){
   });
 
   if(filtered.length===0) html+='<div style="padding:30px;text-align:center;color:#484f58;">No players match these filters</div>';
-  html+='</div></div>';
-  el.innerHTML=html;
+  var resultsEl=document.getElementById("pool-results");
+  if(resultsEl && document.getElementById("pool-srch") && el.contains(resultsEl)){
+    resultsEl.innerHTML=html; // keep the existing search box (and the keyboard) untouched
+  } else {
+    el.innerHTML='<div style="display:flex;flex-direction:column;flex:1;overflow:hidden;"><div style="padding:10px 14px 0;flex-shrink:0;"><input class="inp" id="pool-srch" placeholder="Search players or clubs..." oninput="searchQuery=this.value;renderPoolTab();" value="'+searchQuery.replace(/"/g,"&quot;")+'" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></div><div id="pool-results" style="padding:14px;overflow-y:auto;flex:1;">'+html+'</div></div>';
+  }
 }
 
 // ── ENHANCED STATS ─────────────────────────────────────────────────────────────
