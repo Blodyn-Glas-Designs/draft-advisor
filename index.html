@@ -401,7 +401,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-10-13.3";
+const APP_VERSION = "2026-10-18.1";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -501,7 +501,11 @@ var FB_CONFIG = {
 // choice now goes into a holding pen (pendingCaptains/pendingWildcardSubs) instead of
 // applying directly. Only admin ever writes the real captainMonths/wildcardSubs data (on
 // approval), which is unrestricted for admin regardless of this list.
-var FB_OWNER_SPLIT_KEYS = {teams:true, pendingCaptains:true, pendingWildcardSubs:true};
+// NOTE: "teams" is deliberately NOT here. Squads are admin-only data; a friend's phone only ever
+// submits captain/sub REQUESTS. Letting a friend device write its own squad slice meant any
+// phone holding an older copy (e.g. before a club correction) could silently push the stale
+// squad back over the admin's fix - the cause of clubs "resetting" (Marmoush back to Man City).
+var FB_OWNER_SPLIT_KEYS = {pendingCaptains:true, pendingWildcardSubs:true};
 var CLOUD = {uid:null, ownerName:null, isAdmin:false, ready:false, applyingRemote:false};
 var _fbListenersStarted=false;
 
@@ -3477,12 +3481,13 @@ async function doSyncPlayerClubs(){
     var clubById={};
     bootstrap.elements.forEach(function(el){ clubById[el.id]=teamNameById[el.team]; });
 
-    var changes=[];
+    var changes=[], renames=[], renSeen={};
     function syncPlayer(p, ownerLabel){
       if(p.fplId==null) return; // non-PL free-typed entries have no fplId - not applicable
       var realClub=clubById[p.fplId];
       if(!realClub || realClub===p.club) return;
       changes.push(ownerLabel+": "+p.name+" ("+p.club+" → "+realClub+")");
+      if(ownerLabel!=="Pool" && !renSeen[p.fplId+"|"+p.club]){ renSeen[p.fplId+"|"+p.club]=true; renames.push({name:p.name,fplId:p.fplId,oldClub:p.club,newClub:realClub}); }
       p.club=realClub;
     }
     S.playerPool.forEach(function(p){ syncPlayer(p,"Pool"); });
@@ -3499,6 +3504,9 @@ async function doSyncPlayerClubs(){
       return;
     }
 
+    // carry each squad player's club change through the picked list, every gameweek's scores,
+    // captain months, subs and pending requests, so no history is orphaned under the old club
+    applyClubRenames(renames,false);
     sv("pool",S.playerPool); sv("teams",S.teams);
     upd("Updated "+changes.length+" club record(s):","#10b981");
     var mc=document.getElementById("modal-content");
@@ -3603,6 +3611,120 @@ function exportTeamsCSV(){
   showToast("Teams exported! Opens directly in Excel/Sheets.");
 }
 
+// ── CLUB CHANGES: keep every "Name|Club" reference in step ───────────────────────
+// A player is identified everywhere by "Name|Club" (squads, picked list, captains, subs,
+// every gameweek's scores). When a player's club changes, ALL of those must change together
+// or history detaches from the player (their old points vanish, a captain stops doubling).
+// list = [{name, fplId, oldClub, newClub}]. dryRun=true only counts what WOULD change.
+function applyClubRenames(list, dryRun){
+  var cnt={picked:0,scores:0,objects:0};
+  if(!list||!list.length) return cnt;
+  var byOld={}; list.forEach(function(r){ byOld[r.name+"|"+r.oldClub]=r; });
+  // picked list - rebuilt so its order is preserved
+  var keep={}, moved=[];
+  Object.keys(S.pickedMap||{}).forEach(function(k){
+    var r=byOld[k];
+    if(r){ cnt.picked++; moved.push([r.name+"|"+r.newClub,S.pickedMap[k]]); } else keep[k]=S.pickedMap[k];
+  });
+  // scores + overrides, every gameweek (new key wins if both somehow exist)
+  [S.scores,S.scoreOverrides].forEach(function(m){
+    Object.keys(m||{}).forEach(function(gw){
+      var g=m[gw]; if(!g||typeof g!=="object") return;
+      Object.keys(g).forEach(function(k){
+        var r=byOld[k]; if(!r) return;
+        cnt.scores++;
+        if(dryRun) return;
+        var nk=r.name+"|"+r.newClub;
+        if(!(nk in g)) g[nk]=g[k];
+        delete g[k];
+      });
+    });
+  });
+  // player objects stored inside captains, subs, pending requests, legacy captain data
+  function walk(o,depth){
+    if(!o||typeof o!=="object"||depth>8) return;
+    if(Array.isArray(o)){ o.forEach(function(x){ walk(x,depth+1); }); return; }
+    if(typeof o.name==="string" && typeof o.club==="string"){
+      var r=byOld[o.name+"|"+o.club];
+      if(r && (o.fplId==null || o.fplId===r.fplId)){ cnt.objects++; if(!dryRun) o.club=r.newClub; }
+    }
+    Object.keys(o).forEach(function(k){ if(o[k] && typeof o[k]==="object") walk(o[k],depth+1); });
+  }
+  [S.captainMonths,S.wildcardSubs,S.pendingCaptains,S.pendingWildcardSubs,S.captains,S.captainHistory,S.thirdSubPicks].forEach(function(x){ walk(x,0); });
+  if(dryRun) return cnt;
+  moved.forEach(function(m){ if(!(m[0] in keep)) keep[m[0]]=m[1]; });
+  S.pickedMap=keep;
+  if(cnt.picked||cnt.scores||cnt.objects){
+    sv("picked",S.pickedMap); sv("scores",S.scores); sv("scoreOverrides",S.scoreOverrides);
+    sv("captainMonths",S.captainMonths); sv("wildcards",S.wildcardSubs);
+    sv("pendingCaptains",S.pendingCaptains); sv("pendingWildcardSubs",S.pendingWildcardSubs);
+    sv("captains",S.captains); sv("captainHistory",S.captainHistory);
+    sv("thirdSub",{window:S.thirdSubWindow,priorityOrder:S.thirdSubPriorityOrder,turnIdx:S.thirdSubTurnIdx,picks:S.thirdSubPicks});
+  }
+  return cnt;
+}
+// Works out which club changes have NOT yet been carried through the history, by comparing
+// each current squad player with (1) the post-draft snapshot, (2) player copies stored in
+// captains/subs, and (3) score keys left under an old club. Returns only renames that would
+// actually change something, and never touches a key that belongs to a current squad player.
+function deriveClubRenames(){
+  var list=[], seenRename={};
+  var squadKeys={}, squad=[];
+  (S.draftOrder||[]).forEach(function(o){
+    var t=S.teams[o]||{};
+    ["GK","DEF","MID","ATT","WC"].forEach(function(pos){ (t[pos]||[]).forEach(function(p){ squadKeys[p.name+"|"+p.club]=true; if(p.fplId!=null) squad.push(p); }); });
+  });
+  var clubsById={};
+  function note(id,club){ if(id==null||!club) return; (clubsById[id]=clubsById[id]||{})[club]=true; }
+  var snap=S.postDraftSnapshot&&S.postDraftSnapshot.teams;
+  if(snap) Object.keys(snap).forEach(function(o){ ["GK","DEF","MID","ATT","WC"].forEach(function(pos){ (snap[o][pos]||[]).forEach(function(p){ note(p.fplId,p.club); }); }); });
+  function walk(o,d){
+    if(!o||typeof o!=="object"||d>8) return;
+    if(Array.isArray(o)){ o.forEach(function(x){ walk(x,d+1); }); return; }
+    if(typeof o.name==="string"&&typeof o.club==="string") note(o.fplId,o.club);
+    Object.keys(o).forEach(function(k){ if(o[k]&&typeof o[k]==="object") walk(o[k],d+1); });
+  }
+  [S.captainMonths,S.wildcardSubs,S.pendingCaptains,S.pendingWildcardSubs].forEach(function(x){ walk(x,0); });
+  squad.forEach(function(p){
+    var olds=Object.keys(clubsById[p.fplId]||{}).filter(function(c){ return c!==p.club; });
+    if(!olds.length){
+      // fall back to score history: a key with this player's name under another club, in an
+      // earlier gameweek, that no current squad player owns, while the current key has none
+      var found={}, curHasEarly=false;
+      Object.keys(S.scores||{}).forEach(function(gw){
+        if(+gw>=S.currentGW) return;
+        Object.keys(S.scores[gw]||{}).forEach(function(k){
+          if(k===p.name+"|"+p.club) curHasEarly=true;
+          else if(k.indexOf(p.name+"|")===0 && !squadKeys[k]) found[k.slice(p.name.length+1)]=true;
+        });
+      });
+      if(!curHasEarly) olds=Object.keys(found);
+    }
+    olds.forEach(function(oc){
+      if(squadKeys[p.name+"|"+oc]) return;
+      var id=p.fplId+"|"+oc; if(seenRename[id]) return; seenRename[id]=true;
+      list.push({name:p.name,fplId:p.fplId,oldClub:oc,newClub:p.club});
+    });
+  });
+  return list.filter(function(r){ var c=applyClubRenames([r],true); return (c.picked+c.scores+c.objects)>0; });
+}
+function openClubRepairConfirm(){
+  var list=deriveClubRenames();
+  if(!list.length){ showToast("Nothing to repair."); return; }
+  var html='<h3>Repair club links</h3><p style="color:#8b949e;font-size:13px;margin-bottom:10px;">These players changed club. Their old points, captain months, subs and picked-list entries will be moved to the new club so nothing is lost. No squad or score values change.</p>';
+  html+='<div style="max-height:220px;overflow-y:auto;background:#0d1117;border:1px solid #30363d;border-radius:8px;padding:8px 10px;margin-bottom:12px;font-size:12px;color:#8b949e;">'+list.map(function(r){ return r.name+': '+r.oldClub+' &rarr; '+r.newClub; }).join('<br>')+'</div>';
+  html+='<button class="btn btn-blue" onclick="doClubRepair()">Repair '+list.length+' player'+(list.length===1?'':'s')+'</button><button class="btn btn-gray" style="margin-top:8px;" onclick="closeModal()">Cancel</button>';
+  showModal(html);
+}
+function doClubRepair(){
+  if(CLOUD.ready && !CLOUD.isAdmin){ showToast("Admin only."); return; }
+  var list=deriveClubRenames();
+  var c=applyClubRenames(list,false);
+  closeModal();
+  showToast("Repaired "+list.length+" player(s): "+c.scores+" score entries, "+c.picked+" picked, "+c.objects+" captain/sub records.");
+  try{ renderMyTeamTab(); renderFriendsTab(); renderLeagueTab(); renderSettingsTab(); updateHealthBanner(); }catch(e){}
+}
+
 // ── DATA HEALTH CHECKS ─────────────────────────────────────────────────────────
 // One place that decides whether the league data is internally consistent. Used by the
 // Excel report's Data Checks sheet AND the admin-only on-screen warning.
@@ -3618,6 +3740,8 @@ function runDataChecks(){
     if(!ok){ (kind==="advisory"?advisory:structural).push((o?o+": ":"")+c+(d?" - "+d:"")); }
   }
   (S.shapeIssues||[]).forEach(function(m){ add("(league)","Data format",false,m); });
+  var clubFix=deriveClubRenames();
+  if(clubFix.length) add("(league)","Club changes not carried through history",false,clubFix.map(function(r){ return r.name+" ("+r.oldClub+" to "+r.newClub+")"; }).join("; ")+" - open Data Health and tap Repair");
   owners.forEach(function(o){
     var t=S.teams[o]||{}, keys=[];
     ["GK","DEF","MID","ATT","WC"].forEach(function(pos){(t[pos]||[]).forEach(function(p){keys.push(pk(p));});});
@@ -3682,6 +3806,7 @@ function openDataHealthModal(){
     html+='<div style="color:#fbbf24;font-size:13px;font-weight:700;margin:10px 0 6px;">To do</div>';
     r.advisory.forEach(function(m){ html+='<div class="roster-slot" style="font-size:12px;margin-bottom:6px;">'+m.replace(/</g,"&lt;")+'</div>'; });
   }
+  if(CLOUD.isAdmin && deriveClubRenames().length) html+='<button class="btn btn-blue" style="margin-top:12px;background:#b45309;" onclick="openClubRepairConfirm()">Repair club links</button>';
   html+='<button class="btn btn-blue" style="margin-top:12px;" onclick="closeModal();exportChangeReport()">Export Change Report (Excel)</button>';
   html+='<button class="btn btn-gray" style="margin-top:8px;" onclick="closeModal()">Close</button>';
   showModal(html);
