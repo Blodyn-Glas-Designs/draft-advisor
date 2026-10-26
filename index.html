@@ -401,7 +401,7 @@ const DB = "da_";
 // Bump this string every time a new build is shipped, so the welcome screen shows
 // which version is actually running on a given device - makes it easy to confirm a
 // fresh deploy actually took effect after clearing cache, vs. still seeing an old build.
-const APP_VERSION = "2026-10-19.1";
+const APP_VERSION = "2026-10-26.1";
 const SLOTS = {GK:2,DEF:5,MID:5,ATT:3,WC:2};
 // Real Premier League season-opener kickoff (Arsenal v Coventry, Fri 21 Aug 2026, 20:00
 // BST / 19:00 UTC - confirmed via the official fixture release, not guessed). Used to stop
@@ -2962,7 +2962,15 @@ function confirmSub(personName,wcIdx,outName,outClub,outPos,outIdx){
   html+='<div class="pname" style="margin-bottom:10px;">'+outPlayer.name+' <span style="color:#8b949e;font-size:12px;">('+outPlayer.club+')</span></div>';
   html+='<div style="color:#10b981;font-size:11px;text-transform:uppercase;letter-spacing:1px;margin-bottom:2px;">In</div>';
   html+='<div class="pname">'+wcPlayer.name+'</div>';
-  html+='<div style="color:#8b949e;font-size:11px;margin-top:4px;">Starts scoring from GW'+nextEffectiveWildcardGW()+'</div>';
+  var defGW=nextEffectiveWildcardGW();
+  if(CLOUD.isAdmin){
+    // Admin can backdate: e.g. a sub agreed before a gameweek but only entered in the app after it.
+    html+='<label class="lbl" style="margin-top:8px;">Starts scoring from</label><select class="inp" id="sub-eff-gw" style="margin-bottom:4px;">';
+    for(var eg=defGW; eg>=1; eg--){ html+='<option value="'+eg+'"'+(eg===defGW?' selected':'')+'>GW'+eg+(eg===defGW?' (next gameweek - default)':' (backdated)')+'</option>'; }
+    html+='</select><div style="color:#8b949e;font-size:11px;">Choosing an earlier gameweek re-scores that gameweek and any since: the player going out stops counting from it, the player coming in counts from it.</div>';
+  } else {
+    html+='<div style="color:#8b949e;font-size:11px;margin-top:4px;">Starts scoring from GW'+defGW+'</div>';
+  }
   html+='</div>';
   html+='<div class="confirm-btns"><button class="cb-yes" onclick="executeSub(\''+personName.replace(/'/g,"\\'")+'\','+wcIdx+',\''+outName.replace(/'/g,"\\'")+'\',\''+outClub.replace(/'/g,"\\'")+'\',\''+outPos+'\','+outIdx+')">&#x2713; Confirm Swap</button><button class="cb-no" onclick="closeModal()">Cancel</button></div>';
   showModal(html);
@@ -3001,10 +3009,13 @@ function executeSub(personName,wcIdx,outName,outClub,outPos,outIdx){
     return;
   }
   if(!S.wildcardSubs[personName]) S.wildcardSubs[personName]=[];
-  var _subGW=nextEffectiveWildcardGW();
+  var _defSubGW=nextEffectiveWildcardGW();
+  var _subGW=_defSubGW;
+  var _selGW=document.getElementById("sub-eff-gw");
+  if(_selGW){ var _v=parseInt(_selGW.value,10); if(_v>=1 && _v<=_defSubGW) _subGW=_v; }
   S.wildcardSubs[personName].push({inPlayer:wcPlayer,outPlayer:outPlayer,gameweek:_subGW,wcIdx:wcIdx,outPos:outPos,outIdx:outIdx});
   sv("wildcards",S.wildcardSubs);
-  logChange("Sub made", personName, outPlayer.name, wcPlayer.name, "GW"+_subGW, {submittedAt:window._logSubmittedAt||""});
+  logChange("Sub made", personName, outPlayer.name, wcPlayer.name, "GW"+_subGW, {submittedAt:window._logSubmittedAt||"", note:(_subGW<_defSubGW?"Backdated by admin (default would have been GW"+_defSubGW+")":"")});
   closeModal(); renderMyTeamTab();
   if(viewingFriend===personName) renderFriendDetail(document.getElementById("tab-friends"),personName);
 }
